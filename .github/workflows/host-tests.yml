@@ -1,0 +1,31 @@
+name: Host tests
+# The PE loader and the mini Win32 on x86-64 Linux: builds tests/testdll/ubtest.dll (our own
+# Windows test DLL) and runs it natively against UnityBridge's KERNEL32. No game files.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/host-tests.yml
+      - CMakeLists.txt
+      - loader/**
+      - win32/**
+      - tests/**
+      - tools/**
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Build tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q ninja-build clang lld llvm
+      - name: Build
+        run: |
+          cmake -S . -B build/host -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+          cmake --build build/host
+      - name: Test
+        run: |
+          ./build/host/win32-host-test build/host/testdll/ubtest.dll
+          ./build/host/ub-pe-inspect build/host/testdll/ubtest.dll

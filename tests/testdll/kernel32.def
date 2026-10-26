@@ -1,0 +1,22 @@
+LIBRARY KERNEL32.dll
+EXPORTS
+GetLastError
+SetLastError
+GetProcessHeap
+HeapAlloc
+HeapFree
+TlsAlloc
+TlsSetValue
+TlsGetValue
+InitializeCriticalSection
+EnterCriticalSection
+LeaveCriticalSection
+MultiByteToWideChar
+WideCharToMultiByte
+QueryPerformanceCounter
+QueryPerformanceFrequency
+GetModuleHandleW
+GetProcAddress
+VirtualAlloc
+VirtualFree
+UnityBridgeTestMissingFunction

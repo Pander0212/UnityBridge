@@ -46,3 +46,7 @@ UnmapViewOfFile
 DeleteFileW
 CreateDirectoryW
 RemoveDirectoryW
+LCMapStringW
+CompareStringW
+GetLocaleInfoW
+InterlockedFlushSList

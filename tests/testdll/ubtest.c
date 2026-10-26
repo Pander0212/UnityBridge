@@ -57,6 +57,11 @@ IMPORT BOOL DeleteFileW(const WCHAR*);
 IMPORT BOOL CreateDirectoryW(const WCHAR*, void*);
 IMPORT BOOL RemoveDirectoryW(const WCHAR*);
 
+IMPORT int LCMapStringW(DWORD, DWORD, const WCHAR*, int, WCHAR*, int);
+IMPORT int CompareStringW(DWORD, DWORD, const WCHAR*, int, const WCHAR*, int);
+IMPORT int GetLocaleInfoW(DWORD, DWORD, WCHAR*, int);
+IMPORT void* InterlockedFlushSList(void*);
+
 static int Append(WCHAR* to, int at, const char* text) {
   while (*text) to[at++] = (WCHAR)*text++;
   to[at] = 0;
@@ -274,6 +279,34 @@ __declspec(dllexport) int ub_test_all(void) {
     good &= DeleteFileW(file) && !DeleteFileW(file) && GetLastError() == 2;
     good &= RemoveDirectoryW(dir);
     if (good) ok |= 1 << 18;
+  }
+
+  // Locale: case mapping (incl. Latin Extended-A pairs of both parities), comparison, en-US.
+  {
+    int good = 1;
+    static const WCHAR in[] = {'a', 'b', 0xe4, 0x101, 0x13a, 0x17e, 0};   // a b ä ā ĺ ž
+    static const WCHAR up[] = {'A', 'B', 0xc4, 0x100, 0x139, 0x17d, 0};   // A B Ä Ā Ĺ Ž
+    WCHAR out[8] = {0};
+    good &= LCMapStringW(0x409, 0x200 /* LCMAP_UPPERCASE */, in, -1, out, 8) == 7;
+    for (int i = 0; i < 7; ++i) good &= out[i] == up[i];
+    good &= LCMapStringW(0x409, 0x100 /* LCMAP_LOWERCASE */, up, -1, out, 8) == 7;
+    for (int i = 0; i < 7; ++i) good &= out[i] == in[i];
+    static const WCHAR hello1[] = {'H','e','l','l','o',0}, hello2[] = {'h','E','L','L','O',0};
+    good &= CompareStringW(0x409, 0x1 /* NORM_IGNORECASE */, hello1, -1, hello2, -1) == 2;
+    good &= CompareStringW(0x409, 0, hello1, -1, hello2, -1) == 1;     // 'H' < 'h'
+    WCHAR name[16];
+    good &= GetLocaleInfoW(0x409, 0x5c /* LOCALE_SNAME */, name, 16) == 6 && name[0] == 'e' && name[2] == '-';
+    if (good) ok |= 1 << 19;
+  }
+
+  // InterlockedFlushSList on a hand-built x64 SLIST_HEADER with one entry.
+  {
+    static __declspec(align(16)) unsigned long long header[2];
+    static __declspec(align(16)) unsigned long long entry[2];
+    header[0] = (0x5ull << 16) | 1;                          // Sequence 5, Depth 1
+    header[1] = (unsigned long long)(void*)entry;            // NextEntry (address, low 4 bits zero)
+    void* first = InterlockedFlushSList(header);
+    if (first == entry && header[1] == 0 && (header[0] & 0xffff) == 0 && InterlockedFlushSList(header) == 0) ok |= 1 << 20;
   }
 
   return ok;

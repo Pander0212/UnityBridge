@@ -121,6 +121,7 @@ void RegisterOtherDlls(std::vector<Function>& out);
 void RegisterBaselib(std::vector<Function>& out);
 void RegisterKernel32Sync(std::vector<Function>& out);
 void RegisterKernel32Files(std::vector<Function>& out);
+void RegisterKernel32Misc(std::vector<Function>& out);
 
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);

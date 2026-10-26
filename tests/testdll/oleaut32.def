@@ -1,0 +1,12 @@
+LIBRARY OLEAUT32.dll
+EXPORTS
+SysAllocString @2 NONAME
+SysFreeString @6 NONAME
+SysStringLen @7 NONAME
+SafeArrayCreate @15 NONAME
+SafeArrayDestroy @16 NONAME
+SafeArrayGetUBound @19 NONAME
+SafeArrayGetLBound @20 NONAME
+SafeArrayAccessData @23 NONAME
+SafeArrayUnaccessData @24 NONAME
+SafeArrayGetVartype @77 NONAME

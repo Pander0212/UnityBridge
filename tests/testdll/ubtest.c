@@ -31,6 +31,23 @@ IMPORT void* VirtualAlloc(void*, unsigned long long, DWORD, DWORD);
 IMPORT BOOL VirtualFree(void*, unsigned long long, DWORD);
 IMPORT DWORD UnityBridgeTestMissingFunction(DWORD);  // deliberately not implemented
 
+// OLEAUT32 (imported by ordinal, see oleaut32.def), ADVAPI32, SHELL32.
+typedef struct { DWORD cElements; int lLbound; } SAFEARRAYBOUND;
+IMPORT WCHAR* SysAllocString(const WCHAR*);
+IMPORT void SysFreeString(WCHAR*);
+IMPORT unsigned SysStringLen(WCHAR*);
+IMPORT void* SafeArrayCreate(unsigned short, unsigned, SAFEARRAYBOUND*);
+IMPORT int SafeArrayDestroy(void*);
+IMPORT int SafeArrayGetUBound(void*, unsigned, int*);
+IMPORT int SafeArrayGetLBound(void*, unsigned, int*);
+IMPORT int SafeArrayAccessData(void*, void**);
+IMPORT int SafeArrayUnaccessData(void*);
+IMPORT int SafeArrayGetVartype(void*, unsigned short*);
+IMPORT BOOL CryptAcquireContextW(unsigned long long*, const WCHAR*, const WCHAR*, DWORD, DWORD);
+IMPORT BOOL CryptGenRandom(unsigned long long, DWORD, unsigned char*);
+IMPORT BOOL CryptReleaseContext(unsigned long long, DWORD);
+IMPORT int SHGetFolderPathW(void*, int, void*, DWORD, WCHAR*);
+
 int _fltused = 0;  // MSVC's marker that floating point is used; normally from the CRT
 
 static unsigned char g_cs[40];
@@ -99,6 +116,38 @@ __declspec(dllexport) int ub_test_all(void) {
   if (KeepAlive(3, 4, 1.0, 0.25) == 41) ok |= 1 << 10;
 
   if (g_textPointer == g_text && g_textPointer[0] == 'r') ok |= 1 << 11;
+
+  // BSTR: length prefix and terminator.
+  static const WCHAR hello[] = {'h','e','l','l','o',0};
+  WCHAR* bstr = SysAllocString(hello);
+  if (bstr && SysStringLen(bstr) == 5 && ((DWORD*)bstr)[-1] == 10 && bstr[5] == 0) ok |= 1 << 12;
+  SysFreeString(bstr);
+
+  // SAFEARRAY of int, 2 x 3 with lower bounds 1 and -1.
+  SAFEARRAYBOUND bounds[2] = {{2, 1}, {3, -1}};
+  void* sa = SafeArrayCreate(3 /* VT_I4 */, 2, bounds);
+  int lo1 = 0, hi1 = 0, lo2 = 0, hi2 = 0;
+  unsigned short vt = 0;
+  int* data = 0;
+  if (sa && SafeArrayGetLBound(sa, 1, &lo1) == 0 && SafeArrayGetUBound(sa, 1, &hi1) == 0 &&
+      SafeArrayGetLBound(sa, 2, &lo2) == 0 && SafeArrayGetUBound(sa, 2, &hi2) == 0 &&
+      lo1 == 1 && hi1 == 2 && lo2 == -1 && hi2 == 1 && SafeArrayGetVartype(sa, &vt) == 0 && vt == 3 &&
+      SafeArrayAccessData(sa, (void**)&data) == 0 && data) {
+    data[5] = 99;  // 6 elements, zeroed
+    if (data[0] == 0 && SafeArrayUnaccessData(sa) == 0 && SafeArrayGetUBound(sa, 3, &hi1) != 0) ok |= 1 << 13;
+  }
+  SafeArrayDestroy(sa);
+
+  unsigned long long provider = 0;
+  unsigned char random[32] = {0};
+  int nonzero = 0;
+  if (CryptAcquireContextW(&provider, 0, 0, 1, 0xf0000000u) && CryptGenRandom(provider, 32, random)) {
+    for (int i = 0; i < 32; ++i) nonzero |= random[i];
+    if (nonzero && CryptReleaseContext(provider, 0)) ok |= 1 << 14;
+  }
+
+  WCHAR folder[260];
+  if (SHGetFolderPathW(0, 0x1c /* CSIDL_LOCAL_APPDATA */, 0, 0, folder) == 0 && folder[0] == 'C' && folder[1] == ':') ok |= 1 << 15;
 
   return ok;
 }

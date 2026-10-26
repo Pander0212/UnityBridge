@@ -61,6 +61,7 @@ std::span<const Function> Functions() {
   static const std::vector<Function> table = [] {
     std::vector<Function> out;
     RegisterKernel32(out);
+    RegisterOtherDlls(out);
     return out;
   }();
   return table;

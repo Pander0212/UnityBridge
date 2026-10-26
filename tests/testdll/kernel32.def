@@ -20,3 +20,13 @@ GetProcAddress
 VirtualAlloc
 VirtualFree
 UnityBridgeTestMissingFunction
+CreateEventW
+SetEvent
+ResetEvent
+CreateMutexW
+ReleaseMutex
+CreateSemaphoreW
+ReleaseSemaphore
+WaitForSingleObjectEx
+WaitForMultipleObjectsEx
+CloseHandle

@@ -354,7 +354,6 @@ uint64_t GetCurrentThreadId(CallContext&) {
   return static_cast<DWORD>(id);
 }
 uint64_t IsDebuggerPresent(CallContext&) { return kFalse; }
-uint64_t CloseHandle(CallContext&) { return kTrue; }
 
 // ---- time --------------------------------------------------------------------------------
 
@@ -624,7 +623,7 @@ void RegisterKernel32(std::vector<Function>& out) {
   UB_FN(SleepConditionVariableSRW); UB_FN(WakeAllConditionVariable); UB_FN(WakeConditionVariable);
   UB_FN(InitializeSListHead);
   UB_FN(GetCurrentProcess); UB_FN(GetCurrentThread); UB_FN(GetCurrentProcessId); UB_FN(GetCurrentThreadId);
-  UB_FN(IsDebuggerPresent); UB_FN(CloseHandle);
+  UB_FN(IsDebuggerPresent);
   UB_FN(QueryPerformanceFrequency); UB_FN(QueryPerformanceCounter); UB_FN(GetSystemTimeAsFileTime);
   UB_FN(Sleep); UB_FN(SleepEx); UB_FN(SwitchToThread);
   UB_FN(GetSystemInfo); out.push_back({k, "GetNativeSystemInfo", &GetSystemInfo});

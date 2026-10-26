@@ -112,6 +112,7 @@ std::span<const Function> Functions();
 void RegisterKernel32(std::vector<Function>& out);
 void RegisterOtherDlls(std::vector<Function>& out);
 void RegisterBaselib(std::vector<Function>& out);
+void RegisterKernel32Sync(std::vector<Function>& out);
 
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);

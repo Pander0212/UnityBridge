@@ -30,6 +30,16 @@ IMPORT void* GetProcAddress(HANDLE, const char*);
 IMPORT void* VirtualAlloc(void*, unsigned long long, DWORD, DWORD);
 IMPORT BOOL VirtualFree(void*, unsigned long long, DWORD);
 IMPORT DWORD UnityBridgeTestMissingFunction(DWORD);  // deliberately not implemented
+IMPORT HANDLE CreateEventW(void*, BOOL, BOOL, const WCHAR*);
+IMPORT BOOL SetEvent(HANDLE);
+IMPORT BOOL ResetEvent(HANDLE);
+IMPORT HANDLE CreateMutexW(void*, BOOL, const WCHAR*);
+IMPORT BOOL ReleaseMutex(HANDLE);
+IMPORT HANDLE CreateSemaphoreW(void*, int, int, const WCHAR*);
+IMPORT BOOL ReleaseSemaphore(HANDLE, int, int*);
+IMPORT DWORD WaitForSingleObjectEx(HANDLE, DWORD, BOOL);
+IMPORT DWORD WaitForMultipleObjectsEx(DWORD, const HANDLE*, BOOL, DWORD, BOOL);
+IMPORT BOOL CloseHandle(HANDLE);
 
 // OLEAUT32 (imported by ordinal, see oleaut32.def), ADVAPI32, SHELL32.
 typedef struct { DWORD cElements; int lLbound; } SAFEARRAYBOUND;
@@ -164,6 +174,39 @@ __declspec(dllexport) int ub_test_all(void) {
   if (sem == semMemory && SemTryAcquire(sem) && SemTryAcquire(sem) && !SemTryAcquire(sem) && !SemTryTimed(sem, 10) &&
       BaselibThreadId() != 0) ok |= 1 << 16;
   SemFree(sem);
+
+  // Waitable objects (single thread: signalled states and timeouts).
+  {
+    int good = 1;
+    HANDLE autoEvent = CreateEventW(0, 0, 0, 0), manualEvent = CreateEventW(0, 1, 0, 0);
+    good &= WaitForSingleObjectEx(autoEvent, 0, 0) == 0x102;              // not set: timeout
+    SetEvent(autoEvent);
+    good &= WaitForSingleObjectEx(autoEvent, 0, 0) == 0;                  // set: taken
+    good &= WaitForSingleObjectEx(autoEvent, 0, 0) == 0x102;              // auto-reset
+    SetEvent(manualEvent);
+    good &= WaitForSingleObjectEx(manualEvent, 0, 0) == 0 && WaitForSingleObjectEx(manualEvent, 0, 0) == 0;
+    ResetEvent(manualEvent);
+    good &= WaitForSingleObjectEx(manualEvent, 0, 0) == 0x102;
+
+    HANDLE mutex = CreateMutexW(0, 1, 0);                                 // owned by us
+    good &= WaitForSingleObjectEx(mutex, 0, 0) == 0;                      // recursive
+    good &= ReleaseMutex(mutex) && ReleaseMutex(mutex) && !ReleaseMutex(mutex);
+
+    int previous = -1;
+    HANDLE sem = CreateSemaphoreW(0, 1, 2, 0);
+    good &= ReleaseSemaphore(sem, 1, &previous) && previous == 1 && !ReleaseSemaphore(sem, 1, 0);  // max 2
+
+    HANDLE set[2] = {manualEvent, sem};
+    good &= WaitForMultipleObjectsEx(2, set, 0, 0, 0) == 1;               // any: the semaphore
+    good &= WaitForMultipleObjectsEx(2, set, 1, 5, 0) == 0x102;           // all: event not set
+    SetEvent(manualEvent);
+    good &= WaitForMultipleObjectsEx(2, set, 1, 0, 0) == 0;               // all
+    good &= WaitForSingleObjectEx(sem, 0, 0) == 0x102;                    // both units taken
+
+    CloseHandle(autoEvent); CloseHandle(manualEvent); CloseHandle(mutex); CloseHandle(sem);
+    good &= WaitForSingleObjectEx(autoEvent, 0, 0) == 0xffffffffu;        // closed: WAIT_FAILED
+    if (good) ok |= 1 << 17;
+  }
 
   return ok;
 }

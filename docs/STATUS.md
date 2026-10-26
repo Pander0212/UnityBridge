@@ -9,7 +9,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 |---|---|---|
 | M0 | Analyse `GameAssembly.dll`: imports, exports, metadata | done [R] |
 | M1 | Analyse Android `libunity.so` 2021.3.18f1, match the API | done [R] |
-| M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | next |
+| M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | in progress (see M2 checklist) |
 | M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | — |
 | M4 | D3D11 shaders converted; first frame | — |
 
@@ -62,6 +62,30 @@ Building blocks chosen (2026-10-26) [R]:
       target is 17.0, harmless on iOS 26). Note: macOS runners did not start while the repo was private.
 - [ ] M2b: `UnityBridgeProbe` app (`app/`): with JIT enabled in StikDebug, "Run x86-64 probe" runs the
       controlled harness and shows ok/FAIL per check. Log: Files › UB Probe › `probe.log`.
+      Waiting for the first device run (iPhone 15, iOS 26.6.2; must be signed with a development
+      certificate, e.g. a free Apple ID via SideStore/Sideloadly, so `get-task-allow` survives).
+- [ ] M2c: PE loader and mini Win32, tested on the host (x86-64 Linux, CI "Host tests"):
+  - [x] `loader/pe_image`: PE32+ x86-64 loader (sections, DIR64 relocations, imports incl. delay-load and
+        ordinals as `#N`, exports, TLS directory, `.pdata`), bounds-checked. Reads Fellworld's
+        `GameAssembly.dll` correctly (7 sections, 380 exports, 77,489 unwind entries).
+  - [x] `win32/`: one x86-64 stub per import (`mov r10, rcx; mov eax, op; syscall; ret` for FEXCore's HLE
+        bridge; a jump form for host tests), dispatch, module registry, UTF-16 helpers.
+  - [x] Implemented: KERNEL32 142 of 158 (heap, virtual memory, TLS/FLS, critical sections, SRW locks,
+        condition variables, events/mutexes/semaphores/waits, files/directories/find/mappings, paths,
+        time, system info, code pages, locale, time zone, modules, console, process), OLEAUT32 (BSTR,
+        SAFEARRAY), OLE32, ADVAPI32 (random), SHELL32 (folders), WS2_32/IPHLPAPI/DBGHELP/USER32
+        (answered as unavailable), Unity's `baselib.dll` (13). **190 of 206 imports** of Fellworld's
+        `GameAssembly.dll` (`tools/pe_inspect`).
+  - [x] `tests/testdll/ubtest.dll`: our own Windows DLL (clang + lld-link, no CRT) run natively against the
+        mini Win32 with 21 checks; ASan/UBSan clean.
+  - [ ] Threads: `CreateThread`, `SuspendThread`/`ResumeThread`/`GetThreadContext` (GC stop-the-world),
+        `SetThreadPriority`, `QueueUserAPC`. Need the guest-call hook into FEXCore.
+  - [ ] x64 exceptions: `RaiseException`, `RtlUnwind(Ex)`, `RtlVirtualUnwind`, `RtlLookupFunctionEntry`,
+        `RtlCaptureContext`, `RtlCaptureStackBackTrace`, `RtlPcToFileHeader`, unhandled-exception filters.
+  - [ ] Path mapping: `C:\` is the host root; `C:\Users\Player` goes to the profile folder
+        (`SetProfileRoot`). On iPhone: the app's Documents folder.
+  - Known gaps: views of an anonymous (`INVALID_HANDLE_VALUE`) file mapping do not share memory;
+        `EnumSystemLocalesW` makes no callbacks; baselib error codes unverified.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

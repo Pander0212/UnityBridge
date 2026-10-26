@@ -44,7 +44,22 @@ size), struct-by-value calling conventions in thunks, the Windows platform tag i
 
 ## M2 checklist
 
-- [ ] FEXCore as an iOS library without Wine (look at Fathom's build first, then Madeira's fork).
+Building blocks chosen (2026-10-26) [R]:
+- **FEXCore**: AetherPS4's `runtime/sources/fexcore-darwin` (FEX `f2b679f` + Darwin/iOS port, MIT,
+  all externals in tree, `BUILD_FEXCORE_ONLY`, iOS dual-mapped JIT allocator via StikDebug's
+  BreakpointJIT protocol). Fathom uses the same tree but does not publish it and states no license
+  for its own code, so nothing is taken from Fathom. Madeira's FEX fork targets ARM64EC inside Wine.
+- **Guest engine**: AetherPS4's `GuestEngine` (`src/core/fex/fex_guest_engine.*`, MIT): creates the
+  FEXCore context, threads, `CallGuest(rip, args)`, and routes the guest's `syscall` to
+  `GuestBridge::Invoke(HleCallFrame&)`. Win32 import stubs will be `mov eax, id; syscall; ret`.
+  Its `RunControlledHarness()` is the device self-test. Copied under `third_party/aetherps4`
+  (see `PROVENANCE.md`).
+- **BreakpointJIT.framework**: written here (`jit/BreakpointJIT.S`), no entitlements.
+
+- [ ] M2a: CI builds FEXCore + `libunitybridge_engine.a` for arm64 iOS (`scripts/build-fexcore-ios.sh`,
+      workflow "Probe IPA"). Not yet seen green.
+- [ ] M2b: `UnityBridgeProbe` app (`app/`): with JIT enabled in StikDebug, "Run x86-64 probe" runs the
+      controlled harness and shows ok/FAIL per check. Log: Files › UB Probe › `probe.log`.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

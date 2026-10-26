@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 34, "34 imports");
+  Check(image.imports.size() == 40, "40 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";
@@ -85,8 +85,8 @@ int main(int argc, char** argv) {
                          "GetModuleHandleW + GetProcAddress", "VirtualAlloc/VirtualFree",
                          "callee-saved registers across calls", "DIR64 relocation applied",
                          "BSTR (OLEAUT32 by ordinal)", "SAFEARRAY 2-D bounds and data",
-                         "CryptGenRandom", "SHGetFolderPathW"};
-  for (int i = 0; i < 16; ++i) Check(bits & (1 << i), names[i]);
+                         "CryptGenRandom", "SHGetFolderPathW", "baselib semaphore (C++ names)"};
+  for (int i = 0; i < 17; ++i) Check(bits & (1 << i), names[i]);
 
   Check(reinterpret_cast<FloatFn>(*fl)(3.0, 4.0) == 12.5, "double arguments and xmm0 return");
 

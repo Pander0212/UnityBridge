@@ -12,7 +12,8 @@ add_library(ub_win32 STATIC
   win32/hle.cpp
   win32/support.cpp
   win32/kernel32.cpp
-  win32/other_dlls.cpp)
+  win32/other_dlls.cpp
+  win32/baselib.cpp)
 target_include_directories(ub_win32 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(ub_win32 PRIVATE -Wall -Wextra)
 
@@ -28,7 +29,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
     OUTPUT ${UBTEST_DIR}/ubtest.dll
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/testdll/build.sh ${UBTEST_DIR}
     DEPENDS tests/testdll/ubtest.c tests/testdll/kernel32.def tests/testdll/oleaut32.def
-            tests/testdll/other.def tests/testdll/shell32.def tests/testdll/build.sh)
+            tests/testdll/other.def tests/testdll/shell32.def tests/testdll/baselib.def
+            tests/testdll/build.sh)
   add_custom_target(ubtest-dll ALL DEPENDS ${UBTEST_DIR}/ubtest.dll)
   add_test(NAME win32-host-test COMMAND win32-host-test ${UBTEST_DIR}/ubtest.dll)
 endif()

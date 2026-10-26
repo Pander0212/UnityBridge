@@ -62,6 +62,7 @@ std::span<const Function> Functions() {
     std::vector<Function> out;
     RegisterKernel32(out);
     RegisterOtherDlls(out);
+    RegisterBaselib(out);
     return out;
   }();
   return table;

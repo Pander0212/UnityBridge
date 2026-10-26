@@ -1,21 +1,26 @@
-name: FEXCore for iOS
-# M2a: builds FEXCore (x86-64 -> ARM64 JIT) as arm64 iOS static libraries from AetherPS4's
-# Darwin port (scripts/build-fexcore-ios.sh). Contains no game code.
+name: Probe IPA
+# M2a/M2b: builds FEXCore and UnityBridge's engine for arm64 iOS (scripts/build-fexcore-ios.sh)
+# and the UnityBridgeProbe test app around them. Contains no game code and no Unity files.
 on:
   workflow_dispatch:
   push:
     paths:
       - .github/workflows/fexcore-ios.yml
-      - scripts/build-fexcore-ios.sh
+      - scripts/**
+      - engine/**
+      - compat/**
+      - jit/**
+      - third_party/**
+      - app/**
 permissions:
   contents: read
 concurrency:
-  group: fexcore-ios-${{ github.ref }}
+  group: probe-ipa-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -28,31 +33,71 @@ jobs:
           key: fexcore-ios-v1-${{ github.run_id }}
           restore-keys: fexcore-ios-v1-
       - name: Build tools
-        run: brew install -q ccache cmake ninja
-      - name: Build FEXCore
+        run: brew install -q ccache cmake ninja xcodegen
+      - name: Build FEXCore and the engine
         run: |
           set -o pipefail
-          bash scripts/build-fexcore-ios.sh 2>&1 | tee build-fexcore-ios.log
-      - name: Package
-        run: |
-          (cd build/fexcore-ios && zip -qry ../../fexcore-ios.zip out)
-          ls -la fexcore-ios.zip
-      - name: Keep the libraries
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: fexcore-ios
-          path: fexcore-ios.zip
-          retention-days: 14
+          mkdir -p logs
+          bash scripts/build-fexcore-ios.sh 2>&1 | tee logs/build-engine.log
       - name: Keep compiled objects
         if: always()
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: .ccache
           key: fexcore-ios-v1-${{ github.run_id }}
-      - name: Keep the log
+      - name: Build BreakpointJIT.framework
+        run: |
+          set -euo pipefail
+          fw=build/BreakpointJIT.framework
+          mkdir -p "$fw"
+          xcrun -sdk iphoneos clang -target arm64-apple-ios17.0 -dynamiclib \
+            -install_name @rpath/BreakpointJIT.framework/BreakpointJIT \
+            jit/BreakpointJIT.S -o "$fw/BreakpointJIT"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string io.github.pander0212.unitybridge.BreakpointJIT" \
+            -c "Add :CFBundleExecutable string BreakpointJIT" -c "Add :CFBundlePackageType string FMWK" \
+            -c "Add :CFBundleShortVersionString string 1.0" -c "Add :CFBundleVersion string 1" \
+            -c "Add :MinimumOSVersion string 17.0" "$fw/Info.plist"
+          xcrun nm -gU "$fw/BreakpointJIT"
+      - name: Build the app
+        run: |
+          set -euo pipefail
+          mkdir -p app/Generated
+          {
+            printf 'OTHER_LDFLAGS = $(inherited) -lc++'
+            for lib in "$PWD"/build/fexcore-ios/out/lib/*.a; do printf ' "%s"' "$lib"; done
+            printf '\n'
+          } > app/Generated/Libraries.xcconfig
+          cat app/Generated/Libraries.xcconfig
+          (cd app && xcodegen generate)
+          set -o pipefail
+          xcodebuild build -project app/UnityBridgeProbe.xcodeproj -scheme UnityBridgeProbe -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DEVELOPMENT_TEAM= \
+            2>&1 | tee logs/xcodebuild.log | tail -n 40
+      - name: Package the IPA
+        run: |
+          set -euo pipefail
+          app=build/DerivedData/Build/Products/Release-iphoneos/UnityBridgeProbe.app
+          mkdir -p "$app/Frameworks"
+          cp -R build/BreakpointJIT.framework "$app/Frameworks/"
+          # Ad-hoc placeholder signatures; the sideloading tool re-signs with the user's certificate.
+          codesign --force --sign - --timestamp=none "$app/Frameworks/BreakpointJIT.framework"
+          codesign --force --sign - --timestamp=none --entitlements app/UnityBridgeProbe.entitlements "$app"
+          codesign --verify --deep --verbose=2 "$app"
+          mkdir -p ipa/Payload
+          cp -R "$app" ipa/Payload/
+          (cd ipa && zip -qry ../UnityBridgeProbe.ipa Payload)
+          ls -la UnityBridgeProbe.ipa
+      - name: Keep the IPA
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: UnityBridgeProbe-ipa
+          path: UnityBridgeProbe.ipa
+          retention-days: 14
+      - name: Keep the logs
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: fexcore-ios-log
-          path: build-fexcore-ios.log
+          name: probe-ipa-logs
+          path: logs/
           retention-days: 14

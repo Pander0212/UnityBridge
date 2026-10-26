@@ -1,0 +1,27 @@
+name: UnityBridgeProbe
+options:
+  bundleIdPrefix: io.github.pander0212
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CLANG_CXX_LANGUAGE_STANDARD: c++20
+targets:
+  UnityBridgeProbe:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    configFiles:
+      Release: Generated/Libraries.xcconfig
+      Debug: Generated/Libraries.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.pander0212.unitybridge.probe
+        INFOPLIST_FILE: Info.plist
+        CODE_SIGN_ENTITLEMENTS: UnityBridgeProbe.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/UnityBridgeProbe-Bridging-Header.h
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        DEAD_CODE_STRIPPING: NO

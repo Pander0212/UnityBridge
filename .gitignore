@@ -1,2 +1,4 @@
 build/
 .ccache/
+app/Generated/
+app/*.xcodeproj/

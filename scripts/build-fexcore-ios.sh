@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Builds FEXCore (x86-64 -> ARM64 JIT) as static libraries for arm64 iOS.
+# Builds FEXCore (x86-64 -> ARM64 JIT) and UnityBridge's engine library for arm64 iOS.
 #
-# Source: the Apple-Silicon/iOS port of FEXCore that AetherPS4 keeps in
-# runtime/sources/fexcore-darwin (upstream FEX f2b679f + Darwin/iOS patches, MIT). Only that
-# directory is checked out, at a pinned commit.
+# Source of FEXCore: the Apple-Silicon/iOS port AetherPS4 keeps in runtime/sources/fexcore-darwin
+# (upstream FEX f2b679f + Darwin/iOS patches, MIT), checked out sparsely at a pinned commit.
 #
-# Output: build/fexcore-ios/out/lib/*.a and build/fexcore-ios/out/include (FEXCore's public
-# headers plus the generated ones), for the app build to link against.
+# UnityBridge's engine sources (third_party/aetherps4 + engine/) need FEXCore's internal headers
+# and compile flags, so they are built inside FEX's CMake project as one more static library,
+# the way AetherPS4 builds its guest harness. The CMake hook is inserted below.
+#
+# Output in build/fexcore-ios/out: lib/*.a (FEXCore, its helpers and libunitybridge_engine.a).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,6 +31,36 @@ if [[ ! -d "$FEX" ]]; then
 fi
 [[ "$(git -C "$SRC" rev-parse HEAD)" == "$AETHER_REV" ]] || { echo "AetherPS4 checkout is not $AETHER_REV" >&2; exit 1; }
 
+# The hook: one static library from UNITYBRIDGE_ENGINE_SOURCES, placed before the
+# BUILD_FEXCORE_ONLY block returns. Idempotent.
+python3 - "$FEX/CMakeLists.txt" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = "# UnityBridge engine hook"
+if marker not in text:
+    anchor = "  add_subdirectory(Source/Tools/CommonTools/ EXCLUDE_FROM_ALL)\n"
+    assert text.count(anchor) == 1, "FEX CMakeLists.txt changed; update the UnityBridge hook"
+    hook = anchor + """  %s
+  if (UNITYBRIDGE_ENGINE_SOURCES)
+    add_library(unitybridge_engine STATIC ${UNITYBRIDGE_ENGINE_SOURCES})
+    target_compile_features(unitybridge_engine PRIVATE cxx_std_20)
+    target_include_directories(unitybridge_engine PRIVATE
+      ${UNITYBRIDGE_INCLUDE_DIRS}
+      "${CMAKE_BINARY_DIR}/generated"
+      "${CMAKE_SOURCE_DIR}/FEXCore/Source"
+      "${CMAKE_SOURCE_DIR}/Source"
+      "${CMAKE_SOURCE_DIR}/Source/Tools/CommonTools")
+    target_link_libraries(unitybridge_engine PRIVATE FEXCore Common CommonTools JemallocLibs)
+  endif()
+""" % marker
+    open(path, "w").write(text.replace(anchor, hook))
+PY
+
+AP="$ROOT/third_party/aetherps4/src"
+ENGINE_SOURCES="$AP/core/fex/fex_guest_engine.cpp;$AP/core/guest_cpu/guest_cpu.cpp;$AP/core/guest_cpu/hle_call_adapter.cpp;$AP/core/ios/ios_jit_allocator.cpp;$ROOT/engine/probe_runner.cpp"
+ENGINE_INCLUDES="$ROOT/compat;$AP"
+
 # CMAKE_SYSTEM_PROCESSOR must be set: FEX's architecture detection fails on an empty value when
 # cross-compiling. BUILD_FEXCORE_ONLY leaves out FEX's Linux frontend (ELF loader, syscalls),
 # which does not build for Darwin; UnityBridge supplies its own (Windows) frontend.
@@ -49,20 +81,19 @@ cmake -S "$FEX" -B "$BUILD" -G Ninja \
     -DENABLE_WERROR=OFF \
     -DENABLE_STRICT_WERROR=OFF \
     -DTUNE_CPU=none \
-    -DCMAKE_CXX_FLAGS=-DMETA_NO_STD_FORWARD_DECLARATIONS
+    -DCMAKE_CXX_FLAGS=-DMETA_NO_STD_FORWARD_DECLARATIONS \
+    -DUNITYBRIDGE_ENGINE_SOURCES="$ENGINE_SOURCES" \
+    -DUNITYBRIDGE_INCLUDE_DIRS="$ENGINE_INCLUDES"
 
 # JemallocLibs is not a dependency of the static FEXCore target, but on Apple it carries the
 # dual-mapped JIT allocator (FEXCore/Source/Utils/AllocatorHooks.cpp) the JIT calls into.
-cmake --build "$BUILD" --target FEXCore Common CommonTools JemallocLibs
+cmake --build "$BUILD" --target FEXCore Common CommonTools JemallocLibs unitybridge_engine
 
 rm -rf "$OUT"
-mkdir -p "$OUT/lib" "$OUT/include"
+mkdir -p "$OUT/lib"
 find "$BUILD" -name '*.a' -not -path '*/CMakeFiles/*' -exec cp -f {} "$OUT/lib/" \;
 for lib in "$OUT"/lib/*.a; do
     lipo -info "$lib" | grep -q arm64 || { echo "$lib is not arm64" >&2; exit 1; }
 done
-cp -R "$FEX/FEXCore/include/." "$OUT/include/"
-cp -R "$FEX/FEXHeaderUtils/FEXHeaderUtils" "$OUT/include/"
-[[ -d "$BUILD/generated" ]] && cp -R "$BUILD/generated/." "$OUT/include/"
 git -C "$SRC" rev-parse HEAD > "$OUT/SOURCE_REVISION"
 ls -la "$OUT/lib"

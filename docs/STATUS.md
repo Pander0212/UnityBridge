@@ -56,8 +56,10 @@ Building blocks chosen (2026-10-26) [R]:
   (see `PROVENANCE.md`).
 - **BreakpointJIT.framework**: written here (`jit/BreakpointJIT.S`), no entitlements.
 
-- [ ] M2a: CI builds FEXCore + `libunitybridge_engine.a` for arm64 iOS (`scripts/build-fexcore-ios.sh`,
-      workflow "Probe IPA"). Not yet seen green.
+- [x] M2a: CI builds FEXCore + `libunitybridge_engine.a` for arm64 iOS (`scripts/build-fexcore-ios.sh`,
+      workflow "Probe IPA"). Green on 2026-10-26 (run 40388559916, commit `6d2e902`): 188 objects, app links,
+      artifact `UnityBridgeProbe-ipa`. Only availability warnings (`os_sync_*` needs iOS 17.4; deployment
+      target is 17.0, harmless on iOS 26). Note: macOS runners did not start while the repo was private.
 - [ ] M2b: `UnityBridgeProbe` app (`app/`): with JIT enabled in StikDebug, "Run x86-64 probe" runs the
       controlled harness and shows ok/FAIL per check. Log: Files › UB Probe › `probe.log`.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.

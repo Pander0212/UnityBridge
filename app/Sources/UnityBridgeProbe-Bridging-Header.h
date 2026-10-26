@@ -4,4 +4,5 @@
 
 // engine/probe_runner.cpp
 bool ub_probe_jit_attached(void);
+bool ub_probe_debugger_attached(void);
 int ub_probe_run(char *out, size_t capacity);

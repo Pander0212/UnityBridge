@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <sys/sysctl.h>
 #include <unistd.h>
 #include <variant>
 
@@ -78,6 +79,17 @@ extern "C" bool ub_probe_jit_attached(void) {
   return csops(getpid(), 0, &flags, sizeof(flags)) == 0 && (flags & 0x10000000u) != 0;
 }
 
+// Whether a debugger is attached right now (P_TRACED). CS_DEBUGGED stays set after a debugger
+// detaches, e.g. when JIT was enabled from StikDebug's own app list: then nobody answers the
+// JIT request (brk #0xf00d) and the app dies with SIGTRAP (seen on iPhone 15, iOS 26.6.2).
+extern "C" bool ub_probe_debugger_attached(void) {
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+  struct kinfo_proc info {};
+  size_t size = sizeof(info);
+  if (sysctl(mib, 4, &info, &size, nullptr, 0) != 0 || size == 0) return false;
+  return (info.kp_proc.p_flag & P_TRACED) != 0;
+}
+
 // Runs the probe and writes a human-readable report into out. Returns 0 when every check passed.
 extern "C" int ub_probe_run(char* out, size_t capacity) {
   Report report;
@@ -92,6 +104,12 @@ extern "C" int ub_probe_run(char* out, size_t capacity) {
     return finish(2);
   }
   report.Line("JIT: debugger flag set");
+  if (!ub_probe_debugger_attached()) {
+    report.Line("FAIL no debugger attached: JIT was enabled, but StikDebug is not attached any more, so nobody "
+                "would answer the JIT request. Tap \"Enable JIT\" in this app (not in StikDebug's list).");
+    return finish(3);
+  }
+  report.Line("JIT: debugger attached");
 
   static ProbeBridge bridge;
   auto created = AetherPS4::Fex::GuestEngine::Create(bridge);

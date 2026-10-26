@@ -13,6 +13,8 @@ targets:
     platform: iOS
     sources:
       - Sources
+      - path: ../third_party/madeira/madeira-jit.js
+        buildPhase: resources
     configFiles:
       Release: Generated/Libraries.xcconfig
       Debug: Generated/Libraries.xcconfig

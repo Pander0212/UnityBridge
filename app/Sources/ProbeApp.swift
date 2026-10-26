@@ -2,8 +2,11 @@
 import SwiftUI
 import UIKit
 
-/// M2b: checks that FEXCore runs x86-64 code on this iPhone. JIT must be enabled for the app with
-/// StikDebug first; the probe refuses to start without it (the JIT request would kill the app).
+/// M2b: checks that FEXCore runs x86-64 code on this iPhone.
+///
+/// JIT on iOS 26 (TXM devices) needs a debugger that stays attached and answers the app's JIT
+/// requests (brk #0xf00d). Enabling JIT from StikDebug's own app list attaches and leaves, so the
+/// app asks StikDebug itself, passing its process ID and the debugger script (madeira-jit.js).
 @main
 struct ProbeApp: App {
     init() { ProbeLog.redirectStderr() }
@@ -24,22 +27,66 @@ enum ProbeLog {
         freopen(url.path, "a", stderr)
         setvbuf(stderr, nil, _IONBF, 0)
     }
+
+    static func write(_ line: String) {
+        FileHandle.standardError.write(Data(("UB_APP " + line + "\n").utf8))
+    }
+}
+
+enum JITState: Equatable {
+    case off            // never debugged
+    case noDebugger     // CS_DEBUGGED set, but no debugger attached now
+    case ready          // debugger attached: JIT requests are answered
+
+    static var current: JITState {
+        if !ub_probe_jit_attached() { return .off }
+        return ub_probe_debugger_attached() ? .ready : .noDebugger
+    }
+}
+
+enum StikDebug {
+    static var scriptData: Data? {
+        Bundle.main.url(forResource: "madeira-jit", withExtension: "js").flatMap { try? Data(contentsOf: $0) }
+    }
+
+    /// stikdebug://enable-jit?bundle-id=…&pid=…&script-data=<base64>; StikDebug attaches to this very
+    /// process and keeps the script running.
+    static func requestURL() -> URL? {
+        guard let bundleID = Bundle.main.bundleIdentifier, let script = scriptData else { return nil }
+        var components = URLComponents()
+        components.scheme = "stikdebug"
+        components.host = "enable-jit"
+        components.queryItems = [
+            URLQueryItem(name: "bundle-id", value: bundleID),
+            URLQueryItem(name: "pid", value: String(getpid())),
+            URLQueryItem(name: "script-data", value: script.base64EncodedString()),
+        ]
+        return components.url
+    }
 }
 
 struct ProbeView: View {
     @State private var report = ""
     @State private var running = false
-    @State private var jit = ub_probe_jit_attached()
+    @State private var jit = JITState.current
+    @State private var waiting = false
+    @State private var message = ""
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
-                Label(jit ? "JIT is enabled" : "JIT is off: enable it for this app in StikDebug",
-                      systemImage: jit ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(jit ? .green : .orange)
+                statusLabel
+                if jit != .ready {
+                    Button(waiting ? "Waiting for StikDebug…" : "Enable JIT", action: enableJIT)
+                        .buttonStyle(.bordered)
+                        .disabled(waiting)
+                }
+                if !message.isEmpty {
+                    Text(message).font(.footnote).foregroundStyle(.secondary)
+                }
                 Button(running ? "Running…" : "Run x86-64 probe", action: run)
                     .buttonStyle(.borderedProminent)
-                    .disabled(running || !jit)
+                    .disabled(running || jit != .ready)
                 ScrollView {
                     Text(report.isEmpty ? "No result yet." : report)
                         .font(.system(.footnote, design: .monospaced))
@@ -55,12 +102,54 @@ struct ProbeView: View {
             .padding()
             .navigationTitle("UnityBridge Probe")
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-                jit = ub_probe_jit_attached()
+                jit = JITState.current
+            }
+        }
+    }
+
+    @ViewBuilder private var statusLabel: some View {
+        switch jit {
+        case .ready:
+            Label("JIT ready: StikDebug is attached", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .noDebugger:
+            Label("JIT flag set, but StikDebug is not attached any more. Tap Enable JIT.",
+                  systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .off:
+            Label("JIT is off. Tap Enable JIT (needs StikDebug, its pairing file and LocalDevVPN).",
+                  systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        }
+    }
+
+    private func enableJIT() {
+        guard let url = StikDebug.requestURL() else {
+            message = "The JIT script is missing from this build."
+            return
+        }
+        ProbeLog.write("opening StikDebug for pid \(getpid())")
+        waiting = true
+        message = "StikDebug opens and attaches to this app. Come back here when it is done."
+        UIApplication.shared.open(url) { opened in
+            guard opened else {
+                waiting = false
+                message = "StikDebug could not be opened. Is it installed?"
+                return
+            }
+            let deadline = Date().addingTimeInterval(90)
+            Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { timer in
+                jit = JITState.current
+                if jit == .ready || Date() >= deadline {
+                    timer.invalidate()
+                    waiting = false
+                    message = jit == .ready ? "" : "StikDebug did not attach within 90 seconds. Check LocalDevVPN and the pairing file."
+                    ProbeLog.write("JIT state after waiting: \(jit)")
+                }
             }
         }
     }
 
     private func run() {
+        jit = JITState.current
+        guard jit == .ready else { return }
         running = true
         report = ""
         Thread.detachNewThread {

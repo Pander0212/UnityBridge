@@ -78,6 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           app=build/DerivedData/Build/Products/Release-iphoneos/UnityBridgeProbe.app
+          test -f "$app/madeira-jit.js" || { echo "madeira-jit.js missing from the app bundle"; exit 1; }
           mkdir -p "$app/Frameworks"
           cp -R build/BreakpointJIT.framework "$app/Frameworks/"
           # Ad-hoc placeholder signatures; the sideloading tool re-signs with the user's certificate.

@@ -193,6 +193,7 @@ uint64_t WaitForMultipleObjectsEx(CallContext& c) {
 }
 
 uint64_t CloseHandle(CallContext& c) {
+  if (CloseFileObject(c.Arg(0))) return kTrue;
   std::scoped_lock lock {g_lock};
   g_handles.erase(c.Arg(0));  // other handles (files, pseudo handles) are not tracked here yet
   return kTrue;

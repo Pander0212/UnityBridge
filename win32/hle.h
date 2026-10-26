@@ -100,6 +100,13 @@ const Module* FindModuleByHandle(uintptr_t handle);
 const Module* MainModule();
 bool IsBuiltinDll(std::string_view name);
 
+// Windows paths <-> host paths (kernel32_files.cpp). "C:\" is the host root, so the Unix paths
+// the Android engine passes (e.g. /var/mobile/...) reach the guest as C:\var\mobile\... and map
+// back unchanged. C:\Users\Player (AppData, saves) is redirected to `profileRoot`.
+void SetProfileRoot(std::string hostDirectory);
+std::string HostPath(std::u16string_view windowsPath);
+std::u16string WindowsPath(std::string_view hostPath);
+
 // UTF-16 (Windows wchar_t) helpers for guest strings.
 std::u16string ReadWide(const char16_t* text);
 std::string ToUtf8(std::u16string_view text);
@@ -113,6 +120,7 @@ void RegisterKernel32(std::vector<Function>& out);
 void RegisterOtherDlls(std::vector<Function>& out);
 void RegisterBaselib(std::vector<Function>& out);
 void RegisterKernel32Sync(std::vector<Function>& out);
+void RegisterKernel32Files(std::vector<Function>& out);
 
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);

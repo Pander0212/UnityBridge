@@ -14,7 +14,8 @@ add_library(ub_win32 STATIC
   win32/kernel32.cpp
   win32/other_dlls.cpp
   win32/baselib.cpp
-  win32/kernel32_sync.cpp)
+  win32/kernel32_sync.cpp
+  win32/kernel32_files.cpp)
 target_include_directories(ub_win32 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(ub_win32 PRIVATE -Wall -Wextra)
 

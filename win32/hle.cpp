@@ -64,6 +64,7 @@ std::span<const Function> Functions() {
     RegisterOtherDlls(out);
     RegisterBaselib(out);
     RegisterKernel32Sync(out);
+    RegisterKernel32Files(out);
     return out;
   }();
   return table;

@@ -39,6 +39,9 @@ inline T Load(uint64_t address) {
   return value;
 }
 
+// File objects live in kernel32_files.cpp; CloseHandle (kernel32_sync.cpp) asks there first.
+bool CloseFileObject(uint64_t handle);
+
 // errno -> Windows error code for file functions.
 DWORD ErrorFromErrno(int error);
 

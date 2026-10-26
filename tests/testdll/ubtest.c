@@ -40,6 +40,28 @@ IMPORT BOOL ReleaseSemaphore(HANDLE, int, int*);
 IMPORT DWORD WaitForSingleObjectEx(HANDLE, DWORD, BOOL);
 IMPORT DWORD WaitForMultipleObjectsEx(DWORD, const HANDLE*, BOOL, DWORD, BOOL);
 IMPORT BOOL CloseHandle(HANDLE);
+IMPORT DWORD GetTempPathW(DWORD, WCHAR*);
+IMPORT HANDLE CreateFileW(const WCHAR*, DWORD, DWORD, void*, DWORD, DWORD, HANDLE);
+IMPORT BOOL WriteFile(HANDLE, const void*, DWORD, DWORD*, void*);
+IMPORT BOOL ReadFile(HANDLE, void*, DWORD, DWORD*, void*);
+IMPORT BOOL SetFilePointerEx(HANDLE, LONGLONG, LONGLONG*, DWORD);
+IMPORT BOOL GetFileSizeEx(HANDLE, LONGLONG*);
+IMPORT BOOL GetFileAttributesExW(const WCHAR*, int, void*);
+IMPORT HANDLE FindFirstFileExW(const WCHAR*, int, void*, int, void*, DWORD);
+IMPORT BOOL FindNextFileW(HANDLE, void*);
+IMPORT BOOL FindClose(HANDLE);
+IMPORT HANDLE CreateFileMappingW(HANDLE, void*, DWORD, DWORD, DWORD, const WCHAR*);
+IMPORT void* MapViewOfFile(HANDLE, DWORD, DWORD, DWORD, unsigned long long);
+IMPORT BOOL UnmapViewOfFile(void*);
+IMPORT BOOL DeleteFileW(const WCHAR*);
+IMPORT BOOL CreateDirectoryW(const WCHAR*, void*);
+IMPORT BOOL RemoveDirectoryW(const WCHAR*);
+
+static int Append(WCHAR* to, int at, const char* text) {
+  while (*text) to[at++] = (WCHAR)*text++;
+  to[at] = 0;
+  return at;
+}
 
 // OLEAUT32 (imported by ordinal, see oleaut32.def), ADVAPI32, SHELL32.
 typedef struct { DWORD cElements; int lLbound; } SAFEARRAYBOUND;
@@ -206,6 +228,52 @@ __declspec(dllexport) int ub_test_all(void) {
     CloseHandle(autoEvent); CloseHandle(manualEvent); CloseHandle(mutex); CloseHandle(sem);
     good &= WaitForSingleObjectEx(autoEvent, 0, 0) == 0xffffffffu;        // closed: WAIT_FAILED
     if (good) ok |= 1 << 17;
+  }
+
+  // Files: <temp>\ubtest\data.bin, written, read back, listed, mapped, removed.
+  {
+    int good = 1;
+    WCHAR dir[300], file[300], pattern[300];
+    int n = (int)GetTempPathW(260, dir);
+    good &= n > 3 && dir[1] == ':' && dir[n - 1] == '\\';
+    n = Append(dir, n, "ubtest");
+    for (int i = 0; i <= n; ++i) file[i] = pattern[i] = dir[i];
+    CreateDirectoryW(dir, 0);
+    Append(file, n, "\\data.bin");
+    Append(pattern, n, "\\*.BIN");  // matching ignores case, as on Windows
+
+    HANDLE h = CreateFileW(file, 0xC0000000u /* read|write */, 0, 0, 2 /* CREATE_ALWAYS */, 0x80, 0);
+    DWORD written = 0, read = 0;
+    char buffer[16] = {0};
+    LONGLONG size = 0, position = -1;
+    good &= h != (HANDLE)-1;
+    good &= WriteFile(h, "0123456789", 10, &written, 0) && written == 10;
+    good &= SetFilePointerEx(h, 4, &position, 0 /* FILE_BEGIN */) && position == 4;
+    good &= ReadFile(h, buffer, 16, &read, 0) && read == 6 && buffer[0] == '4';  // short read at the end
+    good &= GetFileSizeEx(h, &size) && size == 10;
+    CloseHandle(h);
+
+    unsigned char attributes[36];
+    good &= GetFileAttributesExW(file, 0, attributes) && ((DWORD*)attributes)[8] == 10;  // nFileSizeLow
+
+    unsigned char found[592];
+    HANDLE f = FindFirstFileExW(pattern, 0, found, 0, 0, 0);
+    WCHAR* foundName = (WCHAR*)(found + 44);
+    good &= f != (HANDLE)-1 && foundName[0] == 'd' && foundName[8] == 0 && !FindNextFileW(f, found) && GetLastError() == 18;
+    FindClose(f);
+
+    h = CreateFileW(file, 0x80000000u, 1, 0, 3 /* OPEN_EXISTING */, 0x80, 0);
+    HANDLE mapping = CreateFileMappingW(h, 0, 0x02 /* PAGE_READONLY */, 0, 0, 0);
+    const char* view = (const char*)MapViewOfFile(mapping, 0x4 /* FILE_MAP_READ */, 0, 0, 0);
+    good &= view && view[9] == '9';
+    UnmapViewOfFile((void*)view);
+    CloseHandle(mapping);
+    CloseHandle(h);
+
+    good &= CreateFileW(file, 0x80000000u, 0, 0, 1 /* CREATE_NEW */, 0x80, 0) == (HANDLE)-1 && GetLastError() == 80;
+    good &= DeleteFileW(file) && !DeleteFileW(file) && GetLastError() == 2;
+    good &= RemoveDirectoryW(dir);
+    if (good) ok |= 1 << 18;
   }
 
   return ok;

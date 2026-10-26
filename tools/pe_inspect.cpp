@@ -32,8 +32,6 @@ int main(int argc, char** argv) {
   for (const auto& s : image.sections) std::printf("  section %-8s rva %#010x size %u\n", s.name.c_str(), s.rva, s.virtualSize);
   std::printf("exports %zu, unwind table %u entries\n", image.exports.size(), image.pdataSize / 12);
 
-  const Win32::Runtime* none = nullptr;
-  (void)none;
   std::map<std::string, std::pair<int, int>> perDll;  // implemented, total
   std::vector<std::string> missing;
   for (const auto& imp : image.imports) {
@@ -42,10 +40,10 @@ int main(int argc, char** argv) {
     ++total;
     bool found = false;
     for (const auto& f : Win32::Functions()) {
-      if (f.dll == dll && f.name == imp.name && f.handler) { found = true; break; }
+      if (f.dll == dll && f.name == imp.Symbol() && f.handler) { found = true; break; }
     }
     if (found) ++implemented;
-    else missing.push_back(dll + "!" + (imp.name.empty() ? "#" + std::to_string(imp.ordinal) : imp.name));
+    else missing.push_back(dll + "!" + imp.Symbol());
   }
   int implementedAll = 0;
   for (const auto& [dll, counts] : perDll) {

@@ -49,7 +49,7 @@ int main(int argc, char** argv) {
   void* blocker = inspected.image
       ? mmap(reinterpret_cast<void*>(inspected.image->preferredBase), 1 << 16, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0)
       : MAP_FAILED;
-  auto loaded = Pe::Load(file, [&](const Pe::Import& imp) { return runtime.Resolve(imp.dll, imp.name); }, true);
+  auto loaded = Pe::Load(file, [&](const Pe::Import& imp) { return runtime.Resolve(imp.dll, imp.Symbol()); }, true);
   Check(blocker != MAP_FAILED && loaded.image &&
             reinterpret_cast<uintptr_t>(loaded.image->base) != inspected.image->preferredBase,
         "loaded away from its preferred base (relocated)");

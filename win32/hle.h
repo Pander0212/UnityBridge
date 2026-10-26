@@ -111,6 +111,10 @@ std::span<const Function> Functions();
 // Per-module registration, called by Functions() once.
 void RegisterKernel32(std::vector<Function>& out);
 
+// Last-error value of the calling guest thread (kernel32.cpp).
+void SetLastErrorValue(uint32_t error);
+uint32_t LastErrorValue();
+
 std::string Lower(std::string_view text);
 
 } // namespace UnityBridge::Win32

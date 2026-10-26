@@ -20,6 +20,9 @@ struct Import {
   uint16_t ordinal {};  // valid when name is empty
   uint32_t slotRva {};  // IAT slot that receives the resolved address
   bool delayed {};      // from the delay-load directory
+
+  // The name, or "#<ordinal>" for imports by ordinal (OLEAUT32 and WS2_32 are imported that way).
+  std::string Symbol() const { return name.empty() ? "#" + std::to_string(ordinal) : name; }
 };
 
 struct Section {

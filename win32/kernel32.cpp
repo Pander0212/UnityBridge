@@ -2,7 +2,7 @@
 // KERNEL32 functions, written from Microsoft's documented behaviour. Guest pointers are host
 // pointers (FEXCore runs the guest in this process's address space); Windows' `long`/DWORD are
 // 32 bits and its wchar_t is UTF-16.
-#include "hle.h"
+#include "common.h"
 
 #include <atomic>
 #include <chrono>
@@ -26,25 +26,7 @@
 namespace UnityBridge::Win32 {
 namespace {
 
-using DWORD = uint32_t;
-using BOOL = int32_t;
-constexpr uint64_t kTrue = 1, kFalse = 0;
-
-// Error codes used below (winerror.h).
-constexpr DWORD ERROR_SUCCESS = 0, ERROR_INVALID_HANDLE = 6, ERROR_NOT_ENOUGH_MEMORY = 8,
-                ERROR_INVALID_PARAMETER = 87, ERROR_INSUFFICIENT_BUFFER = 122, ERROR_MOD_NOT_FOUND = 126,
-                ERROR_PROC_NOT_FOUND = 127, ERROR_ENVVAR_NOT_FOUND = 203, ERROR_NO_UNICODE_TRANSLATION = 1113;
-
 thread_local DWORD t_lastError = 0;
-uint64_t SetError(DWORD error, uint64_t result) {
-  t_lastError = error;
-  return result;
-}
-
-template <typename T>
-void Store(uint64_t address, T value) {
-  if (address) std::memcpy(reinterpret_cast<void*>(address), &value, sizeof(T));
-}
 
 // ---- errors ------------------------------------------------------------------------------
 
@@ -620,6 +602,9 @@ uint64_t GetConsoleMode(CallContext&) { return SetError(ERROR_INVALID_HANDLE, kF
 uint64_t GetConsoleOutputCP(CallContext&) { return CP_UTF8; }
 
 } // namespace
+
+void SetLastErrorValue(uint32_t error) { t_lastError = error; }
+uint32_t LastErrorValue() { return t_lastError; }
 
 void RegisterKernel32(std::vector<Function>& out) {
   const std::string k = "kernel32.dll";

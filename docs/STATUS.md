@@ -119,7 +119,8 @@ Building blocks chosen (2026-10-26) [R]:
       `Win32::SetThreadRunner`. `ubtest.dll`: 27 checks; the new ones check that a thread has its own TLS
       values and last-error code. Still missing for threads: `SuspendThread`/`GetThreadContext` on a running
       thread (the garbage collector's stop-the-world), `QueueUserAPC`, FLS callbacks at thread exit.
-- [x] M2e step 2, implicit TLS (`win32/tls.cpp`) **host test green, 28 of 28; [i] on iPhone pending**:
+- [x] M2e step 2, implicit TLS (`win32/tls.cpp`) **[i] iPhone 15 (A16), iOS 26.6.2, 2026-10-27:
+      part of 31 of 31** (commit `a808fab`):
       each guest thread gets its own copy of the DLL's TLS directory, reached through
       `TEB.ThreadLocalStoragePointer` (`gs:[0x58]`), and the TLS callbacks run with
       `DLL_PROCESS_ATTACH`/`DLL_THREAD_ATTACH`/`DLL_THREAD_DETACH`. `Win32::RegisterTlsImage` assigns the
@@ -131,7 +132,8 @@ Building blocks chosen (2026-10-26) [R]:
       `_tls_used`), and the new check proves a `__declspec(thread)` variable is a fresh per-thread copy of
       its template, a new thread does not see another thread's write, and the callback ran for each thread.
 - [x] M2e step 3, x64 exceptions / SEH (`win32/ntdll_unwind.cpp`, `win32/ntdll_exception.cpp`)
-      **host test green, 31 of 31; [i] on iPhone pending**: `RaiseException`, `RtlCaptureContext`,
+      **[i] iPhone 15 (A16), iOS 26.6.2, 2026-10-27: all 31 of 31 pass** (commit `a808fab`):
+      `RaiseException`, `RtlCaptureContext`,
       `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `__C_specific_handler`,
       `RtlRestoreContext` (incl. `STATUS_UNWIND_CONSOLIDATE` → consolidate callback, as MSVC's C++
       exceptions use it), `RtlPcToFileHeader`, `RtlCaptureStackBackTrace`, over the DLL's

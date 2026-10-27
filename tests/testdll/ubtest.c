@@ -144,6 +144,62 @@ static DWORD ThreadMain(void* parameter) {
   return 77;
 }
 
+// --- implicit TLS -------------------------------------------------------------------------------
+// No CRT, so we provide the TLS directory ourselves, the way the MSVC CRT's tlssup.c does: a
+// .tls section bracketed by _tls_start/_tls_end, the _tls_index the loader fills, and a callback
+// array in .CRT$XL* bracketed by __xl_a/__xl_z. The linker finds _tls_used and emits the directory.
+typedef void(__attribute__((ms_abi)) * PIMAGE_TLS_CALLBACK)(void*, DWORD, void*);
+#pragma section(".tls", long, read, write)
+#pragma section(".tls$ZZZ", long, read, write)
+#pragma section(".CRT$XLA", long, read)
+#pragma section(".CRT$XLB", long, read)
+#pragma section(".CRT$XLZ", long, read)
+__declspec(allocate(".tls")) char _tls_start = 0;
+__declspec(allocate(".tls$ZZZ")) char _tls_end = 0;
+unsigned int _tls_index = 0;
+__declspec(allocate(".CRT$XLA")) PIMAGE_TLS_CALLBACK __xl_a = 0;
+__declspec(allocate(".CRT$XLZ")) PIMAGE_TLS_CALLBACK __xl_z = 0;
+typedef struct {
+  unsigned long long StartAddressOfRawData, EndAddressOfRawData, AddressOfIndex, AddressOfCallBacks;
+  DWORD SizeOfZeroFill, Characteristics;
+} IMAGE_TLS_DIRECTORY64;
+__declspec(allocate(".rdata$T")) const IMAGE_TLS_DIRECTORY64 _tls_used = {
+    (unsigned long long)&_tls_start, (unsigned long long)&_tls_end,
+    (unsigned long long)&_tls_index, (unsigned long long)(&__xl_a + 1), 0, 0};
+
+#define DLL_PROCESS_ATTACH 1
+#define DLL_THREAD_ATTACH 2
+
+// A per-thread variable with a non-zero initialiser (so a fresh copy proves the template, not just
+// zeroed memory, was installed) and a larger one to exercise the zero-fill tail.
+__declspec(thread) int g_threadVar = 0x1111;
+__declspec(thread) int g_threadZero[32];
+
+static volatile int g_tlsCallbackCount;
+static volatile int g_sawProcessAttach;
+static volatile DWORD g_tlsCallbackLastReason;
+static void __attribute__((ms_abi)) TlsCallback(void* module, DWORD reason, void* reserved) {
+  (void)module;
+  (void)reserved;
+  ++g_tlsCallbackCount;
+  g_tlsCallbackLastReason = reason;
+  if (reason == DLL_PROCESS_ATTACH) g_sawProcessAttach = 1;
+}
+__declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK __xl_b = TlsCallback;
+
+// Runs on its own thread: its __declspec(thread) data is a fresh copy of the template, and the TLS
+// callback ran for it with DLL_THREAD_ATTACH just before the start routine.
+struct TlsThreadTest { int seen; int zeroTail; DWORD reason; volatile int ran; };
+static DWORD TlsThreadMain(void* parameter) {
+  struct TlsThreadTest* t = (struct TlsThreadTest*)parameter;
+  t->reason = g_tlsCallbackLastReason;
+  t->seen = g_threadVar;          // the template value, independent of the main thread's write
+  t->zeroTail = g_threadZero[31];
+  g_threadVar = 0x3333;
+  t->ran = 1;
+  return 0;
+}
+
 __declspec(dllexport) int ub_test_all(void) {
   int ok = 0;
 
@@ -372,6 +428,23 @@ __declspec(dllexport) int ub_test_all(void) {
     if (h) CloseHandle(h);
   }
 
+  // Implicit TLS: the TLS callback ran at DLL_PROCESS_ATTACH, this thread's __declspec(thread) data
+  // holds the template value, and a new thread gets its own independent copy.
+  {
+    int good = g_tlsCallbackCount >= 1 && g_sawProcessAttach;
+    good &= g_threadVar == 0x1111 && g_threadZero[31] == 0;
+    g_threadVar = 0x2222;
+    static struct TlsThreadTest tt;
+    DWORD id = 0;
+    HANDLE h = CreateThread(0, 0, TlsThreadMain, &tt, 0, &id);
+    good &= h && WaitForSingleObjectEx(h, 5000, 0) == 0 && tt.ran;
+    good &= tt.seen == 0x1111 && tt.zeroTail == 0;   // the thread saw the template, not our write
+    good &= tt.reason == DLL_THREAD_ATTACH;          // the callback ran for the new thread
+    good &= g_threadVar == 0x2222;                   // and did not disturb this thread's copy
+    if (h) CloseHandle(h);
+    if (good) ok |= 1 << 25;
+  }
+
   return ok;
 }
 
@@ -380,3 +453,4 @@ __declspec(dllexport) double ub_test_float(double a, double b) { return a * b + 
 
 // Calls an import that UnityBridge does not implement: must return 0, not crash.
 __declspec(dllexport) DWORD ub_test_missing(void) { return UnityBridgeTestMissingFunction(5); }
+

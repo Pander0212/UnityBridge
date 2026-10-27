@@ -118,6 +118,20 @@ Building blocks chosen (2026-10-26) [R]:
       `Win32::SetThreadRunner`. `ubtest.dll`: 27 checks; the new ones check that a thread has its own TLS
       values and last-error code. Still missing for threads: `SuspendThread`/`GetThreadContext` on a running
       thread (the garbage collector's stop-the-world), `QueueUserAPC`, FLS callbacks at thread exit.
+- [x] M2e step 2, implicit TLS (`win32/tls.cpp`) **host test green, 28 of 28; [i] on iPhone pending**:
+      each guest thread gets its own copy of the DLL's TLS directory, reached through
+      `TEB.ThreadLocalStoragePointer` (`gs:[0x58]`), and the TLS callbacks run with
+      `DLL_PROCESS_ATTACH`/`DLL_THREAD_ATTACH`/`DLL_THREAD_DETACH`. `Win32::RegisterTlsImage` assigns the
+      module a TLS index and writes it to the directory's `AddressOfIndex`; `AllocThreadTls` copies the
+      template (raw data + zero fill) per thread; `InitTeb` fills the shared x64 TEB layout. The host test
+      sets `%gs` per thread with `arch_prctl` (x86-64 Linux keeps its own TLS in `%fs`, so `%gs` is free);
+      the device sets `GsBase` as before and writes TEB+0x58. `ubtest.dll` builds its own TLS directory
+      (no CRT, as MSVC's `tlssup.c` does: `.tls` bracketed by `_tls_start`/`_tls_end`, `.CRT$XL*` callbacks,
+      `_tls_used`), and the new check proves a `__declspec(thread)` variable is a fresh per-thread copy of
+      its template, a new thread does not see another thread's write, and the callback ran for each thread.
+- [ ] M2e step 3, x64 exceptions (SEH): `RaiseException`, `RtlCaptureContext`, `RtlLookupFunctionEntry`,
+      `RtlVirtualUnwind`, `RtlUnwindEx`, `__C_specific_handler`, `STATUS_UNWIND_CONSOLIDATE`, over the DLL's
+      `.pdata`/`UNWIND_INFO`.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

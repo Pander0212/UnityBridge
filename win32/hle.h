@@ -19,6 +19,8 @@
 #include <string_view>
 #include <vector>
 
+namespace UnityBridge::Pe { struct Tls; }
+
 namespace UnityBridge::Win32 {
 
 // What a stub hands over: the argument registers and the stack pointer at the stub's entry.
@@ -136,6 +138,44 @@ uint64_t CallGuest(uintptr_t function, std::initializer_list<uint64_t> arguments
 // thread a guest thread of its own (stack, TEB); in host tests it calls `start` directly.
 using ThreadRunner = uint64_t (*)(uintptr_t start, uint64_t parameter);
 void SetThreadRunner(ThreadRunner runner);
+
+// ---- implicit TLS and the thread environment block (win32/tls.cpp) -----------------------
+// A loaded PE module can carry a TLS directory (__declspec(thread) data and TLS callbacks). Each
+// guest thread needs its own copy of that data, reached through the TEB: x64 Windows code loads
+// gs:[0x58] (ThreadLocalStoragePointer), an array indexed by the module's TLS index, each entry a
+// pointer to that thread's copy of the template. The host and the device both build a TEB with
+// this layout so the same guest code runs against either.
+
+enum DllReason : uint32_t {  // DllMain / TLS-callback reason
+  DLL_PROCESS_DETACH = 0, DLL_PROCESS_ATTACH = 1, DLL_THREAD_ATTACH = 2, DLL_THREAD_DETACH = 3,
+};
+
+// Registers the loaded module's TLS directory, assigns it a TLS index and writes that index to the
+// directory's AddressOfIndex. Called once after the image is loaded; `imageBase` is its HINSTANCE.
+void RegisterTlsImage(uintptr_t imageBase, const Pe::Tls& tls);
+
+// Allocates this guest thread's ThreadLocalStoragePointer array and a fresh copy of each registered
+// module's TLS template, and returns the array address to store at TEB+0x58. Without a registered
+// TLS image it returns 0 (the TEB slot is then null, which guest code without TLS never reads).
+uintptr_t AllocThreadTls();
+void FreeThreadTls(uintptr_t tlsPointer);
+
+// Runs every registered module's TLS callbacks with (HINSTANCE, reason, nullptr) through CallGuest.
+// Call it on the thread whose TEB/TLS is already live (host tests, where CallGuest runs natively).
+void RunTlsCallbacks(DllReason reason);
+
+// The registered TLS callbacks as (callback, HINSTANCE) pairs in call order, for a caller that
+// drives guest execution itself: on the device CallGuest cannot reach a specific idle thread, so
+// the runner invokes each one through GuestEngine::CallWin64 on the thread being started.
+std::vector<std::pair<uintptr_t, uintptr_t>> TlsCallbacks();
+
+// Fills the standard x64 TEB fields plus ThreadLocalStoragePointer into a caller-provided buffer of
+// at least kTebSize zeroed bytes. `peb` points at a zeroed PEB, `tlsPointer` at the thread's TLS
+// array (from AllocThreadTls, may be 0). gs must be based at `self` for the guest to find it.
+constexpr size_t kTebSize = 0x1000;
+constexpr size_t kTebTlsPointerOffset = 0x58;
+void InitTeb(void* teb, uintptr_t stackBase, uintptr_t stackLimit, uintptr_t self, uintptr_t peb,
+             uint32_t pid, uint32_t tid, uintptr_t tlsPointer);
 
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);

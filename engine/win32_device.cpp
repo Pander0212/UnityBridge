@@ -111,6 +111,7 @@ struct CallResult {
 struct GuestThread {
   HostMemory entry {kPage}, stack {1 << 20}, teb {2 * kPage};
   AetherPS4::Fex::GuestEngine::Thread* thread = nullptr;
+  uintptr_t tls = 0;  // ThreadLocalStoragePointer (TEB+0x58), freed in DestroyGuestThread
 
   // `report` may be null (threads the guest creates log to stderr).
   bool Create(AetherPS4::Fex::GuestEngine& engine, Report* report) {
@@ -130,11 +131,15 @@ struct GuestThread {
     uint64_t tid = 0;
     pthread_threadid_np(nullptr, &tid);
     tid = static_cast<uint32_t>(tid);  // GetCurrentThreadId's value
+    // ThreadLocalStoragePointer @0x58: this thread's copy of each module's __declspec(thread) data,
+    // so gs:[0x58] reaches implicit TLS the way it does on Windows.
+    tls = Win32::AllocThreadTls();
     std::memcpy(t + 0x08, &stackBase, 8);
     std::memcpy(t + 0x10, &stackLimit, 8);
     std::memcpy(t + 0x30, &self, 8);
     std::memcpy(t + 0x40, &pid, 8);
     std::memcpy(t + 0x48, &tid, 8);
+    std::memcpy(t + 0x58, &tls, 8);
     std::memcpy(t + 0x60, &peb, 8);
 
     Core::GuestExecutionRequest request;
@@ -179,9 +184,23 @@ CallResult CallWindows(GuestThread& guest, Report& report, uintptr_t target, std
 
 // Win32::ThreadRunner on iPhone: the new host thread gets a guest thread of its own for the start
 // routine and gives it back before the thread counts as finished (Shutdown needs none left).
+// Runs the registered TLS callbacks on `guest` with the given reason (DLL_THREAD_ATTACH etc.).
+void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
+  for (const auto& [callback, imageBase] : Win32::TlsCallbacks()) {
+    AetherPS4::Fex::Win64Call call;
+    call.Rip = callback;
+    call.Gpr[0] = imageBase;
+    call.Gpr[1] = reason;
+    call.Gpr[2] = 0;
+    g_engine->CallWin64(guest.thread, call);
+  }
+}
+
 uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
   GuestThread guest;
   if (!guest.Create(*g_engine, nullptr)) return 0xffffffffu;
+  // The Windows loader runs the TLS callbacks with DLL_THREAD_ATTACH before the start routine.
+  RunTlsCallbacksOn(guest, Win32::DLL_THREAD_ATTACH);
   AetherPS4::Fex::Win64Call call;
   call.Rip = start;
   call.Gpr[0] = parameter;
@@ -193,6 +212,8 @@ uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
   } else {
     code = std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
   }
+  RunTlsCallbacksOn(guest, Win32::DLL_THREAD_DETACH);
+  Win32::FreeThreadTls(guest.tls);
   g_engine->DestroyThread(guest.thread);
   return code;
 }
@@ -221,6 +242,7 @@ const char* kChecks[] = {
     "files, find, mapping (profile folder)", "locale: case mapping, compare, en-US", "InterlockedFlushSList",
     "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
     "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread",
+    "implicit TLS: __declspec(thread) + callback",
 };
 
 } // namespace
@@ -261,6 +283,7 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   module.base = reinterpret_cast<uintptr_t>(image.base);
   module.lookup = [&image](std::string_view name) { return image.Export(name); };
   Win32::RegisterModule(std::move(module), true);
+  if (image.tls) Win32::RegisterTlsImage(reinterpret_cast<uintptr_t>(image.base), *image.tls);
 
   static Win32Bridge bridge;
   bridge.runtime = &runtime;
@@ -294,6 +317,10 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
 
   int failures = 0;
 
+  // The initial thread runs the TLS callbacks with DLL_PROCESS_ATTACH before any export, as the
+  // Windows loader does; this installs each thread variable's template and lets the callback run.
+  RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_ATTACH);
+
   const auto r = CallWindows(guest, report, *all, {});
   if (!r.ok) ++failures;
   const auto bits = static_cast<uint32_t>(r.rax);
@@ -318,6 +345,8 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   if (!missingOk) report.Line("  rax=%#llx, recorded as unimplemented: %s", static_cast<unsigned long long>(m.rax), logged ? "yes" : "no");
   report.Line("%-40s %s", "unimplemented import returns 0", missingOk ? "ok" : "FAIL");
 
+  RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_DETACH);
+  Win32::FreeThreadTls(guest.tls);
   engine->DestroyThread(guest.thread);
   Win32::SetGuestCaller(nullptr);
   Win32::SetThreadRunner(nullptr);

@@ -16,7 +16,8 @@ add_library(ub_win32 STATIC
   win32/baselib.cpp
   win32/kernel32_sync.cpp
   win32/kernel32_files.cpp
-  win32/kernel32_misc.cpp)
+  win32/kernel32_misc.cpp
+  win32/tls.cpp)
 target_include_directories(ub_win32 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(ub_win32 PRIVATE -Wall -Wextra)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")

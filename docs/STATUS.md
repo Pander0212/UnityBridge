@@ -111,7 +111,7 @@ Building blocks chosen (2026-10-26) [R]:
       import (callbacks). `Win32::CallGuest` lets imports call back: `FlsFree` runs the slot's callback,
       `EnumSystemLocalesW` reports en-US. `ubtest.dll`: 25 checks, two new ones for callbacks (one calls an
       import from inside the callback: guest → host → guest → host). Host tests pass (also ASan/UBSan).
-- [ ] M2e step 1, threads (commit `adcc45e`, CI green, **not yet run on iPhone**): `CreateThread` (incl. `CREATE_SUSPENDED`),
+- [x] M2e step 1, threads (commit `adcc45e`) **[i] iPhone 15, iOS 26.6.2, 2026-10-27: 27 of 27**: `CreateThread` (incl. `CREATE_SUSPENDED`),
       `ResumeThread`, `GetExitCodeThread`, `GetThreadId`, `Set/GetThreadPriority` (accepted, not applied); a
       thread handle is waitable and signalled with its exit code. Each guest thread is a host thread with a
       FEXCore guest thread of its own (1 MiB stack, TEB with stack limits and thread id), started through

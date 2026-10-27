@@ -12,6 +12,9 @@ on:
       - jit/**
       - third_party/**
       - app/**
+      - loader/**
+      - win32/**
+      - tests/testdll/**
 permissions:
   contents: read
 concurrency:
@@ -33,7 +36,7 @@ jobs:
           key: fexcore-ios-v1-${{ github.run_id }}
           restore-keys: fexcore-ios-v1-
       - name: Build tools
-        run: brew install -q ccache cmake ninja xcodegen
+        run: brew install -q ccache cmake ninja xcodegen llvm lld
       - name: Build FEXCore and the engine
         run: |
           set -o pipefail
@@ -58,6 +61,14 @@ jobs:
             -c "Add :CFBundleShortVersionString string 1.0" -c "Add :CFBundleVersion string 1" \
             -c "Add :MinimumOSVersion string 17.0" "$fw/Info.plist"
           xcrun nm -gU "$fw/BreakpointJIT"
+      - name: Build the Windows test DLL
+        run: |
+          set -euo pipefail
+          CLANG="$(brew --prefix llvm)/bin/clang" DLLTOOL="$(brew --prefix llvm)/bin/llvm-dlltool" \
+            LLD_LINK="$(brew --prefix lld)/bin/lld-link" bash tests/testdll/build.sh build/testdll
+          mkdir -p app/Generated
+          cp build/testdll/ubtest.dll app/Generated/ubtest.dll
+          ls -la app/Generated/ubtest.dll
       - name: Build the app
         run: |
           set -euo pipefail
@@ -79,6 +90,7 @@ jobs:
           set -euo pipefail
           app=build/DerivedData/Build/Products/Release-iphoneos/UnityBridgeProbe.app
           test -f "$app/madeira-jit.js" || { echo "madeira-jit.js missing from the app bundle"; exit 1; }
+          test -f "$app/ubtest.dll" || { echo "ubtest.dll missing from the app bundle"; exit 1; }
           mkdir -p "$app/Frameworks"
           cp -R build/BreakpointJIT.framework "$app/Frameworks/"
           # Ad-hoc placeholder signatures; the sideloading tool re-signs with the user's certificate.

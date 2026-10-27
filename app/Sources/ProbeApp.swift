@@ -84,9 +84,14 @@ struct ProbeView: View {
                 if !message.isEmpty {
                     Text(message).font(.footnote).foregroundStyle(.secondary)
                 }
-                Button(running ? "Running…" : "Run x86-64 probe", action: run)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(running || jit != .ready)
+                HStack {
+                    Button(running ? "Running…" : "Run x86-64 probe", action: run)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(running || jit != .ready)
+                    Button("Run Windows DLL test", action: runWindowsDLL)
+                        .buttonStyle(.bordered)
+                        .disabled(running || jit != .ready)
+                }
                 ScrollView {
                     Text(report.isEmpty ? "No result yet." : report)
                         .font(.system(.footnote, design: .monospaced))
@@ -155,6 +160,30 @@ struct ProbeView: View {
         Thread.detachNewThread {
             var buffer = [CChar](repeating: 0, count: 8192)
             let status = ub_probe_run(&buffer, buffer.count)
+            let text = String(cString: buffer) + "\nexit status \(status)"
+            DispatchQueue.main.async {
+                report = text
+                running = false
+            }
+        }
+    }
+
+    /// M2d: our own Windows test DLL (tests/testdll, bundled) under FEXCore against the mini Win32.
+    private func runWindowsDLL() {
+        jit = JITState.current
+        guard jit == .ready else { return }
+        guard let dll = Bundle.main.url(forResource: "ubtest", withExtension: "dll") else {
+            report = "ubtest.dll is missing from this build."
+            return
+        }
+        let profile = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Profile", isDirectory: true)
+        try? FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        running = true
+        report = ""
+        Thread.detachNewThread {
+            var buffer = [CChar](repeating: 0, count: 16384)
+            let status = ub_win32_device_run(dll.path, profile.path, &buffer, buffer.count)
             let text = String(cString: buffer) + "\nexit status \(status)"
             DispatchQueue.main.async {
                 report = text

@@ -6,3 +6,6 @@
 bool ub_probe_jit_attached(void);
 bool ub_probe_debugger_attached(void);
 int ub_probe_run(char *out, size_t capacity);
+
+// engine/win32_device.cpp
+int ub_win32_device_run(const char *dllPath, const char *profileDir, char *out, size_t capacity);

@@ -131,6 +131,12 @@ using GuestCaller = uint64_t (*)(uintptr_t function, std::span<const uint64_t> a
 void SetGuestCaller(GuestCaller caller);
 uint64_t CallGuest(uintptr_t function, std::initializer_list<uint64_t> arguments);
 
+// Runs a thread the guest creates (CreateThread): called on a new host thread, it must run
+// `start(parameter)` as guest code there and return its exit code. On iPhone it gives the host
+// thread a guest thread of its own (stack, TEB); in host tests it calls `start` directly.
+using ThreadRunner = uint64_t (*)(uintptr_t start, uint64_t parameter);
+void SetThreadRunner(ThreadRunner runner);
+
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);
 uint32_t LastErrorValue();

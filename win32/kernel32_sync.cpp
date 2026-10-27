@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// KERNEL32 waitable objects: events, mutexes, semaphores, and waiting on one or several of them.
+// KERNEL32 waitable objects: events, mutexes, semaphores, threads, and waiting on one or several
+// of them.
 // All objects share one lock and one condition variable; every state change wakes all waiters,
 // which then re-check. Simple and correct for WaitForMultipleObjects (any and all).
 #include "common.h"
@@ -59,6 +60,16 @@ struct Semaphore final : Object {
   int32_t count {}, maximum {};
   bool Signalled() const override { return count > 0; }
   void Acquire() override { --count; }
+};
+
+// A guest thread: one host thread that runs the start routine through the ThreadRunner. Signalled
+// once it has finished. CREATE_SUSPENDED holds it before the start routine until ResumeThread.
+struct Thread final : Object {
+  uint64_t id {};
+  int32_t suspendCount {};
+  bool finished {};
+  DWORD exitCode {};
+  bool Signalled() const override { return finished; }
 };
 
 std::map<uint64_t, std::shared_ptr<Object>> g_handles;
@@ -192,6 +203,75 @@ uint64_t WaitForMultipleObjectsEx(CallContext& c) {
   return Wait(handles, c.Arg(2) != 0, static_cast<DWORD>(c.Arg(3)));
 }
 
+// ---- threads -----------------------------------------------------------------------------
+
+constexpr DWORD STILL_ACTIVE = 259, CREATE_SUSPENDED = 0x4;
+ThreadRunner g_threadRunner = nullptr;
+
+// CreateThread(attributes, stackSize, start, parameter, flags, threadId*)
+uint64_t CreateThread(CallContext& c) {
+  const uintptr_t start = c.Arg(2);
+  const uint64_t parameter = c.Arg(3);
+  const auto flags = static_cast<DWORD>(c.Arg(4));
+  if (g_threadRunner == nullptr || start == 0) return SetError(ERROR_NOT_SUPPORTED, 0);
+  auto thread = std::make_shared<Thread>();
+  thread->suspendCount = (flags & CREATE_SUSPENDED) ? 1 : 0;
+  const uint64_t handle = Insert(thread);
+  // The new thread reports its id before CreateThread returns, as Windows fills lpThreadId.
+  std::thread([thread, start, parameter, runner = g_threadRunner] {
+    {
+      std::unique_lock lock {g_lock};
+      thread->id = static_cast<DWORD>(ThreadId());
+      g_changed.notify_all();
+      g_changed.wait(lock, [&] { return thread->suspendCount <= 0; });
+    }
+    const auto code = static_cast<DWORD>(runner(start, parameter));
+    {
+      std::scoped_lock lock {g_lock};
+      thread->exitCode = code;
+      thread->finished = true;
+    }
+    g_changed.notify_all();
+  }).detach();
+  std::unique_lock lock {g_lock};
+  g_changed.wait(lock, [&] { return thread->id != 0; });
+  Store<DWORD>(c.Arg(5), static_cast<DWORD>(thread->id));
+  return handle;
+}
+
+// Returns the previous suspend count; only threads created suspended can be resumed (SuspendThread
+// on a running thread needs the engine to stop it, not done yet).
+uint64_t ResumeThread(CallContext& c) {
+  int32_t previous;
+  {
+    std::scoped_lock lock {g_lock};
+    auto* thread = Find<Thread>(c.Arg(0));
+    if (thread == nullptr) return SetError(ERROR_INVALID_HANDLE, 0xffffffffu);
+    previous = thread->suspendCount;
+    if (thread->suspendCount > 0) --thread->suspendCount;
+  }
+  g_changed.notify_all();
+  return static_cast<DWORD>(previous);
+}
+
+uint64_t GetExitCodeThread(CallContext& c) {
+  std::scoped_lock lock {g_lock};
+  auto* thread = Find<Thread>(c.Arg(0));
+  if (thread == nullptr) return SetError(ERROR_INVALID_HANDLE, kFalse);
+  Store<DWORD>(c.Arg(1), thread->finished ? thread->exitCode : STILL_ACTIVE);
+  return kTrue;
+}
+
+uint64_t GetThreadId(CallContext& c) {
+  std::scoped_lock lock {g_lock};
+  auto* thread = Find<Thread>(c.Arg(0));
+  return thread ? thread->id : SetError(ERROR_INVALID_HANDLE, 0);
+}
+
+// Priorities are accepted and not applied; THREAD_PRIORITY_NORMAL is reported.
+uint64_t SetThreadPriority(CallContext&) { return kTrue; }
+uint64_t GetThreadPriority(CallContext&) { return 0; }
+
 uint64_t CloseHandle(CallContext& c) {
   if (CloseFileObject(c.Arg(0))) return kTrue;
   std::scoped_lock lock {g_lock};
@@ -217,6 +297,8 @@ uint64_t DuplicateHandle(CallContext& c) {
 
 } // namespace
 
+void SetThreadRunner(ThreadRunner runner) { g_threadRunner = runner; }
+
 void RegisterKernel32Sync(std::vector<Function>& out) {
   const std::string k = "kernel32.dll";
 #define UB_FN(name) out.push_back({k, #name, &name})
@@ -225,6 +307,8 @@ void RegisterKernel32Sync(std::vector<Function>& out) {
   UB_FN(CreateSemaphoreW); UB_FN(ReleaseSemaphore);
   UB_FN(WaitForSingleObjectEx); UB_FN(WaitForMultipleObjectsEx);
   UB_FN(CloseHandle); UB_FN(DuplicateHandle);
+  UB_FN(CreateThread); UB_FN(ResumeThread); UB_FN(GetExitCodeThread); UB_FN(GetThreadId);
+  UB_FN(SetThreadPriority); UB_FN(GetThreadPriority);
   out.push_back({k, "WaitForSingleObject", &WaitForSingleObjectEx});
 #undef UB_FN
 }

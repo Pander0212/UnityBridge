@@ -54,3 +54,8 @@ EnumSystemLocalesW
 FlsAlloc
 FlsSetValue
 FlsFree
+CreateThread
+ResumeThread
+GetExitCodeThread
+GetCurrentThreadId
+Sleep

@@ -26,6 +26,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <pthread.h>
 #include <string>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -111,11 +112,14 @@ struct GuestThread {
   HostMemory entry {kPage}, stack {1 << 20}, teb {2 * kPage};
   AetherPS4::Fex::GuestEngine::Thread* thread = nullptr;
 
-  bool Create(AetherPS4::Fex::GuestEngine& engine, Report& report) {
-    if (!entry.ok() || !stack.ok() || !teb.ok()) {
-      report.Line("FAIL host memory for the guest thread");
+  // `report` may be null (threads the guest creates log to stderr).
+  bool Create(AetherPS4::Fex::GuestEngine& engine, Report* report) {
+    auto fail = [&](const char* what, int stage, int error) {
+      if (report) report->Line("FAIL %s: stage=%d error=%d", what, stage, error);
+      else std::fprintf(stderr, "UB_WIN32_DEVICE FAIL %s: stage=%d error=%d\n", what, stage, error);
       return false;
-    }
+    };
+    if (!entry.ok() || !stack.ok() || !teb.ok()) return fail("host memory for the guest thread", 0, ENOMEM);
     *static_cast<uint8_t*>(entry.base) = 0xf4;  // hlt
     mprotect(entry.base, kPage, PROT_READ);     // the engine requires guest code host read-only
     // TEB (x64): NT_TIB.StackBase @0x8, StackLimit @0x10, Self @0x30, ClientId @0x40/0x48,
@@ -123,10 +127,14 @@ struct GuestThread {
     auto* t = static_cast<uint8_t*>(teb.base);
     const uint64_t stackBase = stack.addr() + stack.size, stackLimit = stack.addr(), self = teb.addr();
     const uint64_t peb = teb.addr() + kPage, pid = static_cast<uint64_t>(getpid());
+    uint64_t tid = 0;
+    pthread_threadid_np(nullptr, &tid);
+    tid = static_cast<uint32_t>(tid);  // GetCurrentThreadId's value
     std::memcpy(t + 0x08, &stackBase, 8);
     std::memcpy(t + 0x10, &stackLimit, 8);
     std::memcpy(t + 0x30, &self, 8);
     std::memcpy(t + 0x40, &pid, 8);
+    std::memcpy(t + 0x48, &tid, 8);
     std::memcpy(t + 0x60, &peb, 8);
 
     Core::GuestExecutionRequest request;
@@ -137,8 +145,7 @@ struct GuestThread {
     request.MappedRanges = {{entry.addr(), kPage, true, false}, {stack.addr(), stack.size, false, true}};
     auto created = engine.CreateThread(request);
     if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&created)) {
-      report.Line("FAIL create guest thread: stage=%d error=%d", static_cast<int>(failure->Stage), failure->Error);
-      return false;
+      return fail("create guest thread", static_cast<int>(failure->Stage), failure->Error);
     }
     thread = std::get<AetherPS4::Fex::GuestEngine::Thread*>(created);
     return true;
@@ -170,6 +177,26 @@ CallResult CallWindows(GuestThread& guest, Report& report, uintptr_t target, std
   return out;
 }
 
+// Win32::ThreadRunner on iPhone: the new host thread gets a guest thread of its own for the start
+// routine and gives it back before the thread counts as finished (Shutdown needs none left).
+uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
+  GuestThread guest;
+  if (!guest.Create(*g_engine, nullptr)) return 0xffffffffu;
+  AetherPS4::Fex::Win64Call call;
+  call.Rip = start;
+  call.Gpr[0] = parameter;
+  auto run = g_engine->CallWin64(guest.thread, call);
+  uint64_t code = 0xffffffffu;
+  if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
+    std::fprintf(stderr, "UB_WIN32_DEVICE thread %#lx failed: stage=%d error=%d\n", static_cast<unsigned long>(start),
+                 static_cast<int>(failure->Stage), failure->Error);
+  } else {
+    code = std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
+  }
+  g_engine->DestroyThread(guest.thread);
+  return code;
+}
+
 // Win32::CallGuest on iPhone: a callback from inside an import, nested on the calling guest thread.
 uint64_t CallGuestNested(uintptr_t function, std::span<const uint64_t> arguments) {
   AetherPS4::Fex::Win64Call call;
@@ -193,6 +220,7 @@ const char* kChecks[] = {
     "SHGetFolderPathW", "baselib semaphore (C++ names)", "events, mutex, semaphore, waits",
     "files, find, mapping (profile folder)", "locale: case mapping, compare, en-US", "InterlockedFlushSList",
     "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
+    "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread",
 };
 
 } // namespace
@@ -250,13 +278,15 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   g_engine = engine.get();
   bridge.executable.push_back(engine->CallbackReturnRange());
   Win32::SetGuestCaller(&CallGuestNested);
+  Win32::SetThreadRunner(&RunGuestThread);
   const auto all = image.Export("ub_test_all");
   const auto fl = image.Export("ub_test_float");
   const auto missing = image.Export("ub_test_missing");
   GuestThread guest;
-  if (!all || !fl || !missing || !guest.Create(*engine, report)) {
+  if (!all || !fl || !missing || !guest.Create(*engine, &report)) {
     if (!all || !fl || !missing) report.Line("FAIL exports missing");
     Win32::SetGuestCaller(nullptr);
+    Win32::SetThreadRunner(nullptr);
     engine->Shutdown();
     g_engine = nullptr;
     return finish(1);
@@ -290,7 +320,11 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
 
   engine->DestroyThread(guest.thread);
   Win32::SetGuestCaller(nullptr);
-  engine->Shutdown();
+  Win32::SetThreadRunner(nullptr);
+  const auto shutdown = engine->Shutdown();
+  if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&shutdown)) {
+    report.Line("engine shutdown: stage=%d error=%d", static_cast<int>(failure->Stage), failure->Error);
+  }
   g_engine = nullptr;
   if (failures) report.Line("RESULT: %d checks failed", failures);
   else report.Line("RESULT: all checks passed");

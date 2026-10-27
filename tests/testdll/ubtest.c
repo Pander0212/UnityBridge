@@ -65,6 +65,11 @@ IMPORT BOOL EnumSystemLocalesW(BOOL (*)(WCHAR*), DWORD);
 IMPORT DWORD FlsAlloc(void (*)(void*));
 IMPORT BOOL FlsSetValue(DWORD, void*);
 IMPORT BOOL FlsFree(DWORD);
+IMPORT HANDLE CreateThread(void*, unsigned long long, DWORD (*)(void*), void*, DWORD, DWORD*);
+IMPORT DWORD ResumeThread(HANDLE);
+IMPORT BOOL GetExitCodeThread(HANDLE, DWORD*);
+IMPORT DWORD GetCurrentThreadId(void);
+IMPORT void Sleep(DWORD);
 
 static int Append(WCHAR* to, int at, const char* text) {
   while (*text) to[at++] = (WCHAR)*text++;
@@ -127,6 +132,16 @@ static void* volatile g_flsFreed;
 static void FlsFreed(void* value) {
   g_flsFreed = value;
   SetLastError(4321);
+}
+
+// Runs on its own thread: its last-error value and TLS slot are its own.
+struct ThreadTest { DWORD slot; DWORD id; volatile int ran; };
+static DWORD ThreadMain(void* parameter) {
+  struct ThreadTest* t = (struct ThreadTest*)parameter;
+  SetLastError(99);
+  t->id = GetCurrentThreadId();
+  t->ran = GetLastError() == 99 && TlsGetValue(t->slot) == 0 && TlsSetValue(t->slot, (void*)7);  // TlsGetValue clears it
+  return 77;
 }
 
 __declspec(dllexport) int ub_test_all(void) {
@@ -333,6 +348,28 @@ __declspec(dllexport) int ub_test_all(void) {
     SetLastError(0);
     if (slot != 0xffffffffu && FlsSetValue(slot, (void*)0x5678) && FlsFree(slot) && g_flsFreed == (void*)0x5678 &&
         GetLastError() == 4321) ok |= 1 << 22;
+  }
+
+  // Threads: CreateThread runs the start routine on a new thread with its own TLS and last error;
+  // the handle becomes signalled with the exit code. CREATE_SUSPENDED waits for ResumeThread.
+  {
+    static struct ThreadTest t;
+    DWORD id = 0, code = 0;
+    t.slot = TlsAlloc();
+    TlsSetValue(t.slot, (void*)3);
+    SetLastError(5);
+    HANDLE h = CreateThread(0, 0, ThreadMain, &t, 0, &id);
+    if (h && WaitForSingleObjectEx(h, 0xffffffffu, 0) == 0 && GetExitCodeThread(h, &code) && code == 77 && t.ran &&
+        id != 0 && t.id == id && id != GetCurrentThreadId() && GetLastError() == 5 && TlsGetValue(t.slot) == (void*)3)
+      ok |= 1 << 23;
+    if (h) CloseHandle(h);
+
+    t.ran = 0;
+    h = CreateThread(0, 0, ThreadMain, &t, 0x4 /* CREATE_SUSPENDED */, &id);
+    Sleep(20);
+    BOOL heldBack = h && GetExitCodeThread(h, &code) && code == 259 /* STILL_ACTIVE */ && !t.ran;
+    if (heldBack && ResumeThread(h) == 1 && WaitForSingleObjectEx(h, 5000, 0) == 0 && t.ran) ok |= 1 << 24;
+    if (h) CloseHandle(h);
   }
 
   return ok;

@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
                          reinterpret_cast<uintptr_t>(&ub_win32_host_entry));
   Win32::Runtime::SetCurrent(&runtime);
   Win32::SetGuestCaller(&CallGuestNative);
+  Win32::SetThreadRunner([](uintptr_t start, uint64_t parameter) { return CallGuestNative(start, {&parameter, 1}); });
 
   // The guest's C:\Users\Player lands in a fresh temporary folder.
   char profile[] = "/tmp/ubtest-profile-XXXXXX";
@@ -75,7 +76,7 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 74, "74 imports");
+  Check(image.imports.size() == 79, "79 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";
@@ -104,8 +105,9 @@ int main(int argc, char** argv) {
                          "events, mutex, semaphore, waits",
                          "files, find, mapping (profile folder)",
                          "locale: case mapping, compare, en-US", "InterlockedFlushSList",
-                         "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)"};
-  for (int i = 0; i < 23; ++i) Check(bits & (1 << i), names[i]);
+                         "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
+                         "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread"};
+  for (int i = 0; i < 25; ++i) Check(bits & (1 << i), names[i]);
 
   Check(reinterpret_cast<FloatFn>(*fl)(3.0, 4.0) == 12.5, "double arguments and xmm0 return");
 

@@ -104,13 +104,20 @@ Building blocks chosen (2026-10-26) [R]:
         FEXCore, which caches translated blocks by guest address, ran the earlier call's target again. Fix: one
         trampoline page for all calls (`call r11; hlt`, target in r11). Lesson for M2e: guest code addresses
         must not be reused without `GuestEngine::Invalidate`.
-- [ ] M2d+: calls in both directions (commit `907712f`, CI green, **not yet run on iPhone**):
+- [x] M2d+: calls in both directions (commit `907712f`) **[i] iPhone 15, iOS 26.6.2, 2026-10-27: 25 of 25**:
       `GuestEngine::CallWin64` (vendored engine, UnityBridge addition) runs a guest function with the Microsoft
       x64 convention to its return through FEXCore's `HandleCallback` — on one reusable guest thread from the
       host (what `libunity` calling `il2cpp_*` will need), or nested on the guest thread that is inside an
       import (callbacks). `Win32::CallGuest` lets imports call back: `FlsFree` runs the slot's callback,
       `EnumSystemLocalesW` reports en-US. `ubtest.dll`: 25 checks, two new ones for callbacks (one calls an
       import from inside the callback: guest → host → guest → host). Host tests pass (also ASan/UBSan).
+- [ ] M2e step 1, threads (CI pending, **not yet run on iPhone**): `CreateThread` (incl. `CREATE_SUSPENDED`),
+      `ResumeThread`, `GetExitCodeThread`, `GetThreadId`, `Set/GetThreadPriority` (accepted, not applied); a
+      thread handle is waitable and signalled with its exit code. Each guest thread is a host thread with a
+      FEXCore guest thread of its own (1 MiB stack, TEB with stack limits and thread id), started through
+      `Win32::SetThreadRunner`. `ubtest.dll`: 27 checks; the new ones check that a thread has its own TLS
+      values and last-error code. Still missing for threads: `SuspendThread`/`GetThreadContext` on a running
+      thread (the garbage collector's stop-the-world), `QueueUserAPC`, FLS callbacks at thread exit.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

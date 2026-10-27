@@ -99,3 +99,40 @@ Building blocks chosen (2026-10-26) [R]:
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.
 - [ ] iOS test app built by GitHub Actions (macOS), JIT via StikDebug/StikJIT; game files copied onto the device by
       the user.
+
+## M4 research: D3D11 shaders → GLES3 (2026-10-27) [R]
+
+Measured with `tools/research/*.py` (UnityPy, data only):
+
+| | Fellworld (2021.3.18) | FantasyStudio (6000.0.60) |
+|---|---|---|
+| Shaders / passes | 32 / 77 (URP, TextMeshPro) | 55 / 139 (URP 2D) |
+| Subprograms | 2,639 (245 vertex, 2,394 pixel) | 5,489 (2,317 vertex, 3,172 pixel) |
+| Shader model | SM 4.0 (95 %), SM 5.0 | SM 4.0, few SM 5.0 |
+| Geometry/hull/domain | none | none |
+| Compute shaders | 0 | 1 |
+| Unique DXBC programs | 506 | (not counted) |
+
+- **DXBC in Unity player builds has no reflection** (`RDEF` is stripped): only `ISGN`/`OSGN` and
+  `SHDR`/`SHEX`. Names and layouts live in Unity's own tables instead: per program
+  `m_CommonParameters` (or per-subprogram parameters) with `m_TextureParams` (register `m_Index`,
+  `m_SamplerIndex`, `m_Dim`), `m_ConstantBuffers` (name, size, members), `m_ConstantBufferBindings`
+  (register), `m_Samplers`, `m_UAVParams`; names by `m_NameIndex`.
+- **Target format, from Unity's own Android resources** (2021.3.18 Android module,
+  `Data/unity default resources`: platforms 5, 9 = GLES3x, 18 = Vulkan; 153 GLES3 + 153 SPIR-V programs):
+  a GLES3 program is **HLSLcc output text** (`hlslcc_mtx4x4unity_ObjectToWorld`, `u_xlat0`,
+  `in_POSITION0`, `SV_Target0`, `UNITY_LOCATION`/`UNITY_BINDING` macros) with **vertex and fragment in
+  one source**, split by `#ifdef VERTEX` / `#ifdef FRAGMENT`, stored as one vertex subprogram.
+- **Converter**: [HLSLcc](https://github.com/Unity-Technologies/HLSLcc) (MIT) is the translator Unity
+  itself uses for GLES3/Vulkan/Metal, so its output matches Unity's conventions. It reads reflection from
+  `RDEF`; since that is stripped, the plan is to synthesise it from Unity's parameter tables (or feed
+  HLSLcc's reflection structures directly). Alternative: dxbc-spirv (DXVK 3.0, MIT per mirror) for Vulkan,
+  but then Unity's Vulkan binding scheme has to be rebuilt.
+- **Plan (on device at import; game data never in CI):**
+  1. For each unique D3D11 program pair (vertex + pixel), build reflection from the parameter tables,
+     run HLSLcc → GLSL ES 3.0, join both into Unity's one-source layout.
+  2. Add a GLES3x platform to each Shader: new LZ4 blob, parameter blob and `m_PlayerSubPrograms` group
+     with `kShaderGpuProgramGLES3`; write the modified serialized file next to the original.
+  3. Check with the Android player (M3) that it picks GLES3 and draws (ANGLE → Metal through Husk's layer).
+- Open questions: how the GLES3 parameter blob maps uniforms/texture units; whether the Android player
+  accepts data built for `StandaloneWindows64` at all (M3 risk); keyword/variant selection.

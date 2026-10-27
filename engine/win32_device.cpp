@@ -4,8 +4,11 @@
 // GuestEngine) with the Microsoft x64 convention.
 //
 // How a call is set up:
-//  - A 16 KiB trampoline page (host read-only): mov rax, target; call rax; hlt. The thread starts
-//    there, the export returns into the hlt, and GuestEngine::Run comes back.
+//  - One 16 KiB trampoline page (host read-only) for all calls: call r11; hlt, with the target in
+//    r11 (volatile, never an argument). The thread starts there, the export returns into the hlt,
+//    and GuestEngine::Run comes back. The code never changes: FEXCore caches translated blocks by
+//    address, so a fresh trampoline per call that lands where an earlier one was unmapped would run
+//    the earlier call's target again (what the first iPhone run of the missing-import check hit).
 //  - A guest stack (host read-write), 16-byte aligned at the call, with 32 bytes of shadow space.
 //  - A minimal TEB as the gs: base (stack limits, self pointer, PEB), which MSVC code reads.
 //  - Arguments in rcx, rdx, r8, r9 / xmm0-xmm3; the result from rax / xmm0.
@@ -105,23 +108,29 @@ struct CallResult {
   uint64_t xmm0 = 0;
 };
 
+// The shared trampoline page: call r11; hlt (`length` bytes).
+struct Trampoline {
+  HostMemory page {kPage};
+  size_t length = 0;
+  Trampoline() {
+    if (!page.ok()) return;
+    auto* code = static_cast<uint8_t*>(page.base);
+    code[length++] = 0x41; code[length++] = 0xff; code[length++] = 0xd3;  // call r11
+    code[length++] = 0xf4;                                                 // hlt
+    mprotect(page.base, kPage, PROT_READ);  // the engine requires guest code host read-only
+  }
+};
+
 // Calls `target(args...)` with the Microsoft x64 convention on a fresh guest thread.
 CallResult CallWindows(AetherPS4::Fex::GuestEngine& engine, Report& report, uintptr_t target,
                        std::initializer_list<uint64_t> args, std::initializer_list<double> doubles = {}) {
   CallResult out;
-  HostMemory trampoline(kPage), stack(1 << 20), teb(2 * kPage);
-  if (!trampoline.ok() || !stack.ok() || !teb.ok()) {
+  static Trampoline trampoline;
+  HostMemory stack(1 << 20), teb(2 * kPage);
+  if (!trampoline.page.ok() || !stack.ok() || !teb.ok()) {
     report.Line("FAIL host memory for the call");
     return out;
   }
-  auto* code = static_cast<uint8_t*>(trampoline.base);
-  size_t n = 0;
-  code[n++] = 0x48; code[n++] = 0xb8;  // mov rax, imm64
-  std::memcpy(code + n, &target, 8);
-  n += 8;
-  code[n++] = 0xff; code[n++] = 0xd0;  // call rax
-  code[n++] = 0xf4;                    // hlt
-  mprotect(trampoline.base, kPage, PROT_READ);  // the engine requires guest code host read-only
 
   const uintptr_t stackTop = stack.addr() + stack.size;
   // TEB (x64): NT_TIB.StackBase @0x8, StackLimit @0x10, Self @0x30, ClientId @0x40/0x48,
@@ -136,7 +145,8 @@ CallResult CallWindows(AetherPS4::Fex::GuestEngine& engine, Report& report, uint
   std::memcpy(t + 0x60, &peb, 8);
 
   Core::GuestExecutionRequest request;
-  request.Rip = trampoline.addr();
+  request.Rip = trampoline.page.addr();
+  request.Gpr[X86::REG_R11] = target;
   request.Rsp = stackTop - 0x20;  // 16-byte aligned at `call`; the callee's shadow space is above
   request.Rflags = 1u << 1;
   request.GsBase = teb.addr();
@@ -146,7 +156,7 @@ CallResult CallWindows(AetherPS4::Fex::GuestEngine& engine, Report& report, uint
   i = 0;
   for (const auto d : doubles) if (i < 4) std::memcpy(request.Xmm[i++].data(), &d, 8);
   request.MappedRanges = {
-      {trampoline.addr(), kPage, true, false},
+      {trampoline.page.addr(), kPage, true, false},
       {stack.addr(), stack.size, false, true},
   };
 
@@ -161,7 +171,7 @@ CallResult CallWindows(AetherPS4::Fex::GuestEngine& engine, Report& report, uint
     report.Line("FAIL run: stage=%d error=%d", static_cast<int>(failure->Stage), failure->Error);
   } else {
     const auto& state = std::get<Core::GuestExecutionState>(run);
-    const uintptr_t expectedStop = trampoline.addr() + n;  // just past the hlt
+    const uintptr_t expectedStop = trampoline.page.addr() + trampoline.length;  // just past the hlt
     out.ok = state.Rip == expectedStop || state.Rip == expectedStop - 1;
     if (!out.ok) report.Line("FAIL guest stopped at rip=%#lx, expected the trampoline's hlt", static_cast<unsigned long>(state.Rip));
     out.rax = state.Gpr[X86::REG_RAX];
@@ -259,8 +269,11 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   report.Line("%-40s %s", "double arguments and xmm0 return", floatOk ? "ok" : "FAIL");
 
   const auto m = CallWindows(*engine, report, *missing, {});
-  const bool missingOk = m.ok && m.rax == 0;
+  const auto seen = runtime.UnimplementedCalls();
+  const bool logged = !seen.empty() && seen.back() == "kernel32.dll!UnityBridgeTestMissingFunction";
+  const bool missingOk = m.ok && m.rax == 0 && logged;
   if (!missingOk) ++failures;
+  if (!missingOk) report.Line("  rax=%#llx, recorded as unimplemented: %s", static_cast<unsigned long long>(m.rax), logged ? "yes" : "no");
   report.Line("%-40s %s", "unimplemented import returns 0", missingOk ? "ok" : "FAIL");
 
   engine->Shutdown();

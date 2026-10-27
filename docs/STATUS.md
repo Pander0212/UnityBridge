@@ -94,6 +94,17 @@ Building blocks chosen (2026-10-26) [R]:
         (`SetProfileRoot`). On iPhone: the app's Documents folder.
   - Known gaps: views of an anonymous (`INVALID_HANDLE_VALUE`) file mapping do not share memory;
         `EnumSystemLocalesW` makes no callbacks; baselib error codes unverified.
+- [ ] M2d: `ubtest.dll` under FEXCore on iPhone ("Run Windows DLL test", `engine/win32_device.cpp`)
+      **[i] iPhone 15 (A16), iOS 26.6.2, 2026-10-27: 22 of 23 checks pass** — PE loader, `syscall` stubs into
+      the mini Win32, Microsoft x64 calls (4+ arguments, stack arguments, xmm0 in/out, callee-saved registers),
+      TEB via `gs:`, files in the profile folder, sync objects, locale, OLEAUT32 by ordinal.
+      - Failed: "unimplemented import returns 0" — and the log lacks the `UB_WIN32 unimplemented` line, so the
+        stub was never reached. Cause (from the code, not yet re-tested): every call mapped a fresh trampoline
+        page and unmapped it afterwards; the third call's page can land where the first one was, and FEXCore,
+        which caches translated blocks by guest address, ran the first call's target (`ub_test_all`, nonzero
+        result) again. Fix: one trampoline page for all calls (`call r11; hlt`, target in r11); the check now
+        also requires the call to show up in `UnimplementedCalls()`. Lesson for M2e: guest code addresses
+        must not be reused without `GuestEngine::Invalidate`.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

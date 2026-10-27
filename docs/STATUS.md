@@ -124,6 +124,32 @@ Building blocks chosen (2026-10-26) [R]:
 - [ ] iOS test app built by GitHub Actions (macOS), JIT via StikDebug/StikJIT; game files copied onto the device by
       the user.
 
+## M2e alternative: Madeira's Wine for TLS and exceptions (2026-10-27) [R]
+
+The two missing pieces of the mini Win32 (implicit TLS and x64 exceptions) are not written in this
+project for now. Checked instead whether Madeira (willfaust/Madeira, commit `e3a88fd`, GPL-3.0-or-later,
+Wine fork LGPL) could supply them:
+
+- Madeira runs Wine 11.4 built for **ARM64EC** inside one iOS process (wineserver as a thread), with FEX's
+  ARM64EC module (`xtajit64.dll`) translating only the x86-64 code and DXMT/its own D3D12 for graphics.
+  Wine's ntdll brings both missing pieces, already working with FEX-translated x64 code on iPhone.
+- Released: 0.1.0–0.1.3 (October 2026) as ad-hoc signed IPAs; requires iOS 26+, JIT (StikDebug or its
+  built-in StikJIT). It is a finished app: it runs Windows games as they are, Unity ones included
+  (its docs mention Unity's own "Failed to load il2cpp" box as a known failure screen).
+- **Using Madeira's Wine inside the hybrid** (only `GameAssembly.dll` in Wine, `libunity.so` native through
+  Husk's translation layer) is possible in principle but deep: every host thread that calls into
+  GameAssembly (Unity's main, render, job and loading threads, and the GC) would have to be a Wine thread,
+  so Husk's `pthread_create` would have to create threads through Wine, and libunity's calls would cross
+  through Wine's unix-call interface. Madeira's own build needs LLVM built for iOS, llvm-mingw and its
+  unpublished-at-the-time forks; its BUILDING.md (2026-09-16) says a clean checkout did not yet build.
+  Rough size: larger than the mini Win32 so far.
+- **Shortest way to a playing game today:** run the Windows build in Madeira itself (UnityPlayer.dll and
+  GameAssembly.dll both translated, D3D11 through DXMT). Slower than the hybrid would be, but
+  everything already exists. EverPlay already points Windows Unity games to Madeira.
+
+Next step for the hybrid: test Fellworld in Madeira on the iPhone. If it runs, the hybrid's only gain is
+speed; if it stops (log), that tells which part needs work.
+
 ## M3 research: running Android's libunity.so on iPhone (2026-10-27) [R]
 
 **Husk already does this part.** Husk (Leviidev/Husk, commit `b390dfa`, **GPL-2.0-or-later**, so it can

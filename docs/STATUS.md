@@ -104,6 +104,13 @@ Building blocks chosen (2026-10-26) [R]:
         FEXCore, which caches translated blocks by guest address, ran the earlier call's target again. Fix: one
         trampoline page for all calls (`call r11; hlt`, target in r11). Lesson for M2e: guest code addresses
         must not be reused without `GuestEngine::Invalidate`.
+- [ ] M2d+: calls in both directions (commit `907712f`, CI green, **not yet run on iPhone**):
+      `GuestEngine::CallWin64` (vendored engine, UnityBridge addition) runs a guest function with the Microsoft
+      x64 convention to its return through FEXCore's `HandleCallback` — on one reusable guest thread from the
+      host (what `libunity` calling `il2cpp_*` will need), or nested on the guest thread that is inside an
+      import (callbacks). `Win32::CallGuest` lets imports call back: `FlsFree` runs the slot's callback,
+      `EnumSystemLocalesW` reports en-US. `ubtest.dll`: 25 checks, two new ones for callbacks (one calls an
+      import from inside the callback: guest → host → guest → host). Host tests pass (also ASan/UBSan).
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

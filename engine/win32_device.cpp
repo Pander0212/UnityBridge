@@ -3,18 +3,15 @@
 // the mini Win32 through `syscall` stubs, and calls its exports under FEXCore (AetherPS4's
 // GuestEngine) with the Microsoft x64 convention.
 //
-// How a call is set up:
-//  - One 16 KiB trampoline page (host read-only) for all calls: call r11; hlt, with the target in
-//    r11 (volatile, never an argument). The thread starts there, the export returns into the hlt,
-//    and GuestEngine::Run comes back. The code never changes: FEXCore caches translated blocks by
-//    address, so a fresh trampoline per call that lands where an earlier one was unmapped would run
-//    the earlier call's target again (what the first iPhone run of the missing-import check hit).
-//  - A guest stack (host read-write), 16-byte aligned at the call, with 32 bytes of shadow space.
-//  - A minimal TEB as the gs: base (stack limits, self pointer, PEB), which MSVC code reads.
-//  - Arguments in rcx, rdx, r8, r9 / xmm0-xmm3; the result from rax / xmm0.
-// The DLL image and the stub page are reported executable through GuestBridge::QueryExecutableRange:
-// PE sections are 4 KiB aligned, so code and data can share a 16 KiB iOS page, which the engine's
-// static MappedRanges (16 KiB aligned, never writable and executable) cannot express.
+// How a call is set up: one guest thread for the run (a 1 MiB stack, a minimal TEB as the gs:
+// base with stack limits, self pointer and PEB), reused for every call through
+// GuestEngine::CallWin64, which also runs the callbacks the mini Win32 makes (EnumSystemLocalesW,
+// FLS) nested on the thread that is in the syscall. Arguments in rcx, rdx, r8, r9 / xmm0-xmm3;
+// the result from rax / xmm0.
+// The DLL image, the stub page and the engine's callback-return page are reported executable
+// through GuestBridge::QueryExecutableRange: PE sections are 4 KiB aligned, so code and data can
+// share a 16 KiB iOS page, which the engine's static MappedRanges (16 KiB aligned, never writable
+// and executable) cannot express.
 #include "core/fex/fex_guest_engine.h"
 #include "loader/pe_image.h"
 #include "win32/hle.h"
@@ -108,77 +105,84 @@ struct CallResult {
   uint64_t xmm0 = 0;
 };
 
-// The shared trampoline page: call r11; hlt (`length` bytes).
-struct Trampoline {
-  HostMemory page {kPage};
-  size_t length = 0;
-  Trampoline() {
-    if (!page.ok()) return;
-    auto* code = static_cast<uint8_t*>(page.base);
-    code[length++] = 0x41; code[length++] = 0xff; code[length++] = 0xd3;  // call r11
-    code[length++] = 0xf4;                                                 // hlt
-    mprotect(page.base, kPage, PROT_READ);  // the engine requires guest code host read-only
+// The guest thread all calls run on, with its stack and TEB. CreateThread wants an entry point in
+// a read-only code range; the thread never starts there (a lone hlt), CallWin64 sets rip itself.
+struct GuestThread {
+  HostMemory entry {kPage}, stack {1 << 20}, teb {2 * kPage};
+  AetherPS4::Fex::GuestEngine::Thread* thread = nullptr;
+
+  bool Create(AetherPS4::Fex::GuestEngine& engine, Report& report) {
+    if (!entry.ok() || !stack.ok() || !teb.ok()) {
+      report.Line("FAIL host memory for the guest thread");
+      return false;
+    }
+    *static_cast<uint8_t*>(entry.base) = 0xf4;  // hlt
+    mprotect(entry.base, kPage, PROT_READ);     // the engine requires guest code host read-only
+    // TEB (x64): NT_TIB.StackBase @0x8, StackLimit @0x10, Self @0x30, ClientId @0x40/0x48,
+    // ProcessEnvironmentBlock @0x60 (a zeroed PEB in the second page).
+    auto* t = static_cast<uint8_t*>(teb.base);
+    const uint64_t stackBase = stack.addr() + stack.size, stackLimit = stack.addr(), self = teb.addr();
+    const uint64_t peb = teb.addr() + kPage, pid = static_cast<uint64_t>(getpid());
+    std::memcpy(t + 0x08, &stackBase, 8);
+    std::memcpy(t + 0x10, &stackLimit, 8);
+    std::memcpy(t + 0x30, &self, 8);
+    std::memcpy(t + 0x40, &pid, 8);
+    std::memcpy(t + 0x60, &peb, 8);
+
+    Core::GuestExecutionRequest request;
+    request.Rip = entry.addr();
+    request.Rsp = stackBase - 0x20;
+    request.Rflags = 1u << 1;
+    request.GsBase = teb.addr();
+    request.MappedRanges = {{entry.addr(), kPage, true, false}, {stack.addr(), stack.size, false, true}};
+    auto created = engine.CreateThread(request);
+    if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&created)) {
+      report.Line("FAIL create guest thread: stage=%d error=%d", static_cast<int>(failure->Stage), failure->Error);
+      return false;
+    }
+    thread = std::get<AetherPS4::Fex::GuestEngine::Thread*>(created);
+    return true;
   }
 };
 
-// Calls `target(args...)` with the Microsoft x64 convention on a fresh guest thread.
-CallResult CallWindows(AetherPS4::Fex::GuestEngine& engine, Report& report, uintptr_t target,
-                       std::initializer_list<uint64_t> args, std::initializer_list<double> doubles = {}) {
+AetherPS4::Fex::GuestEngine* g_engine = nullptr;
+
+// Calls `target(args...)` with the Microsoft x64 convention on `guest`.
+CallResult CallWindows(GuestThread& guest, Report& report, uintptr_t target, std::initializer_list<uint64_t> args,
+                       std::initializer_list<double> doubles = {}) {
   CallResult out;
-  static Trampoline trampoline;
-  HostMemory stack(1 << 20), teb(2 * kPage);
-  if (!trampoline.page.ok() || !stack.ok() || !teb.ok()) {
-    report.Line("FAIL host memory for the call");
-    return out;
-  }
-
-  const uintptr_t stackTop = stack.addr() + stack.size;
-  // TEB (x64): NT_TIB.StackBase @0x8, StackLimit @0x10, Self @0x30, ClientId @0x40/0x48,
-  // ProcessEnvironmentBlock @0x60 (a zeroed PEB in the second page).
-  auto* t = static_cast<uint8_t*>(teb.base);
-  const uint64_t stackBase = stackTop, stackLimit = stack.addr(), self = teb.addr(), peb = teb.addr() + kPage;
-  const uint64_t pid = static_cast<uint64_t>(getpid());
-  std::memcpy(t + 0x08, &stackBase, 8);
-  std::memcpy(t + 0x10, &stackLimit, 8);
-  std::memcpy(t + 0x30, &self, 8);
-  std::memcpy(t + 0x40, &pid, 8);
-  std::memcpy(t + 0x60, &peb, 8);
-
-  Core::GuestExecutionRequest request;
-  request.Rip = trampoline.page.addr();
-  request.Gpr[X86::REG_R11] = target;
-  request.Rsp = stackTop - 0x20;  // 16-byte aligned at `call`; the callee's shadow space is above
-  request.Rflags = 1u << 1;
-  request.GsBase = teb.addr();
-  const uint64_t registers[4] = {X86::REG_RCX, X86::REG_RDX, X86::REG_R8, X86::REG_R9};
+  AetherPS4::Fex::Win64Call call;
+  call.Rip = target;
   size_t i = 0;
-  for (const auto a : args) if (i < 4) request.Gpr[registers[i++]] = a;
+  for (const auto a : args) if (i < 4) call.Gpr[i++] = a;
   i = 0;
-  for (const auto d : doubles) if (i < 4) std::memcpy(request.Xmm[i++].data(), &d, 8);
-  request.MappedRanges = {
-      {trampoline.page.addr(), kPage, true, false},
-      {stack.addr(), stack.size, false, true},
-  };
-
-  auto created = engine.CreateThread(request);
-  if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&created)) {
-    report.Line("FAIL create guest thread: stage=%d error=%d", static_cast<int>(failure->Stage), failure->Error);
+  for (const auto d : doubles) if (i < 4) std::memcpy(call.Xmm[i++].data(), &d, 8);
+  auto run = g_engine->CallWin64(guest.thread, call);
+  if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
+    report.Line("FAIL call %#lx: stage=%d error=%d", static_cast<unsigned long>(target), static_cast<int>(failure->Stage),
+                failure->Error);
     return out;
   }
-  auto* thread = std::get<AetherPS4::Fex::GuestEngine::Thread*>(created);
-  auto run = engine.Run(*thread);
-  if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
-    report.Line("FAIL run: stage=%d error=%d", static_cast<int>(failure->Stage), failure->Error);
-  } else {
-    const auto& state = std::get<Core::GuestExecutionState>(run);
-    const uintptr_t expectedStop = trampoline.page.addr() + trampoline.length;  // just past the hlt
-    out.ok = state.Rip == expectedStop || state.Rip == expectedStop - 1;
-    if (!out.ok) report.Line("FAIL guest stopped at rip=%#lx, expected the trampoline's hlt", static_cast<unsigned long>(state.Rip));
-    out.rax = state.Gpr[X86::REG_RAX];
-    out.xmm0 = state.Xmm[0][0];
-  }
-  engine.DestroyThread(thread);
+  const auto& state = std::get<Core::GuestExecutionState>(run);
+  out.ok = true;
+  out.rax = state.Gpr[X86::REG_RAX];
+  out.xmm0 = state.Xmm[0][0];
   return out;
+}
+
+// Win32::CallGuest on iPhone: a callback from inside an import, nested on the calling guest thread.
+uint64_t CallGuestNested(uintptr_t function, std::span<const uint64_t> arguments) {
+  AetherPS4::Fex::Win64Call call;
+  call.Rip = function;
+  for (size_t i = 0; i < arguments.size() && i < 4; ++i) call.Gpr[i] = arguments[i];
+  if (arguments.size() > 4) call.Stack = arguments.subspan(4);
+  auto run = g_engine->CallWin64(nullptr, call);
+  if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
+    std::fprintf(stderr, "UB_WIN32_DEVICE callback %#lx failed: stage=%d error=%d\n", static_cast<unsigned long>(function),
+                 static_cast<int>(failure->Stage), failure->Error);
+    return 0;
+  }
+  return std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
 }
 
 const char* kChecks[] = {
@@ -188,6 +192,7 @@ const char* kChecks[] = {
     "DIR64 relocation applied", "BSTR (OLEAUT32 by ordinal)", "SAFEARRAY 2-D bounds and data", "CryptGenRandom",
     "SHGetFolderPathW", "baselib semaphore (C++ names)", "events, mutex, semaphore, waits",
     "files, find, mapping (profile folder)", "locale: case mapping, compare, en-US", "InterlockedFlushSList",
+    "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
 };
 
 } // namespace
@@ -242,17 +247,24 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
     return finish(1);
   }
   auto engine = std::move(std::get<std::unique_ptr<AetherPS4::Fex::GuestEngine>>(created));
-
-  int failures = 0;
+  g_engine = engine.get();
+  bridge.executable.push_back(engine->CallbackReturnRange());
+  Win32::SetGuestCaller(&CallGuestNested);
   const auto all = image.Export("ub_test_all");
   const auto fl = image.Export("ub_test_float");
   const auto missing = image.Export("ub_test_missing");
-  if (!all || !fl || !missing) {
-    report.Line("FAIL exports missing");
+  GuestThread guest;
+  if (!all || !fl || !missing || !guest.Create(*engine, report)) {
+    if (!all || !fl || !missing) report.Line("FAIL exports missing");
+    Win32::SetGuestCaller(nullptr);
+    engine->Shutdown();
+    g_engine = nullptr;
     return finish(1);
   }
 
-  const auto r = CallWindows(*engine, report, *all, {});
+  int failures = 0;
+
+  const auto r = CallWindows(guest, report, *all, {});
   if (!r.ok) ++failures;
   const auto bits = static_cast<uint32_t>(r.rax);
   for (size_t i = 0; i < std::size(kChecks); ++i) {
@@ -261,14 +273,14 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
     report.Line("%-40s %s", kChecks[i], ok ? "ok" : "FAIL");
   }
 
-  const auto f = CallWindows(*engine, report, *fl, {}, {3.0, 4.0});
+  const auto f = CallWindows(guest, report, *fl, {}, {3.0, 4.0});
   double product = 0;
   std::memcpy(&product, &f.xmm0, 8);
   const bool floatOk = f.ok && product == 12.5;
   if (!floatOk) ++failures;
   report.Line("%-40s %s", "double arguments and xmm0 return", floatOk ? "ok" : "FAIL");
 
-  const auto m = CallWindows(*engine, report, *missing, {});
+  const auto m = CallWindows(guest, report, *missing, {});
   const auto seen = runtime.UnimplementedCalls();
   const bool logged = !seen.empty() && seen.back() == "kernel32.dll!UnityBridgeTestMissingFunction";
   const bool missingOk = m.ok && m.rax == 0 && logged;
@@ -276,7 +288,10 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   if (!missingOk) report.Line("  rax=%#llx, recorded as unimplemented: %s", static_cast<unsigned long long>(m.rax), logged ? "yes" : "no");
   report.Line("%-40s %s", "unimplemented import returns 0", missingOk ? "ok" : "FAIL");
 
+  engine->DestroyThread(guest.thread);
+  Win32::SetGuestCaller(nullptr);
   engine->Shutdown();
+  g_engine = nullptr;
   if (failures) report.Line("RESULT: %d checks failed", failures);
   else report.Line("RESULT: all checks passed");
   return finish(failures ? 1 : 0);

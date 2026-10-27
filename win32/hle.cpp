@@ -77,6 +77,18 @@ Runtime::Runtime(StubKind kind, std::span<uint8_t> stubMemory, uintptr_t hostEnt
 }
 
 Runtime* Runtime::Current() { return g_current; }
+
+namespace {
+GuestCaller g_guestCaller = nullptr;
+}
+void SetGuestCaller(GuestCaller caller) { g_guestCaller = caller; }
+uint64_t CallGuest(uintptr_t function, std::initializer_list<uint64_t> arguments) {
+  if (g_guestCaller == nullptr || function == 0) {
+    std::fprintf(stderr, "UB_WIN32 no guest call possible to %#lx\n", static_cast<unsigned long>(function));
+    return 0;
+  }
+  return g_guestCaller(function, {arguments.begin(), arguments.size()});
+}
 void Runtime::SetCurrent(Runtime* runtime) { g_current = runtime; }
 
 const Function* Runtime::Lookup(std::string_view dll, std::string_view name) const {

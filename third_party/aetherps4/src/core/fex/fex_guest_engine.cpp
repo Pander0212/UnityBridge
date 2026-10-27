@@ -2456,6 +2456,84 @@ EngineResult<Core::GuestExecutionState> GuestEngine::CallGuest(
   return result;
 }
 
+EngineResult<Core::GuestExecutionState> GuestEngine::CallWin64(Thread* idle, const Win64Call& call) {
+  if (ImplState == nullptr || ImplState->Context == nullptr || ImplState->Syscalls == nullptr) {
+    return Failure(EngineStage::Teardown, ESHUTDOWN);
+  }
+  auto* native = ImplState->Syscalls->ActiveThread();
+  const bool nested = native != nullptr;
+  if (!nested) {
+    if (idle == nullptr || idle->Native == nullptr) return Failure(EngineStage::Thread, ENXIO);
+    std::scoped_lock lock {ImplState->ThreadsMutex};
+    if (!ImplState->Threads.contains(idle) || idle->Owner != std::this_thread::get_id()) {
+      return Failure(EngineStage::Thread, EPERM);
+    }
+    idle->NativeHandle.store(pthread_self(), std::memory_order_release);
+    native = idle->Native;
+  }
+  if (ImplState->Syscalls->QueryGuestExecutableRange(native, call.Rip).Size == 0) {
+    return Failure(EngineStage::Mapping, EFAULT);
+  }
+
+  auto& frame = native->CurrentFrame->State;
+  // HandleCallback stores its return trampoline at rsp - 16 and enters with rsp there, so with
+  // rsp = 8 (mod 16) the callee starts aligned like after a `call`; its shadow space and stack
+  // arguments follow at entry + 8 and entry + 0x28.
+  const std::uint64_t below = nested ? frame.gregs[FEXCore::X86State::REG_RSP] : idle->Request.Rsp;
+  const std::uint64_t needed = 0x18 + 8 * call.Stack.size() + 0x80;
+  if (below < needed) return Failure(EngineStage::Mapping, EFAULT);
+  const std::uint64_t rsp = ((below - needed) & ~std::uint64_t {15}) + 8;
+  const std::uint64_t args = rsp - 16 + 0x28;
+  if (!call.Stack.empty()) {
+    if (!ImplState->Syscalls->IsWritableRange(native, args, 8 * call.Stack.size())) {
+      return Failure(EngineStage::Mapping, EFAULT);
+    }
+    std::memcpy(reinterpret_cast<void*>(args), call.Stack.data(), 8 * call.Stack.size());
+  }
+
+  // Nested, the syscall handler restores the caller's registers from its HleCallFrame after Invoke;
+  // only rip is put back here.
+  constexpr std::array<size_t, 4> argumentRegisters {
+      FEXCore::X86State::REG_RCX, FEXCore::X86State::REG_RDX, FEXCore::X86State::REG_R8, FEXCore::X86State::REG_R9,
+  };
+  for (size_t index = 0; index < argumentRegisters.size(); ++index) frame.gregs[argumentRegisters[index]] = call.Gpr[index];
+  frame.gregs[FEXCore::X86State::REG_RSP] = rsp;
+  std::array<__uint128_t, FEXCore::Core::CPUState::NUM_XMMS> xmm {};
+  std::array<__uint128_t, FEXCore::Core::CPUState::NUM_XMMS> ymmHigh {};
+  ImplState->Context->ReconstructXMMRegisters(native, xmm.data(),
+                                              ImplState->HostFeatures.SupportsAVX ? ymmHigh.data() : nullptr);
+  for (size_t index = 0; index < call.Xmm.size(); ++index) std::memcpy(&xmm[index], call.Xmm[index].data(), sizeof(xmm[index]));
+  ImplState->Context->SetXMMRegistersFromState(native, xmm.data(),
+                                               ImplState->HostFeatures.SupportsAVX ? ymmHigh.data() : nullptr);
+
+  const auto savedRip = frame.rip;
+  BridgeSyscallHandler::InvocationState local;
+  auto& invocation = nested ? local : idle->Invocation;
+  {
+    BridgeSyscallHandler::InvocationScope invocationScope {*ImplState->Syscalls, invocation, native};
+    // Set by ExecuteThread otherwise; an idle thread may never have run.
+    native->CurrentFrame->Pointers.ThunkCallbackRet = ImplState->SignalDelegator->GetThunkCallbackRET();
+    FexExecutionSignalScope signalScope {*ImplState->Context, native, ImplState->SignalDelegator.get(),
+                                         ImplState->Syscalls.get()};
+    ImplState->Context->HandleCallback(native, call.Rip);
+  }
+  if (ImplState->Syscalls->FailureResult(invocation)) return *ImplState->Syscalls->FailureResult(invocation);
+
+  Core::GuestExecutionState result;
+  result.FirstRip = call.Rip;
+  result.Rip = frame.rip;
+  result.LastRip = frame.rip;
+  result.Rsp = frame.gregs[FEXCore::X86State::REG_RSP];
+  std::copy(std::begin(frame.gregs), std::end(frame.gregs), result.Gpr.begin());
+  result.Rflags = ImplState->Context->ReconstructCompactedEFLAGS(native, false, nullptr, 0);
+  ImplState->Context->ReconstructXMMRegisters(native, xmm.data(),
+                                              ImplState->HostFeatures.SupportsAVX ? ymmHigh.data() : nullptr);
+  for (size_t index = 0; index < xmm.size(); ++index) std::memcpy(result.Xmm[index].data(), &xmm[index], sizeof(xmm[index]));
+  result.StopReason = Core::GuestStopReason::Returned;
+  frame.rip = savedRip;
+  return result;
+}
+
 EngineResult<bool> GuestEngine::Invalidate(Thread& thread, std::uintptr_t begin, std::size_t size) {
   if (ImplState == nullptr || ImplState->Context == nullptr || thread.Native == nullptr) {
     return Failure(EngineStage::Teardown, ESHUTDOWN);

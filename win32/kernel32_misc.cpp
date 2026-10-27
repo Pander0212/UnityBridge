@@ -69,7 +69,12 @@ uint64_t IsValidLocale(CallContext& c) {
   const auto lcid = static_cast<DWORD>(c.Arg(0));
   return (lcid == kLcidEnUs || lcid == kLcidInvariant || lcid == 0x400 || lcid == 0x800) ? kTrue : kFalse;
 }
-uint64_t EnumSystemLocalesW(CallContext&) { return kTrue; }  // callbacks into the guest are not made yet
+// The one locale the mini Win32 knows, as its LCID in 8 hex digits; the callback returns FALSE to stop.
+uint64_t EnumSystemLocalesW(CallContext& c) {
+  static const char16_t kEnUs[] = u"00000409";
+  CallGuest(c.Arg(0), {reinterpret_cast<uintptr_t>(kEnUs)});
+  return kTrue;
+}
 
 uint64_t GetLocaleInfoW(CallContext& c) {
   constexpr DWORD LOCALE_RETURN_NUMBER = 0x20000000u, LOCALE_NOUSEROVERRIDE = 0x80000000u;

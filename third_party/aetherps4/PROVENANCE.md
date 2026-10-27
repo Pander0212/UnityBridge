@@ -1,6 +1,6 @@
 # Files from AetherPS4
 
-Copied unchanged from [Leviidev/AetherPS4](https://github.com/Leviidev/AetherPS4) at commit
+Copied from [Leviidev/AetherPS4](https://github.com/Leviidev/AetherPS4) at commit
 `3347fc13f19860855ce91b66356940989ea6b6a6`. Each file keeps its own SPDX header:
 
 | File | License |
@@ -21,3 +21,9 @@ and inserts a small CMake hook that builds UnityBridge's engine library inside F
 Local stand-ins: `compat/common/logging/log.h` replaces shadPS4's logging header;
 `jit/BreakpointJIT.S` provides the `BreakpointJIT.framework` that FEXCore and
 `ios_jit_allocator.cpp` `dlopen`.
+
+## Local changes
+
+- `src/core/fex/fex_guest_engine.{h,cpp}`: added `Win64Call` and `GuestEngine::CallWin64` (Microsoft x64
+  calls on an idle thread or nested inside `GuestBridge::Invoke`, built on FEXCore's `HandleCallback`).
+  Marked "UnityBridge addition" in the header; MIT like the rest of the file.

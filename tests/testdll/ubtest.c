@@ -61,6 +61,10 @@ IMPORT int LCMapStringW(DWORD, DWORD, const WCHAR*, int, WCHAR*, int);
 IMPORT int CompareStringW(DWORD, DWORD, const WCHAR*, int, const WCHAR*, int);
 IMPORT int GetLocaleInfoW(DWORD, DWORD, WCHAR*, int);
 IMPORT void* InterlockedFlushSList(void*);
+IMPORT BOOL EnumSystemLocalesW(BOOL (*)(WCHAR*), DWORD);
+IMPORT DWORD FlsAlloc(void (*)(void*));
+IMPORT BOOL FlsSetValue(DWORD, void*);
+IMPORT BOOL FlsFree(DWORD);
 
 static int Append(WCHAR* to, int at, const char* text) {
   while (*text) to[at++] = (WCHAR)*text++;
@@ -110,6 +114,19 @@ __declspec(noinline) static int KeepAlive(int a, int b, double x, double y) {
     x = x * 1.5 + y;
   }
   return sum + (int)x;
+}
+
+// Callbacks the mini Win32 calls back into (guest -> host -> guest). The FLS one also calls an
+// import itself, one level deeper (guest -> host -> guest -> host).
+static int g_locales;
+static BOOL LocaleSeen(WCHAR* name) {
+  if (name[0] == '0' && name[5] == '4' && name[6] == '0' && name[7] == '9' && name[8] == 0) ++g_locales;
+  return 1;
+}
+static void* volatile g_flsFreed;
+static void FlsFreed(void* value) {
+  g_flsFreed = value;
+  SetLastError(4321);
 }
 
 __declspec(dllexport) int ub_test_all(void) {
@@ -307,6 +324,15 @@ __declspec(dllexport) int ub_test_all(void) {
     header[1] = (unsigned long long)(void*)entry;            // NextEntry (address, low 4 bits zero)
     void* first = InterlockedFlushSList(header);
     if (first == entry && header[1] == 0 && (header[0] & 0xffff) == 0 && InterlockedFlushSList(header) == 0) ok |= 1 << 20;
+  }
+
+  // Callbacks: EnumSystemLocalesW reports en-US; FlsFree runs the slot's callback with its value.
+  if (EnumSystemLocalesW(LocaleSeen, 2 /* LCID_SUPPORTED */) && g_locales == 1) ok |= 1 << 21;
+  {
+    DWORD slot = FlsAlloc(FlsFreed);
+    SetLastError(0);
+    if (slot != 0xffffffffu && FlsSetValue(slot, (void*)0x5678) && FlsFree(slot) && g_flsFreed == (void*)0x5678 &&
+        GetLastError() == 4321) ok |= 1 << 22;
   }
 
   return ok;

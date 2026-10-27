@@ -28,6 +28,14 @@ void Check(bool ok, const char* what) {
   if (!ok) ++g_failures;
 }
 
+// Guest code is native x86-64 here: call it with the Microsoft convention directly.
+uint64_t CallGuestNative(uintptr_t function, std::span<const uint64_t> arguments) {
+  uint64_t a[6] {};
+  for (size_t i = 0; i < arguments.size() && i < 6; ++i) a[i] = arguments[i];
+  using Fn = uint64_t (__attribute__((ms_abi)) *)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+  return reinterpret_cast<Fn>(function)(a[0], a[1], a[2], a[3], a[4], a[5]);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -43,6 +51,7 @@ int main(int argc, char** argv) {
   Win32::Runtime runtime(Win32::StubKind::HostNative, {static_cast<uint8_t*>(stubMemory), 1 << 16},
                          reinterpret_cast<uintptr_t>(&ub_win32_host_entry));
   Win32::Runtime::SetCurrent(&runtime);
+  Win32::SetGuestCaller(&CallGuestNative);
 
   // The guest's C:\Users\Player lands in a fresh temporary folder.
   char profile[] = "/tmp/ubtest-profile-XXXXXX";
@@ -66,7 +75,7 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 70, "70 imports");
+  Check(image.imports.size() == 74, "74 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";
@@ -94,8 +103,9 @@ int main(int argc, char** argv) {
                          "CryptGenRandom", "SHGetFolderPathW", "baselib semaphore (C++ names)",
                          "events, mutex, semaphore, waits",
                          "files, find, mapping (profile folder)",
-                         "locale: case mapping, compare, en-US", "InterlockedFlushSList"};
-  for (int i = 0; i < 21; ++i) Check(bits & (1 << i), names[i]);
+                         "locale: case mapping, compare, en-US", "InterlockedFlushSList",
+                         "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)"};
+  for (int i = 0; i < 23; ++i) Check(bits & (1 << i), names[i]);
 
   Check(reinterpret_cast<FloatFn>(*fl)(3.0, 4.0) == 12.5, "double arguments and xmm0 return");
 

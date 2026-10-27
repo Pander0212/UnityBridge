@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <optional>
 #include <span>
 #include <string>
@@ -122,6 +123,13 @@ void RegisterBaselib(std::vector<Function>& out);
 void RegisterKernel32Sync(std::vector<Function>& out);
 void RegisterKernel32Files(std::vector<Function>& out);
 void RegisterKernel32Misc(std::vector<Function>& out);
+
+// Calls guest code (a callback the guest passed in) with the Microsoft x64 convention and integer
+// or pointer arguments; returns rax. Set by the host: FEXCore's GuestEngine::CallWin64 on iPhone,
+// a direct ms_abi call in host tests. Without a caller the call is logged and 0 returned.
+using GuestCaller = uint64_t (*)(uintptr_t function, std::span<const uint64_t> arguments);
+void SetGuestCaller(GuestCaller caller);
+uint64_t CallGuest(uintptr_t function, std::initializer_list<uint64_t> arguments);
 
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);

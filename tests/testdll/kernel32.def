@@ -50,3 +50,7 @@ LCMapStringW
 CompareStringW
 GetLocaleInfoW
 InterlockedFlushSList
+EnumSystemLocalesW
+FlsAlloc
+FlsSetValue
+FlsFree

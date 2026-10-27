@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <array>
 #include <optional>
 #include <span>
 #include <variant>
@@ -134,6 +135,16 @@ void FlushPendingGuestOrbisSignal() noexcept;
 int BachataGetHgsCheckpoint() noexcept;
 #endif
 
+// A call with the Microsoft x64 convention (UnityBridge addition): integer/pointer arguments 1-4
+// in rcx, rdx, r8, r9, floating-point ones in xmm0-xmm3 (each argument takes the slot of its
+// position), arguments 5+ on the stack above 32 bytes of shadow space.
+struct Win64Call final {
+  std::uintptr_t Rip {};
+  std::array<std::uint64_t, 4> Gpr {};
+  std::array<std::array<std::uint64_t, 2>, 4> Xmm {};
+  std::span<const std::uint64_t> Stack {};
+};
+
 class GuestEngine final {
 public:
   class Thread;
@@ -149,6 +160,11 @@ public:
   EngineResult<Core::GuestExecutionState> Run(Thread& thread);
   EngineResult<Core::GuestExecutionState> CallGuest(std::uintptr_t rip,
                                                std::span<const std::uint64_t> arguments);
+  // Runs `call` to its return. From inside GuestBridge::Invoke it runs nested on the guest thread
+  // that made the syscall (`idle` is ignored); otherwise on `idle`, a thread of the calling host
+  // thread that is not running, below the stack pointer of its request. The thread keeps its
+  // fs/gs bases between calls. Result in Gpr[RAX] / Xmm[0]. UnityBridge addition.
+  EngineResult<Core::GuestExecutionState> CallWin64(Thread* idle, const Win64Call& call);
   EngineResult<bool> Invalidate(Thread& thread, std::uintptr_t begin, std::size_t size);
   EngineResult<bool> DestroyThread(Thread*& thread);
   EngineResult<bool> Shutdown();

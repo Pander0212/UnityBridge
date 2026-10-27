@@ -255,9 +255,25 @@ uint64_t TlsSetValue(CallContext& c) {
   t_tls[i] = c.Arg(1);
   return kTrue;
 }
-// FLS callbacks (run at fiber/thread exit) are not called yet.
-uint64_t FlsAlloc(CallContext&) { return g_fls.Alloc(); }
-uint64_t FlsFree(CallContext& c) { return g_fls.Free(static_cast<DWORD>(c.Arg(0))) ? kTrue : SetError(ERROR_INVALID_PARAMETER, kFalse); }
+// FLS callbacks run on FlsFree for the calling thread's value (Windows also runs them for every
+// thread and at thread exit; threads are not created by the guest yet).
+uintptr_t g_flsCallbacks[kTlsSlots];
+uint64_t FlsAlloc(CallContext& c) {
+  const DWORD i = g_fls.Alloc();
+  if (i < kTlsSlots) g_flsCallbacks[i] = c.Arg(0);
+  return i;
+}
+uint64_t FlsFree(CallContext& c) {
+  const auto i = static_cast<DWORD>(c.Arg(0));
+  if (i >= kTlsSlots) return SetError(ERROR_INVALID_PARAMETER, kFalse);
+  const uintptr_t callback = g_flsCallbacks[i];
+  const uint64_t value = t_fls[i];
+  if (!g_fls.Free(i)) return SetError(ERROR_INVALID_PARAMETER, kFalse);
+  g_flsCallbacks[i] = 0;
+  t_fls[i] = 0;
+  if (callback != 0 && value != 0) CallGuest(callback, {value});
+  return kTrue;
+}
 uint64_t FlsGetValue(CallContext& c) {
   const auto i = static_cast<DWORD>(c.Arg(0));
   if (i >= kTlsSlots) return SetError(ERROR_INVALID_PARAMETER, 0);

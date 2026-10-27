@@ -10,7 +10,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 | M0 | Analyse `GameAssembly.dll`: imports, exports, metadata | done [R] |
 | M1 | Analyse Android `libunity.so` 2021.3.18f1, match the API | done [R] |
 | M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | in progress: FEXCore and a Windows DLL against the mini Win32 run on iPhone [i]; `GameAssembly.dll` not yet |
-| M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | — |
+| M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | research done [R]: Husk's translation layer (GPL-2.0+) already runs Android Unity games; bridge measured |
 | M4 | D3D11 shaders converted; first frame | — |
 
 ## M0: GameAssembly.dll (Fellworld) [R]
@@ -111,7 +111,7 @@ Building blocks chosen (2026-10-26) [R]:
       import (callbacks). `Win32::CallGuest` lets imports call back: `FlsFree` runs the slot's callback,
       `EnumSystemLocalesW` reports en-US. `ubtest.dll`: 25 checks, two new ones for callbacks (one calls an
       import from inside the callback: guest → host → guest → host). Host tests pass (also ASan/UBSan).
-- [ ] M2e step 1, threads (CI pending, **not yet run on iPhone**): `CreateThread` (incl. `CREATE_SUSPENDED`),
+- [ ] M2e step 1, threads (commit `adcc45e`, CI green, **not yet run on iPhone**): `CreateThread` (incl. `CREATE_SUSPENDED`),
       `ResumeThread`, `GetExitCodeThread`, `GetThreadId`, `Set/GetThreadPriority` (accepted, not applied); a
       thread handle is waitable and signalled with its exit code. Each guest thread is a host thread with a
       FEXCore guest thread of its own (1 MiB stack, TEB with stack limits and thread id), started through
@@ -123,6 +123,64 @@ Building blocks chosen (2026-10-26) [R]:
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.
 - [ ] iOS test app built by GitHub Actions (macOS), JIT via StikDebug/StikJIT; game files copied onto the device by
       the user.
+
+## M3 research: running Android's libunity.so on iPhone (2026-10-27) [R]
+
+**Husk already does this part.** Husk (Leviidev/Husk, commit `b390dfa`, **GPL-2.0-or-later**, so it can
+be combined with UnityBridge's GPL-3.0-or-later) has a "translation layer" that runs Android games'
+arm64 libraries natively on iOS, with no Android system: its own ELF loader (`husk-tl-ld.c`: maps,
+relocates, binds imports, Android's per-library symbol scope, which matters because Unity's libraries
+each carry their own C++ runtime), bionic libc shims onto Darwin (`husk-tl-bionic*.c`), a JNI and a
+small Dalvik interpreter for the app's Java side, EGL/GLES through ANGLE, OpenSL ES and FMOD's Java
+glue. It has an engine driver for Unity (`husk-tl-unity.c`, `husk-tl-unity-app.c`): `libmain.so`
+`JNI_OnLoad`, `NativeLoader.load`, then the `UnityPlayer` natives (`nativeRender` per frame, pause,
+input). Its README lists Unity games running on the translation layer, and its screenshots show Beach
+Buggy Racing 2 and Subway Surfers (both Unity). These are their claims; we have not run them yet. Husk
+also already shares its JIT region with a FEXCore module (its PS4 mode, `husk-jit-arena.c`,
+`husk-console-abi.h`), the same combination the hybrid needs. All 109 files in
+`src/translation-layer-next/` carry GPL-2.0-or-later, two headers carry no tag; nothing from ATL or
+AOSP.
+
+So M3 becomes "Husk's Unity driver plus a stand-in `libil2cpp.so`" instead of writing a loader:
+
+| Piece | Where from | Work |
+|---|---|---|
+| ELF loader, bionic, JNI, Dalvik, EGL (ANGLE), audio, input | Husk translation layer | take over, keep in sync |
+| `libmain.so`, `libunity.so`, `classes.dex` for the game's exact Unity version (2021.3.18f1 for Fellworld) | Unity's Android player package (`Variations/il2cpp/Release/`) | **not redistributable**: the user fetches it from Unity, the app never ships it |
+| `libil2cpp.so` | ours | a virtual library: Husk's `dlopen_impl` answers `libil2cpp.so` with it, `dlsym` returns our 228 bridge functions (about 20 lines in `husk-tl-bionic.c`) |
+| the APK the driver expects | ours | built on the device from the pieces above plus the game's `*_Data` as `assets/bin/Data/` (or the driver taught to take a folder) |
+
+**The bridge in both directions** (`tools/research/icall_abi.py`, data only, Fellworld):
+- libunity → GameAssembly: the 228 `il2cpp_*` functions take only integers and pointers, so one
+  generic thunk (x0–x7 → rcx, rdx, r8, r9 + stack) serves all of them, running on a guest thread per
+  host thread via `GuestEngine::CallWin64` (built and confirmed on iPhone in M2d+). The 8 callback-taking ones
+  (M1) need the reverse thunks below.
+- GameAssembly → libunity: 1,689 InternalCall methods in the metadata, **1,371 of them engine functions**
+  (`System.*`/`Mono.*` ones stay inside GameAssembly). Of these: **1,186 integer/pointer only**, 16 of them
+  with more than 8 arguments (stack arguments), **166 with float/double** arguments or results, 2 with
+  both, 1 generic. **No value type is passed or returned by value**: Unity's `_Injected` bindings pass
+  vectors and matrices by reference. 73 distinct signatures in all, 50 with floats. So the reverse
+  thunk is a mini Win32 stub per registered function (`il2cpp_add_internal_call` is intercepted: the
+  ARM64 pointer is swapped for a stub) whose handler moves the Microsoft x64 slots into AAPCS64
+  registers by the method's signature from the metadata; the float cases are a table of 50 shapes, not
+  a general marshaller.
+
+**Data and assets** (Fellworld):
+- Serialized files say `targetPlatform 19` (StandaloneWindows64); an Android player expects 13. Whether
+  the player refuses other targets for its main data is open; the field can be rewritten when the files
+  are copied in.
+- Textures: 148 DXT5 + 1 DXT1 (about 35 megapixels, most of the texture data), the rest uncompressed.
+  Under GLES on iPhone (ANGLE over Metal) S3TC is only there if the GPU reports BC support; otherwise
+  Unity's player decompresses unsupported formats on the CPU (load time and memory). To measure on device.
+- Shaders: D3D11 only (M4 research below), the hardest remaining piece.
+
+Next steps, in order:
+- [ ] Build Husk's translation layer inside UnityBridge's app (or UnityBridge as a Husk engine module),
+      with FEXCore sharing Husk's JIT arena.
+- [ ] Virtual `libil2cpp.so` with the 228 generic thunks; reverse thunks for callbacks and InternalCalls.
+- [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
+- [ ] Prerequisite from M2e: TLS and exceptions in the mini Win32 (needed before `il2cpp_init` gets far).
+- [ ] M4: D3D11 shaders → GLES3.
 
 ## M4 research: D3D11 shaders → GLES3 (2026-10-27) [R]
 

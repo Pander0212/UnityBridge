@@ -28,6 +28,20 @@ thread_local Context t_exceptionContext;
 thread_local Context t_resumeContext;
 thread_local bool t_resumePending = false;
 
+// Nesting bookkeeping for the device. A guest language handler (GameAssembly's statically linked
+// __C_specific_handler or __CxxFrameHandler*) runs inside a FEXCore callback and itself calls our
+// RtlUnwindEx; the resume must then NOT be applied at that nested HLE call (which would leave the
+// callback's host frames stranded) but at the HLE call that the faulting code made directly. The
+// device bridge reports the current HLE-call depth through SetInvokeDepth; a resume carries the
+// depth of the dispatch that started it, and the bridge escapes (lets the callback return) at any
+// deeper level and applies at that root. Host tests do not nest HLE calls (guest handlers run as
+// native calls on the one stack), so the resume is applied at the innermost call and this is unused.
+thread_local int t_invokeDepth = 0;
+thread_local int t_dispatchRootDepth = 0;
+thread_local bool t_dispatchActive = false;
+thread_local int t_resumeRootDepth = 0;
+thread_local bool t_resumeByBridge = false;
+
 std::optional<uint64_t> DecodeJumpTarget(uint64_t addr) {
   const auto* p = reinterpret_cast<const uint8_t*>(addr);
   int32_t disp;
@@ -48,6 +62,7 @@ void SetExceptionContext(const Context& ctx) { t_exceptionContext = ctx; }
 
 void RequestResume(const Context* ctx) {
   t_resumeContext = *ctx;
+  t_resumeRootDepth = t_dispatchActive ? t_dispatchRootDepth : t_invokeDepth;
   t_resumePending = true;
 }
 bool ResumePending() { return t_resumePending; }
@@ -60,7 +75,23 @@ void TakeResumeInto(CallContext& call) {
   call.resumeRip = t_resumeContext.Rip;
   call.resume = true;
   t_resumePending = false;
+  t_dispatchActive = false;
 }
+
+// Marks the extent of a dispatch, so a resume triggered from a nested RtlUnwindEx knows which HLE
+// call to resume at. Restores the previous root on exit (nested dispatches, e.g. from a __finally).
+struct DispatchScope {
+  int savedRoot;
+  bool savedActive;
+  DispatchScope() : savedRoot {t_dispatchRootDepth}, savedActive {t_dispatchActive} {
+    t_dispatchRootDepth = t_invokeDepth;
+    t_dispatchActive = true;
+  }
+  ~DispatchScope() {
+    t_dispatchRootDepth = savedRoot;
+    t_dispatchActive = savedActive;
+  }
+};
 
 void CaptureContextFromCall(Context* out, const CallContext& call) {
   std::memset(out, 0, sizeof(*out));
@@ -174,6 +205,7 @@ void UnwindEx(void* endFrame, void* targetIp, ExceptionRecord* rec, void* retval
 // RtlDispatchException: the EHANDLER search over the frame chain. Adapted from Wine's
 // call_seh_handlers. Returns true when a handler resolved the exception (a resume is pending).
 bool DispatchException(ExceptionRecord* rec, Context* orig_context) {
+  DispatchScope dispatchScope;  // marks the HLE-call depth to resume at (see t_resumeRootDepth)
   t_exceptionContext = *orig_context;
   Context context = *orig_context;
   DispatcherContext dispatch;
@@ -302,7 +334,7 @@ uint64_t RaiseException(CallContext& c) {
   Context ctx;
   Ntdll::CaptureContextFromCall(&ctx, c);
   if (Ntdll::DispatchException(&rec, &ctx)) {
-    Ntdll::TakeResumeInto(c);
+    if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
   } else {
     std::fprintf(stderr, "UB_WIN32 unhandled exception %#x at %p\n", rec.ExceptionCode, rec.ExceptionAddress);
   }
@@ -315,7 +347,7 @@ uint64_t RtlRaiseException(CallContext& c) {
   Context ctx;
   Ntdll::CaptureContextFromCall(&ctx, c);
   if (Ntdll::DispatchException(rec, &ctx)) {
-    Ntdll::TakeResumeInto(c);
+    if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
   } else {
     std::fprintf(stderr, "UB_WIN32 unhandled RtlRaiseException %#x\n", rec->ExceptionCode);
   }
@@ -323,24 +355,29 @@ uint64_t RtlRaiseException(CallContext& c) {
 }
 
 uint64_t RtlUnwindEx(CallContext& c) {
-  Context cap;
-  Ntdll::CaptureContextFromCall(&cap, c);
-  Ntdll::SetExceptionContext(cap);
+  // During an active dispatch (a guest language handler called us) the unwind must start from the
+  // original raise point — the handler's own frame sits above our callback machinery, not on the
+  // guest's .pdata chain. A standalone RtlUnwindEx (a manual unwind) captures its own call site.
+  if (!Ntdll::t_dispatchActive) {
+    Context cap;
+    Ntdll::CaptureContextFromCall(&cap, c);
+    Ntdll::SetExceptionContext(cap);
+  }
   Ntdll::UnwindEx(c.Ptr<void>(0), c.Ptr<void>(1), c.Ptr<ExceptionRecord>(2), c.Ptr<void>(3),
                   c.Ptr<UnwindHistoryTable>(5));
-  Ntdll::TakeResumeInto(c);
+  if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
   return 0;
 }
 
 uint64_t NtContinue(CallContext& c) {
   Ntdll::RequestResume(c.Ptr<Context>(0));
-  Ntdll::TakeResumeInto(c);
+  if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
   return 0;
 }
 
 uint64_t RtlRestoreContext(CallContext& c) {
   Ntdll::RestoreContext(c.Ptr<Context>(0), c.Ptr<ExceptionRecord>(1));
-  Ntdll::TakeResumeInto(c);
+  if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
   return 0;
 }
 
@@ -387,6 +424,23 @@ void RegisterNtdllSeh(std::vector<Function>& out) {
   out.push_back({"ntdll.dll", "RtlRaiseException", &RtlRaiseException});
   out.push_back({"ntdll.dll", "NtContinue", &NtContinue});
   out.push_back({"ntdll.dll", "__C_specific_handler", &CSpecificHandler});
+}
+
+// ---- device bridge: non-local resume realization -----------------------------------------------
+void SetInvokeDepth(int depth) { Ntdll::t_invokeDepth = depth; }
+void SetResumeRealizedByBridge(bool bridge) { Ntdll::t_resumeByBridge = bridge; }
+
+ResumeAction TakePendingResume(uint64_t gpr[16], uint64_t xmm[16][2], uint64_t& rip) {
+  if (!Ntdll::t_resumePending) return ResumeAction::None;
+  // A nested language-handler sub-call (its HLE depth is deeper than the dispatch that owns the
+  // resume): let the callback return first; the resume is realized at that outer level.
+  if (Ntdll::t_invokeDepth > Ntdll::t_resumeRootDepth) return ResumeAction::Escape;
+  for (int i = 0; i < 16; ++i) gpr[i] = (&Ntdll::t_resumeContext.Rax)[i];
+  for (int i = 0; i < 16; ++i) std::memcpy(xmm[i], &Ntdll::t_resumeContext.FltSave.XmmRegisters[i], 16);
+  rip = Ntdll::t_resumeContext.Rip;
+  Ntdll::t_resumePending = false;
+  Ntdll::t_dispatchActive = false;
+  return ResumeAction::Apply;
 }
 
 } // namespace UnityBridge::Win32

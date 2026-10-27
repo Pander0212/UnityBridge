@@ -57,12 +57,21 @@ class Win32Bridge final : public AetherPS4::Fex::GuestBridge {
 public:
   Win32::Runtime* runtime = nullptr;
   std::vector<Core::GuestExecutionRange> executable;  // DLL images and the stub page
+  uintptr_t callbackReturnVeneer = 0;  // GuestEngine::CallbackReturnRange().Begin (the `0F 3E` page)
 
   AetherPS4::Fex::EngineResult<bool> Invoke(Core::GuestCpu::HleCallFrame& frame) override {
     if (!Win32::IsWin32Operation(frame.operation) || runtime == nullptr) {
       std::fprintf(stderr, "UB_WIN32_DEVICE unexpected syscall rax=%#llx\n", static_cast<unsigned long long>(frame.operation));
       return AetherPS4::Fex::EngineFailure {AetherPS4::Fex::EngineStage::Bridge, ENOSYS};
     }
+    // HLE-call depth, so a resume raised in a nested guest language handler (which itself called our
+    // RtlUnwindEx) is realized at the call the faulting code made, not in the nested callback.
+    static thread_local int t_depth = 0;
+    struct DepthGuard {
+      DepthGuard() { Win32::SetInvokeDepth(++t_depth); }
+      ~DepthGuard() { Win32::SetInvokeDepth(--t_depth); }
+    } depthGuard;
+
     Win32::CallContext c;
     c.id = static_cast<uint32_t>(frame.operation & 0xffff);
     c.gpr[0] = frame.gpr[X86::REG_RCX];  // the engine already put the stub's r10 (the caller's rcx) here
@@ -84,16 +93,28 @@ public:
 
     runtime->Dispatch(c);
 
-    if (c.resume) {
-      // A non-local resume: load the target register file and make the stub's `ret` land at
-      // resumeRip, so FEXCore continues the guest at the handler target with the unwound state.
-      for (int i = 0; i < 16; ++i) frame.gpr[i] = c.resumeGpr[i];
-      for (int i = 0; i < 16; ++i) { frame.xmm[i][0] = c.resumeXmm[i][0]; frame.xmm[i][1] = c.resumeXmm[i][1]; }
-      const uint64_t targetRsp = c.resumeGpr[X86::REG_RSP];
-      *reinterpret_cast<uint64_t*>(targetRsp - 8) = c.resumeRip;
-      frame.gpr[X86::REG_RSP] = targetRsp - 8;
-      frame.rsp = targetRsp - 8;
+    uint64_t gpr[16], xmm[16][2], rip;
+    switch (Win32::TakePendingResume(gpr, xmm, rip)) {
+    case Win32::ResumeAction::Apply:
+      // Transfer the guest to the handler target: load the register file and make the stub's `ret`
+      // land at rip, with the unwound stack.
+      for (int i = 0; i < 16; ++i) frame.gpr[i] = gpr[i];
+      for (int i = 0; i < 16; ++i) { frame.xmm[i][0] = xmm[i][0]; frame.xmm[i][1] = xmm[i][1]; }
+      {
+        const uint64_t targetRsp = gpr[X86::REG_RSP];
+        *reinterpret_cast<uint64_t*>(targetRsp - 8) = rip;
+        frame.gpr[X86::REG_RSP] = targetRsp - 8;
+        frame.rsp = targetRsp - 8;
+      }
       return true;
+    case Win32::ResumeAction::Escape:
+      // A guest language handler called our (noreturn) RtlUnwindEx. Overwrite this HLE call's return
+      // address with the callback-return veneer, so the stub's `ret` makes the enclosing FEXCore
+      // callback return as if the handler had returned; the resume is then realized one level out.
+      *reinterpret_cast<uint64_t*>(frame.rsp) = callbackReturnVeneer;
+      return true;
+    case Win32::ResumeAction::None:
+      break;
     }
     frame.gpr[X86::REG_RAX] = c.ret;
     if (c.returnsFloat) {
@@ -326,6 +347,8 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   auto engine = std::move(std::get<std::unique_ptr<AetherPS4::Fex::GuestEngine>>(created));
   g_engine = engine.get();
   bridge.executable.push_back(engine->CallbackReturnRange());
+  bridge.callbackReturnVeneer = engine->CallbackReturnRange().Begin;
+  Win32::SetResumeRealizedByBridge(true);  // the bridge applies/escapes resumes; the wrappers defer
   Win32::SetGuestCaller(&CallGuestNested);
   Win32::SetThreadRunner(&RunGuestThread);
   const auto all = image.Export("ub_test_all");

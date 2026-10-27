@@ -204,6 +204,22 @@ void InitTeb(void* teb, uintptr_t stackBase, uintptr_t stackLimit, uintptr_t sel
 // resolves a guest PC to its RUNTIME_FUNCTION through this, and RtlPcToFileHeader to the module.
 void RegisterUnwindImage(uintptr_t imageBase, uintptr_t imageEnd, uintptr_t pdata, uint32_t pdataSize);
 
+// Non-local resume (NtContinue) realization, for the device bridge. A guest language handler runs
+// inside a FEXCore callback and may itself call RtlUnwindEx; the resume must be applied at the HLE
+// call the faulting code made, not at that nested one. The bridge reports the current HLE-call depth
+// (1 outermost, +1 per nested callback syscall) with SetInvokeDepth before dispatching, and after
+// dispatching asks TakePendingResume what to do:
+//   None   - nothing pending; return normally.
+//   Apply  - transfer the guest to `gpr`/`xmm`/`rip` (consumed).
+//   Escape - a nested language-handler sub-call: let this callback return (so the resume is realized
+//            at its outer level); the resume stays pending.
+// SetResumeRealizedByBridge(true) tells the SEH wrappers to leave the resume for the bridge; host
+// tests leave it false so the wrappers fill CallContext::resume and the entry stub applies it.
+enum class ResumeAction { None, Apply, Escape };
+void SetInvokeDepth(int depth);
+void SetResumeRealizedByBridge(bool bridge);
+ResumeAction TakePendingResume(uint64_t gpr[16], uint64_t xmm[16][2], uint64_t& rip);
+
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);
 uint32_t LastErrorValue();

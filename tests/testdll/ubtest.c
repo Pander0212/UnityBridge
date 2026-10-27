@@ -88,8 +88,66 @@ IMPORT void* RtlVirtualUnwind(DWORD, unsigned long long, unsigned long long, voi
                               void**, unsigned long long*, void*);
 IMPORT void* RtlPcToFileHeader(void*, void**);
 IMPORT unsigned short RtlCaptureStackBackTrace(DWORD, DWORD, void**, DWORD*);
+IMPORT void RtlUnwindEx(void*, void*, void*, void*, CONTEXT*, void*);
 static unsigned long long CtxRsp(const CONTEXT* c) { return *(const unsigned long long*)(c->raw + 0x98); }
 static unsigned long long CtxRip(const CONTEXT* c) { return *(const unsigned long long*)(c->raw + 0xf8); }
+
+// __C_specific_handler, provided in the DLL itself rather than imported, the way GameAssembly's
+// statically linked CRT provides its C and C++ exception handlers. The OS dispatcher (UnityBridge's)
+// names it as the language handler in this DLL's UNWIND_INFO and calls it; it runs the __except
+// filters and __finally termination handlers and calls RtlUnwindEx (imported, and from the
+// dispatcher's point of view noreturn) to transfer to the handler. This is the path a real IL2CPP
+// GameAssembly.dll takes, and the one UnityBridge must drive through a guest callback.
+typedef struct { DWORD Count; struct { DWORD Begin, End, Handler, Target; } Rec[]; } SCOPE_TABLE;
+typedef struct {
+  unsigned long long ControlPc, ImageBase;
+  void* FunctionEntry;
+  unsigned long long EstablisherFrame, TargetIp;
+  CONTEXT* ContextRecord;
+  void* LanguageHandler;
+  void* HandlerData;
+  void* HistoryTable;
+  DWORD ScopeIndex, Fill0;
+} DISPATCHER_CONTEXT;
+typedef struct {
+  DWORD Code, Flags;
+  void* Record;
+  void* Address;
+  DWORD Number, Align;
+  unsigned long long Info[15];
+} EXC_RECORD;
+
+int __C_specific_handler(EXC_RECORD* rec, void* frame, CONTEXT* ctx, DISPATCHER_CONTEXT* dispatch) {
+  SCOPE_TABLE* table = (SCOPE_TABLE*)dispatch->HandlerData;
+  unsigned long long base = dispatch->ImageBase, pc = dispatch->ControlPc;
+  if (rec->Flags & 0x6 /* UNWINDING | EXIT_UNWIND */) {
+    for (DWORD i = dispatch->ScopeIndex; i < table->Count; i++) {
+      if (pc < base + table->Rec[i].Begin || pc >= base + table->Rec[i].End || table->Rec[i].Target) continue;
+      if ((rec->Flags & 0x20 /* TARGET_UNWIND */) && dispatch->TargetIp >= base + table->Rec[i].Begin &&
+          dispatch->TargetIp < base + table->Rec[i].End)
+        break;
+      void(__attribute__((ms_abi)) * fin)(unsigned char, void*) =
+          (void(__attribute__((ms_abi))*)(unsigned char, void*))(base + table->Rec[i].Handler);
+      dispatch->ScopeIndex = i + 1;
+      fin(1 /* abnormal termination */, frame);
+    }
+  } else {
+    for (DWORD i = dispatch->ScopeIndex; i < table->Count; i++) {
+      if (pc < base + table->Rec[i].Begin || pc >= base + table->Rec[i].End || !table->Rec[i].Target) continue;
+      if (table->Rec[i].Handler != 1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        void* ptrs[2] = {rec, ctx};  // EXCEPTION_POINTERS
+        int(__attribute__((ms_abi)) * filter)(void*, void*) =
+            (int(__attribute__((ms_abi))*)(void*, void*))(base + table->Rec[i].Handler);
+        int r = filter(ptrs, frame);
+        if (r == 0) continue;   // EXCEPTION_CONTINUE_SEARCH
+        if (r < 0) return 0;    // EXCEPTION_CONTINUE_EXECUTION -> ExceptionContinueExecution
+      }
+      RtlUnwindEx(frame, (void*)(base + table->Rec[i].Target), (void*)rec, 0, dispatch->ContextRecord,
+                  dispatch->HistoryTable);
+    }
+  }
+  return 1;  // ExceptionContinueSearch
+}
 
 // Two frames with their own .pdata so an exception unwinds through a __finally into an outer
 // __except. Kept out of line so each has a real stack frame.

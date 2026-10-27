@@ -90,7 +90,9 @@ Building blocks chosen (2026-10-26) [R]:
         `SetThreadPriority`, `QueueUserAPC`. Need the guest-call hook into FEXCore.
   - [x] x64 exceptions: `RaiseException`, `RtlUnwind(Ex)`, `RtlVirtualUnwind`, `RtlLookupFunctionEntry`,
         `RtlCaptureContext`, `RtlCaptureStackBackTrace`, `RtlPcToFileHeader`, unhandled-exception filters.
-        Done host-side (M2e step 3 below); `__CxxFrameHandler*` for GameAssembly's C++ is the open piece.
+        Done host-side (M2e steps 3-4 below); guest language handlers (incl. GameAssembly's own
+        `__C_specific_handler`/`__CxxFrameHandler*`) are driven through a callback, with the full C++
+        catch flow to be confirmed against real `GameAssembly.dll`.
   - [ ] Path mapping: `C:\` is the host root; `C:\Users\Player` goes to the profile folder
         (`SetProfileRoot`). On iPhone: the app's Documents folder.
   - Known gaps: views of an anonymous (`INVALID_HANDLE_VALUE`) file mapping do not share memory;
@@ -154,11 +156,33 @@ Building blocks chosen (2026-10-26) [R]:
         `GetExceptionCode`); an exception raised two frames down unwinds through a `__finally` into an
         outer `__except`; and the table primitives (`RtlCaptureContext` → `RtlLookupFunctionEntry` →
         `RtlVirtualUnwind` step out one frame, `RtlPcToFileHeader`, `RtlCaptureStackBackTrace`).
-      - **Known gap for GameAssembly (not ubtest)**: its statically linked C++ handler
-        `__CxxFrameHandler*` is guest code that itself calls `RtlUnwindEx`; routing a guest language
-        handler that unwinds is the next device-side piece. ubtest's `__C_specific_handler` is our own
-        HLE function (imported from ntdll), so the dispatcher calls it host-side and the resume stays
-        clean on both host and device.
+- [x] M2e step 4, guest language handlers (`win32/ntdll_exception.cpp`, `engine/win32_device.cpp`)
+      **host test green, 31 of 31; [i] on iPhone pending**: GameAssembly's exception handlers are not
+      ours — its statically linked CRT provides its own `__C_specific_handler` and `__CxxFrameHandler*`,
+      guest code that the OS dispatcher names in the `.pdata`/`UNWIND_INFO` and that itself calls our
+      (noreturn) `RtlUnwindEx`. The dispatcher now drives such a guest handler through `CallGuest`; the
+      hard part is the transfer, because on the device the handler runs inside a FEXCore callback whose
+      host frames must unwind before the guest can resume at the catch target.
+      - **Resume realization** is split between host and device (`Win32::SetResumeRealizedByBridge`,
+        `TakePendingResume`, `SetInvokeDepth`): the SEH code only records a pending resume with the
+        HLE-call depth of the dispatch that owns it. On the host (guest handlers run as native calls on
+        one stack) the entry stub applies it at the innermost call, discarding the handler and
+        dispatcher frames in one `ret`. On the device the bridge tracks HLE-call depth: when a nested
+        guest handler's `RtlUnwindEx` asks to resume, the bridge **escapes** — it overwrites that HLE
+        call's return address with FEXCore's callback-return veneer, so the stub's `ret` makes the
+        enclosing callback return exactly as if the handler had returned (same mechanism FEX uses for a
+        normal callback return, balancing `SignalHandlerRefCounter`). The resume then propagates to the
+        call the faulting code made and is applied there. One escape per guest handler that unwinds.
+      - `RtlUnwindEx` during an active dispatch unwinds from the original raise context (the guest
+        handler's own frame sits above our callback machinery, off the guest's `.pdata` chain), not
+        from its own call site; a standalone `RtlUnwindEx` (manual unwind) still captures its own.
+      - `ubtest.dll` now provides its **own** `__C_specific_handler` (like GameAssembly) instead of
+        importing ours, so all three SEH checks exercise the guest-handler path and its `RtlUnwindEx`.
+        The host validates everything but the device-only veneer escape (host needs none); the escape
+        is the one piece that only the iPhone run exercises.
+      - Still open: the full `__CxxFrameHandler4` C++ flow (catch-type matching, the consolidate
+        callback running the catch funclet) is GameAssembly's own guest code; this step makes the
+        engine able to host it, to be confirmed against real `GameAssembly.dll`.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

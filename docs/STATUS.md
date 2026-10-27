@@ -9,7 +9,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 |---|---|---|
 | M0 | Analyse `GameAssembly.dll`: imports, exports, metadata | done [R] |
 | M1 | Analyse Android `libunity.so` 2021.3.18f1, match the API | done [R] |
-| M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | in progress (see M2 checklist) |
+| M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | in progress: FEXCore runs on iPhone [i]; loader + mini Win32 host-tested |
 | M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | — |
 | M4 | D3D11 shaders converted; first frame | — |
 
@@ -60,10 +60,18 @@ Building blocks chosen (2026-10-26) [R]:
       workflow "Probe IPA"). Green on 2026-10-26 (run 40388559916, commit `6d2e902`): 188 objects, app links,
       artifact `UnityBridgeProbe-ipa`. Only availability warnings (`os_sync_*` needs iOS 17.4; deployment
       target is 17.0, harmless on iOS 26). Note: macOS runners did not start while the repo was private.
-- [ ] M2b: `UnityBridgeProbe` app (`app/`): with JIT enabled in StikDebug, "Run x86-64 probe" runs the
-      controlled harness and shows ok/FAIL per check. Log: Files › UB Probe › `probe.log`.
-      Waiting for the first device run (iPhone 15, iOS 26.6.2; must be signed with a development
-      certificate, e.g. a free Apple ID via SideStore/Sideloadly, so `get-task-allow` survives).
+- [x] M2b: `UnityBridgeProbe` app (`app/`) **[i] confirmed on iPhone 15 (A16), iOS 26.6.2, 2026-10-27**:
+      all 8 checks of FEXCore's controlled harness pass (x86-64 integer, flags, SSE, HLE bridge via `syscall`,
+      guest threads, TLS via `fs:`, unaligned access, code invalidation). JIT memory from StikDebug:
+      16 KiB + 16 MiB code buffer at 0x164bf0000 (high enough for the low-address FEX bug Madeira reports).
+      - First attempt crashed with SIGTRAP in `BreakGetJITMapping`: JIT had been enabled from StikDebug's own
+        app list, which leaves `CS_DEBUGGED` set but detaches. Fixed: the app opens
+        `stikdebug://enable-jit?bundle-id&pid&script-data` with Madeira's debugger script
+        (`third_party/madeira`) and waits for `P_TRACED`; without a debugger the probe refuses to start.
+      - Open: FEX logs `Failed to mprotect last page of code buffer` (its guard page; iOS refuses mprotect on
+        JIT memory). Not fatal, but an overrun of the code buffer would not be caught.
+      - Signing: a free Apple ID (SideStore/Sideloadly) keeps `get-task-allow`; a distribution certificate
+        ("without JIT") does not.
 - [ ] M2c: PE loader and mini Win32, tested on the host (x86-64 Linux, CI "Host tests"):
   - [x] `loader/pe_image`: PE32+ x86-64 loader (sections, DIR64 relocations, imports incl. delay-load and
         ordinals as `#N`, exports, TLS directory, `.pdata`), bounds-checked. Reads Fellworld's

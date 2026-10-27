@@ -59,3 +59,9 @@ ResumeThread
 GetExitCodeThread
 GetCurrentThreadId
 Sleep
+RaiseException
+RtlCaptureContext
+RtlLookupFunctionEntry
+RtlVirtualUnwind
+RtlPcToFileHeader
+RtlCaptureStackBackTrace

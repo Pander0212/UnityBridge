@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 79, "79 imports");
+  Check(image.imports.size() == 86, "86 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";
@@ -142,6 +142,10 @@ int main(int argc, char** argv) {
   // Implicit TLS: register the DLL's TLS directory, give this thread a TEB with gs:[0x58] pointing
   // at its TLS block, and run the TLS callbacks with DLL_PROCESS_ATTACH, as the loader does.
   if (image.tls) Win32::RegisterTlsImage(reinterpret_cast<uintptr_t>(image.base), *image.tls);
+  // Register the DLL's .pdata so RtlLookupFunctionEntry / the exception dispatcher can unwind it.
+  Win32::RegisterUnwindImage(reinterpret_cast<uintptr_t>(image.base),
+                             reinterpret_cast<uintptr_t>(image.base) + image.size,
+                             reinterpret_cast<uintptr_t>(image.base) + image.pdataRva, image.pdataSize);
   const GuestTeb mainTeb = SetupGuestTeb();
   Win32::RunTlsCallbacks(Win32::DLL_PROCESS_ATTACH);
 
@@ -167,8 +171,11 @@ int main(int argc, char** argv) {
                          "locale: case mapping, compare, en-US", "InterlockedFlushSList",
                          "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
                          "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread",
-                         "implicit TLS: __declspec(thread) + callback"};
-  for (int i = 0; i < 26; ++i) Check(bits & (1 << i), names[i]);
+                         "implicit TLS: __declspec(thread) + callback",
+                         "SEH: __try/__except catches RaiseException",
+                         "SEH: __finally runs while unwinding to __except",
+                         "SEH: RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/PcToFileHeader"};
+  for (int i = 0; i < 29; ++i) Check(bits & (1 << i), names[i]);
 
   Check(reinterpret_cast<FloatFn>(*fl)(3.0, 4.0) == 12.5, "double arguments and xmm0 return");
 

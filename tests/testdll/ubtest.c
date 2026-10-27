@@ -10,6 +10,13 @@ typedef void* HANDLE;
 typedef long long LONGLONG;
 
 #define IMPORT __declspec(dllimport)
+#define EXCEPTION_EXECUTE_HANDLER 1
+#define EXCEPTION_CONTINUE_SEARCH 0
+// The SEH intrinsics, declared as clang's own <excpt.h> does (we build freestanding, no CRT).
+unsigned long __cdecl _exception_code(void);
+int __cdecl _abnormal_termination(void);
+#define GetExceptionCode() _exception_code()
+#define AbnormalTermination() _abnormal_termination()
 IMPORT DWORD GetLastError(void);
 IMPORT void SetLastError(DWORD);
 IMPORT HANDLE GetProcessHeap(void);
@@ -70,6 +77,27 @@ IMPORT DWORD ResumeThread(HANDLE);
 IMPORT BOOL GetExitCodeThread(HANDLE, DWORD*);
 IMPORT DWORD GetCurrentThreadId(void);
 IMPORT void Sleep(DWORD);
+
+// x64 structured exception handling. CONTEXT is opaque here (0x4d0 bytes, 16-aligned); we only read
+// Rsp (0x98) and Rip (0xf8) back from it.
+typedef struct __declspec(align(16)) { unsigned char raw[0x4d0]; } CONTEXT;
+IMPORT void RaiseException(DWORD, DWORD, DWORD, const unsigned long long*);
+IMPORT void RtlCaptureContext(CONTEXT*);
+IMPORT void* RtlLookupFunctionEntry(unsigned long long, unsigned long long*, void*);
+IMPORT void* RtlVirtualUnwind(DWORD, unsigned long long, unsigned long long, void*, CONTEXT*,
+                              void**, unsigned long long*, void*);
+IMPORT void* RtlPcToFileHeader(void*, void**);
+IMPORT unsigned short RtlCaptureStackBackTrace(DWORD, DWORD, void**, DWORD*);
+static unsigned long long CtxRsp(const CONTEXT* c) { return *(const unsigned long long*)(c->raw + 0x98); }
+static unsigned long long CtxRip(const CONTEXT* c) { return *(const unsigned long long*)(c->raw + 0xf8); }
+
+// Two frames with their own .pdata so an exception unwinds through a __finally into an outer
+// __except. Kept out of line so each has a real stack frame.
+static volatile int g_finallyRan;
+__declspec(noinline) static void SehInnermost(void) { RaiseException(0xE0002222u, 0, 0, 0); }
+__declspec(noinline) static void SehMiddle(void) {
+  __try { SehInnermost(); } __finally { g_finallyRan = 1; }
+}
 
 static int Append(WCHAR* to, int at, const char* text) {
   while (*text) to[at++] = (WCHAR)*text++;
@@ -443,6 +471,56 @@ __declspec(dllexport) int ub_test_all(void) {
     good &= g_threadVar == 0x2222;                   // and did not disturb this thread's copy
     if (h) CloseHandle(h);
     if (good) ok |= 1 << 25;
+  }
+
+  // SEH: RaiseException is caught by a __try/__except whose filter inspects the exception code.
+  {
+    volatile int r = 0;
+    __try {
+      RaiseException(0xE0001111u, 0, 0, 0);
+      r = 1;  // unreachable: control transfers to the __except block
+    } __except (GetExceptionCode() == 0xE0001111u ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+      r = 2;
+    }
+    if (r == 2) ok |= 1 << 26;
+  }
+
+  // SEH: an exception raised two frames down unwinds through a __finally into this __except.
+  {
+    volatile int r = 0;
+    g_finallyRan = 0;
+    __try {
+      SehMiddle();
+      r = 1;  // unreachable
+    } __except (GetExceptionCode() == 0xE0002222u ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+      r = 2;
+    }
+    if (r == 2 && g_finallyRan == 1) ok |= 1 << 27;
+  }
+
+  // The table-walking primitives: capture a context, find its function entry, step out one frame,
+  // map a PC to its module, and walk the stack.
+  {
+    int good = 1;
+    CONTEXT ctx;
+    RtlCaptureContext(&ctx);
+    unsigned long long base = 0;
+    void* fn = RtlLookupFunctionEntry(CtxRip(&ctx), &base, 0);
+    good &= fn != 0 && base != 0;
+    unsigned long long rip0 = CtxRip(&ctx), rsp0 = CtxRsp(&ctx);
+    void* hd = 0;
+    unsigned long long frame = 0;
+    RtlVirtualUnwind(0 /* UNW_FLAG_NHANDLER */, base, rip0, fn, &ctx, &hd, &frame, 0);
+    good &= CtxRip(&ctx) != 0 && CtxRip(&ctx) != rip0 && CtxRsp(&ctx) > rsp0;
+
+    void* moduleBase = 0;
+    void* hdr = RtlPcToFileHeader((void*)&SehMiddle, &moduleBase);
+    good &= hdr != 0 && moduleBase == hdr && (unsigned long long)moduleBase <= (unsigned long long)&SehMiddle;
+
+    void* bt[8] = {0};
+    unsigned short n = RtlCaptureStackBackTrace(0, 8, bt, 0);
+    good &= n >= 1 && bt[0] != 0;
+    if (good) ok |= 1 << 28;
   }
 
   return ok;

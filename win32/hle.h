@@ -24,6 +24,8 @@ namespace UnityBridge::Pe { struct Tls; }
 namespace UnityBridge::Win32 {
 
 // What a stub hands over: the argument registers and the stack pointer at the stub's entry.
+// The first fields keep fixed offsets shared with win32/host_entry_x64.S (checked in hle.cpp); new
+// fields are appended so those offsets do not move.
 struct CallContext {
   uint32_t id {};
   uint64_t gpr[4] {};       // rcx, rdx, r8, r9
@@ -32,6 +34,20 @@ struct CallContext {
   uint64_t ret {};          // rax on return
   uint64_t xmmRet[2] {};    // xmm0 on return (set together with returnsFloat)
   bool returnsFloat {};
+
+  // Full guest register state at the call, for the SEH functions that snapshot or restore it
+  // (RtlCaptureContext, NtContinue). Filled by the bridge / the host entry stub when `haveState` is
+  // set. x86[i] is X86State register index i: RAX 0, RCX 1, RDX 2, RBX 3, RSP 4, RBP 5, RSI 6,
+  // RDI 7, R8..R15 8..15. `rip` is the return address into the caller (what RtlCaptureContext
+  // records as Rip). xmmFull holds XMM0..15; on the host only the callee-saved XMM6..15 are exact.
+  uint64_t x86[16] {};
+  uint64_t xmmFull[16][2] {};
+  uint64_t resumeGpr[16] {};  // NtContinue target state, applied when `resume` is set
+  uint64_t resumeXmm[16][2] {};
+  uint64_t rip {};
+  uint64_t resumeRip {};
+  bool haveState {};
+  bool resume {};
 
   uint64_t Arg(unsigned index) const;  // integer/pointer argument `index` (0-based)
   template <typename T> T* Ptr(unsigned index) const { return reinterpret_cast<T*>(Arg(index)); }
@@ -70,6 +86,10 @@ public:
 
   const Function* Lookup(std::string_view dll, std::string_view name) const;
   std::vector<std::string> UnimplementedCalls() const;  // "dll!name" seen at run time
+
+  // The function a stub address belongs to, or nullptr if `address` is not a bound stub. Lets the
+  // SEH dispatcher recognise a language-handler thunk that points at our own __C_specific_handler.
+  const Function* FunctionForStub(uintptr_t address) const;
 
   static Runtime* Current();  // the instance Dispatch() for host stubs goes to
   static void SetCurrent(Runtime* runtime);
@@ -125,6 +145,7 @@ void RegisterBaselib(std::vector<Function>& out);
 void RegisterKernel32Sync(std::vector<Function>& out);
 void RegisterKernel32Files(std::vector<Function>& out);
 void RegisterKernel32Misc(std::vector<Function>& out);
+void RegisterNtdllSeh(std::vector<Function>& out);
 
 // Calls guest code (a callback the guest passed in) with the Microsoft x64 convention and integer
 // or pointer arguments; returns rax. Set by the host: FEXCore's GuestEngine::CallWin64 on iPhone,
@@ -176,6 +197,12 @@ constexpr size_t kTebSize = 0x1000;
 constexpr size_t kTebTlsPointerOffset = 0x58;
 void InitTeb(void* teb, uintptr_t stackBase, uintptr_t stackLimit, uintptr_t self, uintptr_t peb,
              uint32_t pid, uint32_t tid, uintptr_t tlsPointer);
+
+// ---- x64 structured exception handling (win32/ntdll_unwind.cpp, win32/ntdll_exception.cpp) -----
+// Registers a loaded module's exception-unwinding table: `pdata` is its .pdata RUNTIME_FUNCTION
+// array (byte length `pdataSize`) and [imageBase, imageEnd) its mapped range. RtlLookupFunctionEntry
+// resolves a guest PC to its RUNTIME_FUNCTION through this, and RtlPcToFileHeader to the module.
+void RegisterUnwindImage(uintptr_t imageBase, uintptr_t imageEnd, uintptr_t pdata, uint32_t pdataSize);
 
 // Last-error value of the calling guest thread (kernel32.cpp).
 void SetLastErrorValue(uint32_t error);

@@ -62,7 +62,7 @@ ENGINE_SOURCES="$AP/core/fex/fex_guest_engine.cpp;$AP/core/guest_cpu/guest_cpu.c
 # The PE loader and the mini Win32, the same sources the host tests build.
 for f in loader/pe_image.cpp win32/hle.cpp win32/support.cpp win32/kernel32.cpp win32/other_dlls.cpp \
          win32/baselib.cpp win32/kernel32_sync.cpp win32/kernel32_files.cpp win32/kernel32_misc.cpp \
-         win32/tls.cpp; do
+         win32/tls.cpp win32/ntdll_unwind.cpp win32/ntdll_exception.cpp; do
     ENGINE_SOURCES="$ENGINE_SOURCES;$ROOT/$f"
 done
 ENGINE_INCLUDES="$ROOT/compat;$AP;$ROOT"

@@ -20,7 +20,14 @@ static_assert(offsetof(CallContext, rsp) == 104);
 static_assert(offsetof(CallContext, ret) == 112);
 static_assert(offsetof(CallContext, xmmRet) == 120);
 static_assert(offsetof(CallContext, returnsFloat) == 136);
-static_assert(sizeof(CallContext) <= 144);
+static_assert(offsetof(CallContext, x86) == 144);
+static_assert(offsetof(CallContext, xmmFull) == 272);
+static_assert(offsetof(CallContext, resumeGpr) == 528);
+static_assert(offsetof(CallContext, resumeXmm) == 656);
+static_assert(offsetof(CallContext, rip) == 912);
+static_assert(offsetof(CallContext, resumeRip) == 920);
+static_assert(offsetof(CallContext, haveState) == 928);
+static_assert(offsetof(CallContext, resume) == 929);
 std::mutex g_mutex;
 Runtime* g_current = nullptr;
 
@@ -66,6 +73,7 @@ std::span<const Function> Functions() {
     RegisterKernel32Sync(out);
     RegisterKernel32Files(out);
     RegisterKernel32Misc(out);
+    RegisterNtdllSeh(out);
     return out;
   }();
   return table;
@@ -90,6 +98,14 @@ uint64_t CallGuest(uintptr_t function, std::initializer_list<uint64_t> arguments
   return g_guestCaller(function, {arguments.begin(), arguments.size()});
 }
 void Runtime::SetCurrent(Runtime* runtime) { g_current = runtime; }
+
+const Function* Runtime::FunctionForStub(uintptr_t address) const {
+  const auto base = reinterpret_cast<uintptr_t>(stubs_.data());
+  if (address < base || address >= base + stubs_.size()) return nullptr;
+  const size_t id = (address - base) / kStubSize;
+  std::scoped_lock lock {g_mutex};
+  return id < bound_.size() ? bound_[id].function : nullptr;
+}
 
 const Function* Runtime::Lookup(std::string_view dll, std::string_view name) const {
   const auto lowerDll = Lower(dll);

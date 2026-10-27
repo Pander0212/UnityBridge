@@ -88,8 +88,9 @@ Building blocks chosen (2026-10-26) [R]:
         mini Win32 with 21 checks; ASan/UBSan clean.
   - [ ] Threads: `CreateThread`, `SuspendThread`/`ResumeThread`/`GetThreadContext` (GC stop-the-world),
         `SetThreadPriority`, `QueueUserAPC`. Need the guest-call hook into FEXCore.
-  - [ ] x64 exceptions: `RaiseException`, `RtlUnwind(Ex)`, `RtlVirtualUnwind`, `RtlLookupFunctionEntry`,
+  - [x] x64 exceptions: `RaiseException`, `RtlUnwind(Ex)`, `RtlVirtualUnwind`, `RtlLookupFunctionEntry`,
         `RtlCaptureContext`, `RtlCaptureStackBackTrace`, `RtlPcToFileHeader`, unhandled-exception filters.
+        Done host-side (M2e step 3 below); `__CxxFrameHandler*` for GameAssembly's C++ is the open piece.
   - [ ] Path mapping: `C:\` is the host root; `C:\Users\Player` goes to the profile folder
         (`SetProfileRoot`). On iPhone: the app's Documents folder.
   - Known gaps: views of an anonymous (`INVALID_HANDLE_VALUE`) file mapping do not share memory;
@@ -129,9 +130,33 @@ Building blocks chosen (2026-10-26) [R]:
       (no CRT, as MSVC's `tlssup.c` does: `.tls` bracketed by `_tls_start`/`_tls_end`, `.CRT$XL*` callbacks,
       `_tls_used`), and the new check proves a `__declspec(thread)` variable is a fresh per-thread copy of
       its template, a new thread does not see another thread's write, and the callback ran for each thread.
-- [ ] M2e step 3, x64 exceptions (SEH): `RaiseException`, `RtlCaptureContext`, `RtlLookupFunctionEntry`,
-      `RtlVirtualUnwind`, `RtlUnwindEx`, `__C_specific_handler`, `STATUS_UNWIND_CONSOLIDATE`, over the DLL's
-      `.pdata`/`UNWIND_INFO`.
+- [x] M2e step 3, x64 exceptions / SEH (`win32/ntdll_unwind.cpp`, `win32/ntdll_exception.cpp`)
+      **host test green, 31 of 31; [i] on iPhone pending**: `RaiseException`, `RtlCaptureContext`,
+      `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `RtlUnwindEx`, `__C_specific_handler`,
+      `RtlRestoreContext` (incl. `STATUS_UNWIND_CONSOLIDATE` → consolidate callback, as MSVC's C++
+      exceptions use it), `RtlPcToFileHeader`, `RtlCaptureStackBackTrace`, over the DLL's
+      `.pdata`/`UNWIND_INFO` (`Win32::RegisterUnwindImage`). The unwinder, the epilogue decoder and
+      `__C_specific_handler` are adapted from Wine's `dlls/ntdll` (LGPL-2.1-or-later, GPL-3.0
+      compatible; `third_party/wine/PROVENANCE.md`).
+      - **Model**: the dispatcher and unwinder run on the host over the guest's tables; the guest's
+        funclets (`__except` filters, `__finally` handlers, consolidate callbacks) run through
+        `CallGuest` and return normally. The one non-local transfer (`NtContinue`) is recorded as a
+        pending resume that each SEH function returns through to the outermost HLE handler
+        (`RaiseException`), which hands the target register file to the bridge: the device loads the
+        FEXCore frame and lets the stub's `ret` land at the handler target; the host entry stub
+        (`win32/host_entry_x64.S`, now also capturing the full register file for `RtlCaptureContext`)
+        loads the registers and jumps. No `setjmp`/`longjmp` crosses a guest call, which the device's
+        nested FEXCore callbacks could not survive. `CallContext` gained the full `x86[16]`/`xmmFull`
+        state, `rip`, and the resume fields; `GuestEngine`'s register order is the standard x64 one.
+      - `ubtest.dll`: three new checks — `__try`/`__except` catches `RaiseException` (filter inspects
+        `GetExceptionCode`); an exception raised two frames down unwinds through a `__finally` into an
+        outer `__except`; and the table primitives (`RtlCaptureContext` → `RtlLookupFunctionEntry` →
+        `RtlVirtualUnwind` step out one frame, `RtlPcToFileHeader`, `RtlCaptureStackBackTrace`).
+      - **Known gap for GameAssembly (not ubtest)**: its statically linked C++ handler
+        `__CxxFrameHandler*` is guest code that itself calls `RtlUnwindEx`; routing a guest language
+        handler that unwinds is the next device-side piece. ubtest's `__C_specific_handler` is our own
+        HLE function (imported from ntdll), so the dispatcher calls it host-side and the resume stays
+        clean on both host and device.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

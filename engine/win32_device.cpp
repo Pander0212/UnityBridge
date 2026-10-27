@@ -74,7 +74,27 @@ public:
       c.xmm[i][1] = frame.xmm[i][1];
     }
     c.rsp = frame.rsp;
+    // Full register state for the SEH functions (RtlCaptureContext snapshots it; NtContinue restores
+    // it). frame.gpr is in X86State order with RCX already holding the caller's rcx; rip is the
+    // return address the stub would ret to.
+    for (int i = 0; i < 16; ++i) c.x86[i] = frame.gpr[i];
+    for (int i = 0; i < 16; ++i) { c.xmmFull[i][0] = frame.xmm[i][0]; c.xmmFull[i][1] = frame.xmm[i][1]; }
+    c.rip = *reinterpret_cast<const uint64_t*>(frame.rsp);
+    c.haveState = true;
+
     runtime->Dispatch(c);
+
+    if (c.resume) {
+      // A non-local resume: load the target register file and make the stub's `ret` land at
+      // resumeRip, so FEXCore continues the guest at the handler target with the unwound state.
+      for (int i = 0; i < 16; ++i) frame.gpr[i] = c.resumeGpr[i];
+      for (int i = 0; i < 16; ++i) { frame.xmm[i][0] = c.resumeXmm[i][0]; frame.xmm[i][1] = c.resumeXmm[i][1]; }
+      const uint64_t targetRsp = c.resumeGpr[X86::REG_RSP];
+      *reinterpret_cast<uint64_t*>(targetRsp - 8) = c.resumeRip;
+      frame.gpr[X86::REG_RSP] = targetRsp - 8;
+      frame.rsp = targetRsp - 8;
+      return true;
+    }
     frame.gpr[X86::REG_RAX] = c.ret;
     if (c.returnsFloat) {
       frame.xmm[0][0] = c.xmmRet[0];
@@ -243,6 +263,9 @@ const char* kChecks[] = {
     "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
     "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread",
     "implicit TLS: __declspec(thread) + callback",
+    "SEH: __try/__except catches RaiseException",
+    "SEH: __finally runs while unwinding to __except",
+    "SEH: RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/PcToFileHeader",
 };
 
 } // namespace
@@ -284,6 +307,9 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   module.lookup = [&image](std::string_view name) { return image.Export(name); };
   Win32::RegisterModule(std::move(module), true);
   if (image.tls) Win32::RegisterTlsImage(reinterpret_cast<uintptr_t>(image.base), *image.tls);
+  Win32::RegisterUnwindImage(reinterpret_cast<uintptr_t>(image.base),
+                             reinterpret_cast<uintptr_t>(image.base) + image.size,
+                             reinterpret_cast<uintptr_t>(image.base) + image.pdataRva, image.pdataSize);
 
   static Win32Bridge bridge;
   bridge.runtime = &runtime;

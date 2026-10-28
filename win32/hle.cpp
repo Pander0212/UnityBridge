@@ -107,6 +107,12 @@ const Function* Runtime::FunctionForStub(uintptr_t address) const {
   return id < bound_.size() ? bound_[id].function : nullptr;
 }
 
+std::pair<std::string_view, std::string_view> Runtime::StubName(uint32_t id) const {
+  std::scoped_lock lock {g_mutex};
+  if (id < bound_.size()) return {bound_[id].dll, bound_[id].name};
+  return {};
+}
+
 const Function* Runtime::Lookup(std::string_view dll, std::string_view name) const {
   const auto lowerDll = Lower(dll);
   for (const auto& f : Functions()) {

@@ -17,6 +17,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace UnityBridge::Pe { struct Tls; }
@@ -90,6 +91,10 @@ public:
   // The function a stub address belongs to, or nullptr if `address` is not a bound stub. Lets the
   // SEH dispatcher recognise a language-handler thunk that points at our own __C_specific_handler.
   const Function* FunctionForStub(uintptr_t address) const;
+
+  // The (dll, name) bound to stub `id`, or empty views if `id` is unbound. Read-only; for a
+  // diagnostic breadcrumb that records the last import a crashing thread was dispatching.
+  std::pair<std::string_view, std::string_view> StubName(uint32_t id) const;
 
   static Runtime* Current();  // the instance Dispatch() for host stubs goes to
   static void SetCurrent(Runtime* runtime);

@@ -205,6 +205,27 @@ Building blocks chosen (2026-10-26) [R]:
         `FlsGetValue2` (kernelbase), `AreFileApisANSI`, `GetUserDefaultLocaleName`, `GetLocaleInfoEx`,
         `IsValidLocaleName`, `CoGetApartmentType`. The `api-ms-win-core-*` `LoadLibrary` misses are the
         UCRT probing optional API sets and falling back to the static imports; harmless.
+      - **Second run (same device, path fixed):** with the metadata path corrected, `il2cpp_init`
+        gets *further* and then the app dies **silently** — `probe.log` ends right after `calling
+        il2cpp_init ...` and a few `api-ms-*` `LoadLibrary` lines, with no result line. A BSD crash
+        catcher (SIGSEGV/BUS/ABRT/ILL/FPE, logs guest RIP via Bachata) was added and its presence
+        confirmed on device (`crash catcher installed`) — yet **no `FATAL SIGNAL` ever fired**. Cause:
+        under StikDebug the debugger holds the task-level Mach port and sets `QSetIgnoredExceptions:
+        EXC_BAD_ACCESS;EXC_BAD_INSTRUCTION` (see `third_party/madeira/madeira-jit.js`), expecting the
+        app to register its *own* thread-level Mach handler (as Wine does). The AetherPS4 FEX port
+        registers none, so a hardware fault reaches no handler, never becomes a BSD signal, and the
+        process vanishes with no trace.
+      - **Fix (this commit): own Mach exception handler in the probe.** A thread-level port on every
+        guest thread catches `EXC_BAD_ACCESS`/`BAD_INSTRUCTION`/`ARITHMETIC` (never `BREAKPOINT`, so
+        debugserver's BRK/JIT path is untouched). Because the guest RIP/register diagnostics are
+        thread-local to the *faulting* thread (not the Mach service thread), the handler redirects the
+        faulting thread onto a trampoline on a private stack that logs guest RIP (+ offset into
+        `GameAssembly.dll`), guest registers, the exact faulting ARM64 words (`BachataDumpHostCodeWords`,
+        which also reveals whether the fault is inside a live JIT buffer), the fault address, and the
+        last Win32 import dispatched (new lock-free breadcrumb), then `_exit`s. The next run's log will
+        say definitively whether this is an unrecovered JIT alias fault (→ wire FEX recovery) or a real
+        fault in il2cpp / our HLE (→ the RIP/breadcrumb name where). Only the il2cpp probe installs it;
+        the device-confirmed ubtest runner (`win32_device.cpp`, 31/31) is untouched.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

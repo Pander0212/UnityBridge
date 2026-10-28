@@ -31,11 +31,23 @@
 #include <variant>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/arm/thread_status.h>
+#endif
+
 namespace {
 
 using namespace UnityBridge;
 namespace X86 = FEXCore::X86State;
 constexpr size_t kPage = 16384;
+
+// Lock-free breadcrumb: "dll!name" of the most recent Win32 import the guest dispatched. The crash
+// path reads it to name the API in progress (or the last one) when a fault leaves no other trace.
+char g_lastImport[160] = "(none yet)";
+
+void RegisterMachThisThread();  // registers the Mach fault port on the calling thread (defined below)
+void InstallMachHandler();      // creates the Mach exception port + service thread once (defined below)
 
 struct Report {
   std::string text;
@@ -70,6 +82,12 @@ public:
 
     Win32::CallContext c;
     c.id = static_cast<uint32_t>(frame.operation & 0xffff);
+    {
+      const auto nm = runtime->StubName(c.id);  // record the API before it runs, for the crash path
+      std::snprintf(g_lastImport, sizeof(g_lastImport), "%.*s!%.*s",
+                    static_cast<int>(nm.first.size()), nm.first.data(),
+                    static_cast<int>(nm.second.size()), nm.second.data());
+    }
     c.gpr[0] = frame.gpr[X86::REG_RCX];
     c.gpr[1] = frame.gpr[X86::REG_RDX];
     c.gpr[2] = frame.gpr[X86::REG_R8];
@@ -209,6 +227,7 @@ void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
 }
 
 uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
+  RegisterMachThisThread();  // a guest thread il2cpp created: catch its hardware faults too
   GuestThread guest;
   if (!guest.Create(*g_engine, nullptr)) return 0xffffffffu;
   RunTlsCallbacksOn(guest, Win32::DLL_THREAD_ATTACH);
@@ -324,6 +343,167 @@ void RestoreCrashHandler() {
   for (size_t i = 0; i < std::size(kCaughtSignals); ++i) sigaction(kCaughtSignals[i], &g_oldActions[i], nullptr);
 }
 
+// ---- Mach exception handler (iOS) --------------------------------------------------------------
+// On iOS under StikDebug the debugger holds the TASK-level Mach exception port and tells debugserver
+// to IGNORE EXC_BAD_ACCESS/EXC_BAD_INSTRUCTION (QSetIgnoredExceptions, see third_party/madeira).
+// A hardware fault therefore reaches no handler at all -- the FEX port registers none -- and never
+// becomes a BSD signal, so the process dies silently and our sigaction catcher above never runs.
+// We register our own THREAD-level port on each guest thread (checked before the task port, so this
+// never disturbs debugserver's BRK handling). The diagnostics we most want -- the guest RIP and
+// registers -- are thread-local to the FAULTING thread, which is not the thread servicing the Mach
+// message, so the handler redirects the faulting thread onto MachTrampoline (on a clean private
+// stack) and lets it log its own state there before exiting. Fault basics (type, address, host PC)
+// are logged from the service thread first, in case the redirect itself cannot run.
+#if defined(__APPLE__)
+uintptr_t g_imageBase = 0, g_imageEnd = 0;     // GameAssembly.dll mapped range, for locating a guest RIP
+mach_port_t g_excPort = MACH_PORT_NULL;
+pthread_t g_excThread;
+volatile sig_atomic_t g_redirected = 0;        // one-shot: only the first fault is redirected
+volatile uint64_t g_faultHostPc = 0, g_faultAddr = 0, g_excCode = 0;
+volatile int g_excType = 0;
+alignas(16) uint8_t g_trampStack[256 * 1024];  // the trampoline runs here, safe even on a stack overflow
+
+#pragma pack(push, 4)
+struct ExcRequest {  // EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES message (MIG mach_exception_raise)
+  mach_msg_header_t Head;
+  mach_msg_body_t msgh_body;
+  mach_msg_port_descriptor_t thread;
+  mach_msg_port_descriptor_t task;
+  NDR_record_t NDR;
+  exception_type_t exception;
+  mach_msg_type_number_t codeCnt;
+  int64_t code[2];
+  uint8_t pad[64];  // room for the trailer the kernel appends on receive
+};
+struct ExcReply {
+  mach_msg_header_t Head;
+  NDR_record_t NDR;
+  kern_return_t RetCode;
+};
+#pragma pack(pop)
+
+// Runs ON the faulting thread (so Bachata's thread-local guest state is live), on g_trampStack.
+void MachTrampoline() {
+  g_inCrash = 1;
+  char buf[4096];
+  std::snprintf(buf, sizeof(buf),
+                "\nUB_IL2CPP ==== FATAL MACH EXCEPTION type=%d code=%#llx fault_addr=%#llx host_pc=%#llx ====\n",
+                g_excType, static_cast<unsigned long long>(g_excCode),
+                static_cast<unsigned long long>(g_faultAddr), static_cast<unsigned long long>(g_faultHostPc));
+  WriteStr(buf);
+  WriteStr("UB_IL2CPP last win32 import before fault: ");
+  WriteStr(g_lastImport);
+  WriteStr("\n");
+
+  uint64_t rip = 0, syscallNo = 0;
+  if (AetherPS4::Fex::BachataQueryGuestRipSyscall(&rip, &syscallNo)) {
+    std::snprintf(buf, sizeof(buf), "UB_IL2CPP guest rip=%#llx rax(syscall)=%#llx\n",
+                  static_cast<unsigned long long>(rip), static_cast<unsigned long long>(syscallNo));
+    WriteStr(buf);
+    if (g_imageBase && rip >= g_imageBase && rip < g_imageEnd) {
+      std::snprintf(buf, sizeof(buf), "UB_IL2CPP   -> inside GameAssembly.dll at +%#llx\n",
+                    static_cast<unsigned long long>(rip - g_imageBase));
+      WriteStr(buf);
+    }
+  } else {
+    WriteStr("UB_IL2CPP no active FEX guest thread at the fault\n");
+  }
+  uint64_t rsp = 0;
+  if (AetherPS4::Fex::BachataDumpGuestRegisters(buf, sizeof(buf), &rsp)) { WriteStr(buf); WriteStr("\n"); }
+  // The exact faulting ARM64 instruction words (host PC from the Mach message is precise, unlike the
+  // guest RIP which is only the last checkpoint); also tells us if the fault is inside a JIT buffer.
+  if (g_faultHostPc &&
+      AetherPS4::Fex::BachataDumpHostCodeWords(reinterpret_cast<void*>(g_faultHostPc), buf, sizeof(buf))) {
+    WriteStr(buf);
+    WriteStr("\n");
+  }
+  if (g_faultAddr &&
+      AetherPS4::Fex::BachataDescribeHostFaultAddress(reinterpret_cast<void*>(g_faultAddr), buf, sizeof(buf))) {
+    WriteStr(buf);
+    WriteStr("\n");
+  }
+  WriteStr("UB_IL2CPP ==== end of fault report; exiting ====\n");
+  _exit(70);
+}
+
+void SendReply(ExcRequest* req, kern_return_t ret) {
+  ExcReply reply {};
+  reply.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(req->Head.msgh_bits), 0);
+  reply.Head.msgh_size = sizeof(reply);
+  reply.Head.msgh_remote_port = req->Head.msgh_remote_port;
+  reply.Head.msgh_local_port = MACH_PORT_NULL;
+  reply.Head.msgh_id = req->Head.msgh_id + 100;  // MIG reply id convention
+  reply.NDR = NDR_record;
+  reply.RetCode = ret;
+  mach_msg(&reply.Head, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+void* MachServer(void*) {
+  for (;;) {
+    ExcRequest req {};
+    kern_return_t kr = mach_msg(&req.Head, MACH_RCV_MSG, 0, sizeof(req), g_excPort,
+                                MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) continue;
+
+    const mach_port_t faultThread = req.thread.name;
+    g_excType = req.exception;
+    g_excCode = req.codeCnt >= 1 ? static_cast<uint64_t>(req.code[0]) : 0;
+    g_faultAddr = req.codeCnt >= 2 ? static_cast<uint64_t>(req.code[1]) : 0;
+
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "\nUB_IL2CPP (mach) exception type=%d code=%#llx addr=%#llx\n",
+                  g_excType, static_cast<unsigned long long>(g_excCode),
+                  static_cast<unsigned long long>(g_faultAddr));
+    WriteStr(buf);
+
+    arm_thread_state64_t ts {};
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    if (g_redirected == 0 &&
+        thread_get_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), &count) == KERN_SUCCESS) {
+      g_faultHostPc = (uint64_t)(arm_thread_state64_get_pc(ts));  // macro yields uint64 (arm64) or void* (arm64e)
+      g_redirected = 1;
+      arm_thread_state64_t nts = ts;
+      const uintptr_t sp = (reinterpret_cast<uintptr_t>(g_trampStack) + sizeof(g_trampStack)) & ~uintptr_t {15};
+      arm_thread_state64_set_sp(nts, sp);
+      arm_thread_state64_set_pc_fptr(nts, &MachTrampoline);
+      thread_set_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&nts), ARM_THREAD_STATE64_COUNT);
+      SendReply(&req, KERN_SUCCESS);  // resume the faulting thread at the trampoline
+    } else {
+      SendReply(&req, KERN_FAILURE);  // already redirected (or no state): let it escalate/die honestly
+    }
+  }
+  return nullptr;
+}
+
+// Registers our Mach port on the calling thread for the hardware-fault exceptions. Thread-level
+// ports are consulted before the task port, so this takes priority over debugserver without
+// replacing its handling of BRK (EXC_BREAKPOINT), which we never register for.
+void RegisterMachThisThread() {
+  if (g_excPort == MACH_PORT_NULL) return;
+  mach_port_t self = mach_thread_self();
+  thread_set_exception_ports(self, EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_ARITHMETIC,
+                             g_excPort, EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES, ARM_THREAD_STATE64);
+  mach_port_deallocate(mach_task_self(), self);
+}
+
+// Creates the exception port and its service thread once per process; idempotent.
+void InstallMachHandler() {
+  if (g_excPort != MACH_PORT_NULL) return;
+  const mach_port_t task = mach_task_self();
+  if (mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &g_excPort) != KERN_SUCCESS) {
+    g_excPort = MACH_PORT_NULL;
+    return;
+  }
+  mach_port_insert_right(task, g_excPort, g_excPort, MACH_MSG_TYPE_MAKE_SEND);
+  pthread_create(&g_excThread, nullptr, &MachServer, nullptr);
+  pthread_detach(g_excThread);
+  RegisterMachThisThread();  // the probe's own guest thread runs here
+}
+#else
+void RegisterMachThisThread() {}
+void InstallMachHandler() {}
+#endif
+
 } // namespace
 
 // Loads GameAssembly.dll from `dllPath`, points il2cpp at `dataDir` (the host path of the game's
@@ -405,6 +585,12 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   // Catch a fault inside il2cpp (or our handlers) and log the guest RIP before the process dies.
   InstallCrashHandler();
   report.Line("crash catcher installed (SIGSEGV/BUS/ABRT/ILL/FPE)");
+#if defined(__APPLE__)
+  g_imageBase = reinterpret_cast<uintptr_t>(image.base);
+  g_imageEnd = g_imageBase + image.size;
+  InstallMachHandler();
+  report.Line("mach exception handler installed (BAD_ACCESS/BAD_INSTRUCTION/ARITHMETIC)");
+#endif
 
   // The loader runs the module's TLS callbacks and then DllMain with DLL_PROCESS_ATTACH.
   RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_ATTACH);

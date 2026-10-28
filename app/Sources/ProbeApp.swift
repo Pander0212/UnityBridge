@@ -255,9 +255,13 @@ struct ProbeView: View {
         let unityDir = docs.appendingPathComponent("Unity", isDirectory: true)
         try? FileManager.default.createDirectory(at: unityDir, withIntermediateDirectories: true)
         let unityData = docs.appendingPathComponent("UnityAppData", isDirectory: true)
+        let haveUnity = FileManager.default.fileExists(atPath: unityDir.appendingPathComponent("libunity.so").path)
         running = true
         report = ""
         Thread.detachNewThread {
+            // Husk's region first, while the address space is still unfragmented: its writable
+            // view must end up within 3 GiB of the executable one.
+            if haveUnity { _ = husk_ios_jit_get_mapping() }
             var buffer = [CChar](repeating: 0, count: 65536)
             let status = ub_il2cpp_probe_run(dll.path, dataDir.path, profile.path, &buffer, buffer.count)
             var text = String(cString: buffer) + "\nexit status \(status)"

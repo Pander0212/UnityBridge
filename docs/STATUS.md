@@ -513,6 +513,18 @@ Next steps, in order:
         `NativeLoader.load` (libmain loads `libunity.so`: map, relocate, constructors, `JNI_OnLoad`).
         Logs every `libil2cpp.so` open/lookup and the unresolved imports. Stops there: the engine's
         own start (`initJni`, `nativeRender`) would run `il2cpp_init` a second time and needs EGL.
+      - **First device run (2026-10-28, iPhone 15, iOS 26.6.2):** the il2cpp part all green as before,
+        the APK written (25.7 MB), the virtual `libil2cpp.so` answered (`il2cpp_domain_get` through
+        `dlopen`/`dlsym` = the domain). Husk's loader then refused to map anything: `the writable and
+        executable views are 8161 MiB apart: too far for adrp`. The allocator places the region's
+        writable alias anywhere (`VM_FLAGS_ANYWHERE`, here 8 GiB above the executable view); Husk
+        retargets code at the writable view with `adrp` and needs them within ±3 GiB, and its own
+        search (16 MiB steps out to 2 GiB) found nothing near: below the region the address space was
+        taken, above it is the shared cache. **Fix:** `engine/unity_host.cpp` walks the address space
+        (`vm_region_64`) within ±3 GiB of the executable view, logs the free gaps, and remaps the
+        writable view into the nearest one that fits (128 MiB, shrinking to 48 MiB if needed); and
+        the app requests Husk's region at the start of the run, before il2cpp_init fragments the
+        address space, when `Unity/libunity.so` is present.
       - Next: let libunity start il2cpp itself (probe without our own `il2cpp_init`), then
         `initJni`/first `nativeRender` without graphics; the game's data as the APK's
         `assets/bin/Data`; ANGLE for EGL/GLES.

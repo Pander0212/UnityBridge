@@ -364,8 +364,8 @@ Next steps, in order:
 - [ ] Build Husk's translation layer inside UnityBridge's app (or UnityBridge as a Husk engine module),
       with FEXCore sharing Husk's JIT arena.
 - [ ] Virtual `libil2cpp.so` with the 228 generic thunks; reverse thunks for callbacks and InternalCalls.
-      - [ ] **M3a, the il2cpp bridge ARM64 → x64** (`engine/il2cpp_bridge.{h,cpp}`): built, host test
-        green, **[i] on iPhone pending**. `Il2cppBridge::Symbol(name)` returns a native ARM64 function
+      - [x] **M3a, the il2cpp bridge ARM64 → x64** (`engine/il2cpp_bridge.{h,cpp}`): host test green,
+        **[i] all checks pass on iPhone (2026-10-28, run below)**. `Il2cppBridge::Symbol(name)` returns a native ARM64 function
         pointer for any `il2cpp_*` export of the loaded `GameAssembly.dll` — what `dlsym("libil2cpp.so",
         name)` will hand libunity. One template-instantiated thunk per bound function (512 slots, no
         run-time code generation) forwards x0–x7 to rcx, rdx, r8, r9 + four stack slots and returns
@@ -386,6 +386,14 @@ Next steps, in order:
         result) and `Int32.Parse("not a number")`, which must come back as `System.FormatException`:
         il2cpp throws managed exceptions as C++ exceptions, so this exercises our SEH dispatcher and
         unwinder with GameAssembly's own C++ frame handler.
+        **Device run (iPhone 15, iOS 26.6.2):** through the bridge's function pointers only —
+        56 assemblies, 6,039 classes (491 in `Assembly-CSharp`); `Environment.ProcessorCount = 6`
+        (device: 6); `Int32.Parse("1234") = 1234`; `ToUpperInvariant` → `"FELLWORLD ON IPHONE"`;
+        `Int32.Parse("not a number")` → `System.FormatException: Input string was not in a correct
+        format.`, caught and returned — the first C++ exception of the real binary through our SEH,
+        clean on the first try. Nine more unaligned sites were fixed up along the way. `BRIDGE: all
+        checks passed`, 0 unimplemented imports, 1 il2cpp guest thread running, alive 5 s later (the
+        30 s line was not in the shared log yet).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

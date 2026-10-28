@@ -263,8 +263,9 @@ std::optional<uint64_t> CallExport(GuestThread& guest, Report& report, const Pe:
 // writes the guest RIP, registers and fault address through the engine's crash-path diagnostics,
 // then re-raises so the process still dies honestly. Output goes to stderr (probe.log), unbuffered.
 volatile sig_atomic_t g_inCrash = 0;
-struct sigaction g_oldSegv, g_oldBus;
-uint8_t g_altStack[64 * 1024];
+uint8_t g_altStack[128 * 1024];
+const int kCaughtSignals[] = {SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE};  // not SIGTRAP: the JIT uses it
+struct sigaction g_oldActions[std::size(kCaughtSignals)];
 
 void WriteStr(const char* s) { if (s) { ssize_t n = write(2, s, std::strlen(s)); (void)n; } }
 
@@ -278,8 +279,8 @@ void CrashHandler(int sig, siginfo_t* info, void* ctx) {
   if (g_inCrash) { signal(sig, SIG_DFL); raise(sig); return; }
   g_inCrash = 1;
   char buf[4096];
-  WriteStr("\nUB_IL2CPP ==== FATAL SIGNAL ");
-  std::snprintf(buf, sizeof(buf), "%d (addr=%p) ====\n", sig, info ? info->si_addr : nullptr);
+  std::snprintf(buf, sizeof(buf), "\nUB_IL2CPP ==== FATAL SIGNAL %d (addr=%p) ====\n", sig,
+                info ? info->si_addr : nullptr);
   WriteStr(buf);
 #ifndef _WIN32
   uint64_t rip = 0, syscallNo = 0;
@@ -297,9 +298,14 @@ void CrashHandler(int sig, siginfo_t* info, void* ctx) {
     WriteStr("\n");
   }
 #endif
-  struct sigaction* old = (sig == SIGSEGV) ? &g_oldSegv : &g_oldBus;
-  if ((old->sa_flags & SA_SIGINFO) && old->sa_sigaction) old->sa_sigaction(sig, info, ctx);
-  else { signal(sig, SIG_DFL); raise(sig); }
+  for (size_t i = 0; i < std::size(kCaughtSignals); ++i) {
+    if (kCaughtSignals[i] != sig) continue;
+    struct sigaction* old = &g_oldActions[i];
+    if ((old->sa_flags & SA_SIGINFO) && old->sa_sigaction) { old->sa_sigaction(sig, info, ctx); return; }
+    break;
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
 }
 
 void InstallCrashHandler() {
@@ -311,13 +317,11 @@ void InstallCrashHandler() {
   a.sa_sigaction = &CrashHandler;
   sigemptyset(&a.sa_mask);
   a.sa_flags = SA_SIGINFO | SA_ONSTACK;
-  sigaction(SIGSEGV, &a, &g_oldSegv);
-  sigaction(SIGBUS, &a, &g_oldBus);
+  for (size_t i = 0; i < std::size(kCaughtSignals); ++i) sigaction(kCaughtSignals[i], &a, &g_oldActions[i]);
 }
 
 void RestoreCrashHandler() {
-  sigaction(SIGSEGV, &g_oldSegv, nullptr);
-  sigaction(SIGBUS, &g_oldBus, nullptr);
+  for (size_t i = 0; i < std::size(kCaughtSignals); ++i) sigaction(kCaughtSignals[i], &g_oldActions[i], nullptr);
 }
 
 } // namespace
@@ -400,6 +404,7 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
 
   // Catch a fault inside il2cpp (or our handlers) and log the guest RIP before the process dies.
   InstallCrashHandler();
+  report.Line("crash catcher installed (SIGSEGV/BUS/ABRT/ILL/FPE)");
 
   // The loader runs the module's TLS callbacks and then DllMain with DLL_PROCESS_ATTACH.
   RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_ATTACH);

@@ -392,8 +392,16 @@ Next steps, in order:
         `Int32.Parse("not a number")` → `System.FormatException: Input string was not in a correct
         format.`, caught and returned — the first C++ exception of the real binary through our SEH,
         clean on the first try. Nine more unaligned sites were fixed up along the way. `BRIDGE: all
-        checks passed`, 0 unimplemented imports, 1 il2cpp guest thread running, alive 5 s later (the
-        30 s line was not in the shared log yet).
+        checks passed`, 0 unimplemented imports, 1 il2cpp guest thread running, alive 5 s and 30 s
+        later; the app stays up indefinitely after that (user-confirmed). After a fresh launch the
+        ubtest runner, now with `MachFault`, still passes every check.
+        Running the Windows DLL test in the same app session *after* il2cpp crashes: both runners share
+        the mini Win32 (module list, TLS and unwind registries, thread runner, guest caller), and the
+        ubtest runner starts a second FEX engine next to il2cpp's live one, then resets those globals
+        while il2cpp's thread still runs. The product runs one game per process, so instead of
+        supporting that: each runner refuses to start once the other has run in this process
+        (`ub_il2cpp_probe_started`, `ub_win32_device_has_run`), and the app greys out the other button
+        and says to reopen it.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

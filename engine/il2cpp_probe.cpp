@@ -53,6 +53,7 @@ constexpr size_t kPage = 16384;
 uintptr_t g_imageBase = 0, g_imageEnd = 0;  // GameAssembly.dll's mapped range, for logging offsets
 std::atomic<int> g_guestThreads {0};         // threads il2cpp created that are running guest code
 thread_local int t_hleDepth = 0;             // >0 while this host thread runs an HLE call for the guest
+std::atomic<bool> g_il2cppStarted {false};   // set once per process: the runtime then stays up
 
 struct Report {
   std::string text;
@@ -541,6 +542,11 @@ int RunBridgeTests(Report& report) {
 
 } // namespace
 
+extern "C" int ub_win32_device_has_run();
+
+// Nonzero once the il2cpp probe has started in this process (its runtime then stays up until exit).
+extern "C" int ub_il2cpp_probe_started() { return g_il2cppStarted.load() ? 1 : 0; }
+
 // Loads GameAssembly.dll from `dllPath`, points il2cpp at `dataDir` (the host path of the game's
 // <Game>_Data folder), and calls il2cpp_init. `profileDir` maps C:\Users\Player.
 extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, const char* profileDir,
@@ -551,13 +557,18 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
     return status;
   };
   report.Line("UnityBridge IL2CPP probe: GameAssembly.dll under FEXCore");
-  // il2cpp_init can run once per process, and the runtime it starts lives until the app exits.
-  static bool s_ran = false;
-  if (s_ran) {
+  // il2cpp_init can run once per process, and the runtime it starts lives until the app exits. The
+  // ubtest runner shares the mini Win32 (modules, TLS and unwind registries, thread runner) and starts
+  // an engine of its own, so the two never run in the same process.
+  if (g_il2cppStarted.exchange(true)) {
     report.Line("Already ran in this app session: il2cpp is up and stays up. Close and reopen the app to run again.");
     return finish(3);
   }
-  s_ran = true;
+  if (ub_win32_device_has_run()) {
+    g_il2cppStarted = false;
+    report.Line("The Windows DLL test ran in this app session. Close and reopen the app, then run il2cpp_init first.");
+    return finish(3);
+  }
 
   std::ifstream in(dllPath, std::ios::binary);
   const std::vector<uint8_t> file {std::istreambuf_iterator<char>(in), {}};

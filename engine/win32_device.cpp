@@ -19,6 +19,7 @@
 
 #include <FEXCore/Core/X86Enums.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
@@ -297,6 +298,15 @@ const char* kChecks[] = {
 
 } // namespace
 
+extern "C" int ub_il2cpp_probe_started();
+
+namespace {
+std::atomic<bool> g_deviceRan {false};
+}
+
+// Nonzero once the ubtest runner has run in this process.
+extern "C" int ub_win32_device_has_run() { return g_deviceRan.load() ? 1 : 0; }
+
 // Runs tests/testdll/ubtest.dll under FEXCore. `profileDir` receives the guest's C:\Users\Player.
 extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, char* out, size_t capacity) {
   Report report;
@@ -305,6 +315,13 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
     return status;
   };
   report.Line("UnityBridge M2d: Windows DLL under FEXCore");
+  // The il2cpp probe keeps its runtime (engine, threads, mini-Win32 registrations) up until the app
+  // exits; a second engine with its own registrations next to it is not supported.
+  if (ub_il2cpp_probe_started()) {
+    report.Line("il2cpp_init ran in this app session and its runtime is still up. Close and reopen the app to run this test.");
+    return finish(3);
+  }
+  g_deviceRan = true;
 
   std::ifstream in(dllPath, std::ios::binary);
   const std::vector<uint8_t> file {std::istreambuf_iterator<char>(in), {}};

@@ -92,11 +92,20 @@ struct ProbeView: View {
                         .disabled(running || jit != .ready)
                     Button("Run Windows DLL test", action: runWindowsDLL)
                         .buttonStyle(.bordered)
-                        .disabled(running || jit != .ready)
+                        .disabled(running || jit != .ready || il2cppStarted)
                 }
                 Button("Run il2cpp_init (GameAssembly.dll)", action: runIl2cpp)
                     .buttonStyle(.bordered)
-                    .disabled(running || jit != .ready)
+                    .disabled(running || jit != .ready || il2cppStarted || windowsDLLRan)
+                // The il2cpp runtime stays up once started, and the two tests share the mini Win32:
+                // each needs a fresh launch after the other.
+                if il2cppStarted {
+                    Text("il2cpp is running in this app session. Close and reopen the app to run another test.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else if windowsDLLRan {
+                    Text("To run il2cpp_init, close and reopen the app first.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 ScrollView {
                     Text(report.isEmpty ? "No result yet." : report)
                         .font(.system(.footnote, design: .monospaced))
@@ -116,6 +125,10 @@ struct ProbeView: View {
             }
         }
     }
+
+    // Re-read on every render; `running` flips when a test finishes, which renders again.
+    private var il2cppStarted: Bool { ub_il2cpp_probe_started() != 0 }
+    private var windowsDLLRan: Bool { ub_win32_device_has_run() != 0 }
 
     @ViewBuilder private var statusLabel: some View {
         switch jit {

@@ -239,6 +239,16 @@ Building blocks chosen (2026-10-26) [R]:
         Only the il2cpp probe installs it; the device-confirmed ubtest runner (`win32_device.cpp`,
         31/31) is untouched. If this clears the alignment faults, `il2cpp_init` should get materially
         further — possibly all the way.
+      - **Fourth run: FEX's fixup works, the resume did not.** The log shows
+        `BACHATA_UNALIGNED_FIX … instr_before=0xd9408294 instr_after=0xf8408294`: FEX rewrote the
+        `LDAPUR` into a plain `LDUR` (unaligned-safe) plus a `dmb ld` barrier, and `HandleGuestSignal`
+        returned true (`code=0x101` is `EXC_ARM_DA_ALIGN`, confirming the alignment diagnosis). But the
+        fatal report followed at the same PC with no second `UNALIGNED_FAIL`: `setcontext()` had
+        *returned*. On Apple arm64 the ucontext functions are stubs that fail with `ENOTSUP`.
+        **Fix (this commit):** after a successful fixup the trampoline touches a marker address in
+        `__PAGEZERO`; the Mach service thread recognises that second fault and has the kernel load the
+        fixed-up thread state plus the NEON state captured at the original fault (`thread_set_state`),
+        then resumes the guest. No libc context functions, no assembly.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

@@ -33,9 +33,9 @@
 
 #if defined(__APPLE__)
 #ifndef _XOPEN_SOURCE
-#define _XOPEN_SOURCE 1  // Darwin <ucontext.h> hard-errors on getcontext/setcontext without this
+#define _XOPEN_SOURCE 1  // Darwin <ucontext.h> hard-errors on its deprecated declarations without this
 #endif
-#include <ucontext.h>    // ucontext_t / _STRUCT_MCONTEXT64 / setcontext, to drive FEX's fault fixup
+#include <ucontext.h>    // ucontext_t / _STRUCT_MCONTEXT64, to drive FEX's fault fixup
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 #endif
@@ -361,11 +361,20 @@ void RestoreCrashHandler() {
 // instruction on. That path needs the FAULTING thread's thread-local FEX state, so it must run ON
 // that thread, not on the Mach service thread. We therefore register a THREAD-level port on each
 // guest thread (checked before the task port, so debugserver's BRK/JIT path is untouched), and the
-// service thread redirects the faulting thread onto MachTrampoline, which: builds a ucontext from the
-// faulting state, calls HandleGuestSignal (BUS_ADRALN) to let FEX fix up and, on success, setcontext()s
-// straight back into the fixed-up guest; only if FEX cannot handle it does it log the full fault
-// report (guest RIP/registers, exact faulting ARM64 words, last import) and _exit.
+// service thread redirects the faulting thread onto MachTrampoline, which builds a ucontext from the
+// faulting state and calls HandleGuestSignal (BUS_ADRALN) to let FEX fix up. Only if FEX cannot
+// handle it does the trampoline log the full fault report (guest RIP/registers, exact faulting ARM64
+// words, last import) and _exit.
+//
+// Resuming after a successful fixup cannot use setcontext(): on Apple arm64 the ucontext functions
+// are stubs that fail with ENOTSUP (device-confirmed: the fixup succeeded, setcontext returned, and
+// the trampoline fell through to the fatal report). Instead the trampoline deliberately touches
+// kResumeMagic, an address inside __PAGEZERO; that second EXC_BAD_ACCESS reaches our port, and the
+// service thread recognises it and has the kernel load the fixed-up thread state plus the NEON state
+// captured at the original fault (thread_set_state), then resumes the guest. No libc, no assembly.
 #if defined(__APPLE__)
+constexpr uintptr_t kResumeMagic = 0xfe5c0;    // in __PAGEZERO (< 4 GiB): never mapped, so touching it faults
+volatile sig_atomic_t g_resumeReady = 0;       // set by the trampoline just before it touches kResumeMagic
 uintptr_t g_imageBase = 0, g_imageEnd = 0;     // GameAssembly.dll mapped range, for locating a guest RIP
 mach_port_t g_excPort = MACH_PORT_NULL;
 pthread_t g_excThread;
@@ -406,7 +415,12 @@ void MachTrampoline() {
   uc.uc_mcontext = &g_savedMc;
   uc.uc_mcsize = sizeof(g_savedMc);
   if (AetherPS4::Fex::HandleGuestSignal(SIGBUS, &si, &uc)) {
-    setcontext(&uc);  // resume at pc+adjustment with the fixed-up registers; never returns on success
+    // g_savedMc now holds pc+adjustment and the fixed-up registers. Hand it to the service thread,
+    // which loads it into this thread when the deliberate fault below arrives.
+    g_resumeReady = 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);  // publish g_savedMc/g_resumeReady before the fault
+    *reinterpret_cast<volatile uint32_t*>(kResumeMagic) = 0;
+    _exit(72);  // unreachable: the service thread never resumes us here
   }
 
   // Not a recoverable alignment fault: a real fault in il2cpp or our HLE. Report it once and die.
@@ -474,9 +488,23 @@ void* MachServer(void*) {
     if (kr != KERN_SUCCESS) continue;
 
     const mach_port_t faultThread = req.thread.name;
+    const uint64_t faultAddr = req.codeCnt >= 2 ? static_cast<uint64_t>(req.code[1]) : 0;
+
+    // The trampoline's deliberate fault after a successful FEX fixup: load the fixed-up state (and
+    // the NEON state captured at the original fault) into the thread and resume the guest.
+    if (g_resumeReady && faultAddr == kResumeMagic) {
+      g_resumeReady = 0;
+      thread_set_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&g_savedMc.__ss),
+                       ARM_THREAD_STATE64_COUNT);
+      thread_set_state(faultThread, ARM_NEON_STATE64, reinterpret_cast<thread_state_t>(&g_savedMc.__ns),
+                       ARM_NEON_STATE64_COUNT);
+      SendReply(&req, KERN_SUCCESS);
+      continue;
+    }
+
     g_excType = req.exception;
     g_excCode = req.codeCnt >= 1 ? static_cast<uint64_t>(req.code[0]) : 0;
-    g_faultAddr = req.codeCnt >= 2 ? static_cast<uint64_t>(req.code[1]) : 0;
+    g_faultAddr = faultAddr;
 
     // Redirect the faulting thread onto the trampoline (so FEX's thread-local fixup runs on the right
     // thread). Not one-shot: every unaligned site faults once, is fixed up and resumed, and never
@@ -489,8 +517,7 @@ void* MachServer(void*) {
         thread_get_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), &count) == KERN_SUCCESS) {
       g_faultHostPc = (uint64_t)(arm_thread_state64_get_pc(ts));  // macro yields uint64 (arm64) or void* (arm64e)
       g_savedMc.__ss = ts;  // the trampoline fixes this up (and resumes) or reports it
-      // setcontext() restores the whole mcontext, so the NEON state must be real too, or the guest's
-      // vector registers would be zeroed on resume.
+      // Captured now, before the trampoline's C code clobbers them, and restored on resume.
       mach_msg_type_number_t neonCount = ARM_NEON_STATE64_COUNT;
       thread_get_state(faultThread, ARM_NEON_STATE64, reinterpret_cast<thread_state_t>(&g_savedMc.__ns), &neonCount);
       arm_thread_state64_t nts = ts;

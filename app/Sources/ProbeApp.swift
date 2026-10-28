@@ -220,12 +220,18 @@ struct ProbeView: View {
             """
             return
         }
-        // Data dir: the first *_Data subfolder next to the DLL, else the Game folder itself.
+        // il2cpp appends "/Metadata/global-metadata.dat" to the data dir, and that file lives in
+        // <Game>_Data/il2cpp_data (Unity 2021.3). So point at the folder that contains "Metadata":
+        // prefer <Game>_Data/il2cpp_data, then <Game>_Data, then the Game folder.
         var dataDir = gameDir
         if let entries = try? FileManager.default.contentsOfDirectory(
             at: gameDir, includingPropertiesForKeys: [.isDirectoryKey]),
            let data = entries.first(where: { $0.lastPathComponent.hasSuffix("_Data") }) {
             dataDir = data
+        }
+        let il2cppData = dataDir.appendingPathComponent("il2cpp_data", isDirectory: true)
+        if FileManager.default.fileExists(atPath: il2cppData.appendingPathComponent("Metadata").path) {
+            dataDir = il2cppData
         }
         let profile = docs.appendingPathComponent("Profile", isDirectory: true)
         try? FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)

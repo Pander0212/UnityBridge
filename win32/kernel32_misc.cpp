@@ -123,6 +123,23 @@ uint64_t GetLocaleInfoW(CallContext& c) {
   return value.size() + 1;
 }
 
+// GetLocaleInfoEx(name, LCType, data, cch): same argument layout as GetLocaleInfoW from LCType on,
+// and we answer as en-US regardless of the name, so it reuses the same handler.
+
+// GetUserDefaultLocaleName(name, cch): the user default locale, en-US.
+uint64_t GetUserDefaultLocaleName(CallContext& c) {
+  static const char16_t kName[] = u"en-US";
+  auto* out = c.Ptr<char16_t>(0);
+  const auto size = static_cast<int32_t>(c.Arg(1));
+  constexpr int32_t need = 6;  // "en-US" + null
+  if (size == 0) return need;
+  if (size < need || out == nullptr) return SetError(ERROR_INSUFFICIENT_BUFFER, 0);
+  std::memcpy(out, kName, need * 2);
+  return need;
+}
+
+uint64_t IsValidLocaleName(CallContext&) { return kTrue; }  // we only model en-US, but never block
+
 uint64_t GetCPInfo(CallContext& c) {
   // CPINFO: MaxCharSize u32, DefaultChar[2], LeadByte[12].
   const auto cp = static_cast<DWORD>(c.Arg(0));
@@ -329,6 +346,8 @@ void RegisterKernel32Misc(std::vector<Function>& out) {
   UB_FN(GetUserDefaultLCID); UB_FN(GetThreadLocale); UB_FN(IsValidLocale); UB_FN(EnumSystemLocalesW);
   UB_FN(GetLocaleInfoW); UB_FN(GetCPInfo); UB_FN(LCMapStringW); UB_FN(LCMapStringEx); UB_FN(CompareStringW);
   UB_FN(GetStringTypeW);
+  UB_FN(GetUserDefaultLocaleName); UB_FN(IsValidLocaleName);
+  out.push_back({k, "GetLocaleInfoEx", &GetLocaleInfoW});  // same layout from LCType on; en-US
   UB_FN(GetTimeZoneInformation); UB_FN(GetDynamicTimeZoneInformation); UB_FN(GetSystemTimes);
   UB_FN(FormatMessageW);
   UB_FN(ExitProcess); UB_FN(TerminateProcess); UB_FN(GetExitCodeProcess); UB_FN(K32GetProcessImageFileNameW);

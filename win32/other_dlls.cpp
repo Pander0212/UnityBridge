@@ -171,6 +171,12 @@ uint64_t CoTaskMemAlloc(CallContext& c) { return reinterpret_cast<uint64_t>(std:
 uint64_t CoTaskMemFree(CallContext& c) { std::free(c.Ptr<void>(0)); return 0; }
 uint64_t CoGetContextToken(CallContext&) { return E_NOTIMPL; }
 uint64_t CoCreateFreeThreadedMarshaler(CallContext&) { return E_NOTIMPL; }
+// CoGetApartmentType(pAptType, pAptQualifier): report a multithreaded apartment, no qualifier.
+uint64_t CoGetApartmentType(CallContext& c) {
+  Store<DWORD>(c.Arg(0), 1);  // APTTYPE_MTA
+  Store<DWORD>(c.Arg(1), 0);  // APTTYPEQUALIFIER_NONE
+  return S_OK;
+}
 
 // ---- ADVAPI32: random numbers ------------------------------------------------------------
 
@@ -297,6 +303,7 @@ void RegisterOtherDlls(std::vector<Function>& out) {
   out.push_back({o32, "CoTaskMemFree", &CoTaskMemFree});
   out.push_back({o32, "CoGetContextToken", &CoGetContextToken});
   out.push_back({o32, "CoCreateFreeThreadedMarshaler", &CoCreateFreeThreadedMarshaler});
+  out.push_back({o32, "CoGetApartmentType", &CoGetApartmentType});
 
   const std::string adv = "advapi32.dll";
   out.push_back({adv, "CryptAcquireContextW", &CryptAcquireContextW});

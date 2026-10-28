@@ -285,6 +285,13 @@ uint64_t FlsSetValue(CallContext& c) {
   t_fls[i] = c.Arg(1);
   return kTrue;
 }
+// The UCRT's newer raw variant: same slot value, without touching the last-error code.
+uint64_t FlsGetValue2(CallContext& c) {
+  const auto i = static_cast<DWORD>(c.Arg(0));
+  return i < kTlsSlots ? t_fls[i] : 0;
+}
+// Our ANSI code page is UTF-8 (GetACP), so the *A file APIs behave as ANSI; report that.
+uint64_t AreFileApisANSI(CallContext&) { return kTrue; }
 
 // ---- synchronisation ---------------------------------------------------------------------
 // The guest's CRITICAL_SECTION / SRWLOCK / CONDITION_VARIABLE memory is only used as a key;
@@ -630,6 +637,9 @@ void RegisterKernel32(std::vector<Function>& out) {
   UB_FN(VirtualAlloc); UB_FN(VirtualFree); UB_FN(VirtualProtect); UB_FN(VirtualQuery);
   UB_FN(TlsAlloc); UB_FN(TlsFree); UB_FN(TlsGetValue); UB_FN(TlsSetValue);
   UB_FN(FlsAlloc); UB_FN(FlsFree); UB_FN(FlsGetValue); UB_FN(FlsSetValue);
+  out.push_back({"kernelbase.dll", "FlsGetValue2", &FlsGetValue2});  // the UCRT imports it from here
+  out.push_back({k, "FlsGetValue2", &FlsGetValue2});
+  UB_FN(AreFileApisANSI);
   UB_FN(InitializeCriticalSection); UB_FN(DeleteCriticalSection); UB_FN(EnterCriticalSection);
   UB_FN(LeaveCriticalSection); UB_FN(TryEnterCriticalSection);
   out.push_back({k, "InitializeCriticalSectionEx", &InitializeCriticalSection});

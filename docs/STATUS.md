@@ -195,6 +195,16 @@ Building blocks chosen (2026-10-26) [R]:
       the repo, CI or the build machine: the user copies `GameAssembly.dll` and `<Game>_Data` into
       `Files › On My iPhone › UB Probe › Game` and runs the probe, which logs line-by-line to
       `probe.log` (so even a fault mid-init shows how far it got).
+      - **First device run (iPhone 15, iOS 26.6.2, 2026-10-28):** the real 24 MB `GameAssembly.dll`
+        loaded, all **206 imports resolved** (0 unresolved), `DllMain` returned TRUE, and `il2cpp_init`
+        ran all the way to metadata loading — TLS, SEH, the C runtime init and il2cpp's early init all
+        held on the first try, and il2cpp's own logs reached us (`[libil2cpp] ERROR: …`). It failed at
+        one thing only: the metadata **path**. il2cpp appends `\Metadata\global-metadata.dat` to the
+        data dir, so the data dir must be `<Game>_Data\il2cpp_data` (not `<Game>_Data`); the app now
+        points there. 11 imports were called but unimplemented, all non-fatal — now added:
+        `FlsGetValue2` (kernelbase), `AreFileApisANSI`, `GetUserDefaultLocaleName`, `GetLocaleInfoEx`,
+        `IsValidLocaleName`, `CoGetApartmentType`. The `api-ms-win-core-*` `LoadLibrary` misses are the
+        UCRT probing optional API sets and falling back to the static imports; harmless.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

@@ -70,6 +70,10 @@ ENGINE_INCLUDES="$ROOT/compat;$AP;$ROOT"
 # CMAKE_SYSTEM_PROCESSOR must be set: FEX's architecture detection fails on an empty value when
 # cross-compiling. BUILD_FEXCORE_ONLY leaves out FEX's Linux frontend (ELF loader, syscalls),
 # which does not build for Darwin; UnityBridge supplies its own (Windows) frontend.
+# ENABLE_FEX_ALLOCATOR=OFF: FEXCore's internal allocations go to the system malloc (the Darwin
+# branch of FEXCore/Source/Utils/AllocatorHooks.cpp) instead of rpmalloc, which maps a 256 MiB span,
+# 256 MiB-aligned, per thread heap and size class. With the Unity engine in the process (many host
+# threads running guest code) rpmalloc returned NULL for FEX's thread state on new threads (M3e).
 cmake -S "$FEX" -B "$BUILD" -G Ninja \
     -DCMAKE_SYSTEM_NAME=iOS \
     -DCMAKE_SYSTEM_PROCESSOR=arm64 \
@@ -81,7 +85,7 @@ cmake -S "$FEX" -B "$BUILD" -G Ninja \
     -DBUILD_FEXCORE_SMOKE=OFF \
     -DBUILD_TESTING=OFF \
     -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF \
-    -DENABLE_FEX_ALLOCATOR=ON \
+    -DENABLE_FEX_ALLOCATOR=OFF \
     -DENABLE_CCACHE=ON \
     -DENABLE_LTO=OFF \
     -DENABLE_WERROR=OFF \

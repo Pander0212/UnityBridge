@@ -618,6 +618,17 @@ Next steps, in order:
         and checks the heap with an allocation of the same shape (`aligned_alloc(4096, 8192)`) before
         FEX's `CreateThread`; if that still fails the thread is not started (logged) instead of FEX
         writing through NULL.
+      - **Fifth device run:** `FEX thread heap ready` on both new threads and `CreateThread` got
+        further, then the next rpmalloc allocation on the same thread returned NULL
+        (`OpDispatchBuilder::OpDispatchBuilder+0x28` with `this = NULL`, from
+        `ContextImpl::InitializeCompiler`), again with no map failure logged. rpmalloc maps one
+        **256 MiB span, 256 MiB-aligned (512 MiB reserved), per thread heap and page type**; with the
+        Unity engine in the process many host threads run guest code. **Fix:** FEXCore for iOS is
+        now built with `ENABLE_FEX_ALLOCATOR=OFF` (`scripts/build-fexcore-ios.sh`): its internal
+        allocations go to the system malloc through the Darwin branch AetherPS4's tree already has
+        (`posix_memalign`, `malloc_size`); rpmalloc is no longer built. This changes every FEX run,
+        so the earlier device checks (il2cpp probe: BRIDGE/ICALL/INTERCEPT; the Windows DLL test)
+        are to be repeated with it.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

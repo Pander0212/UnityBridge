@@ -239,6 +239,8 @@ void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
 // first allocation (in FEXCore's CreateThread, for il2cpp's first thread) returned NULL with plenty
 // of memory free, and FEX wrote through it. So every new host thread that will run guest code sets
 // its heap up explicitly and checks it with an allocation of the same shape, before CreateThread.
+// Since the engine is built with ENABLE_FEX_ALLOCATOR=OFF (scripts/build-fexcore-ios.sh) FEX uses
+// the system malloc and InitializeThread does nothing; the check stays as a cheap guard.
 std::atomic<int> g_fexThreadsPrepared {0};
 bool PrepareFexThread(const char* who) {
   FEXCore::Allocator::InitializeThread();

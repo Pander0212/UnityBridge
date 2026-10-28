@@ -24,6 +24,7 @@
 #include "win32/hle.h"
 
 #include <FEXCore/Core/X86Enums.h>
+#include <FEXCore/Utils/AllocatorHooks.h>
 
 #include <algorithm>
 #include <atomic>
@@ -233,13 +234,31 @@ void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
   }
 }
 
+// FEXCore allocates its per-thread state through its own allocator (rpmalloc), which keeps a heap
+// per host thread. A fresh host thread gets one on its first allocation; on the M3e device run that
+// first allocation (in FEXCore's CreateThread, for il2cpp's first thread) returned NULL with plenty
+// of memory free, and FEX wrote through it. So every new host thread that will run guest code sets
+// its heap up explicitly and checks it with an allocation of the same shape, before CreateThread.
+std::atomic<int> g_fexThreadsPrepared {0};
+bool PrepareFexThread(const char* who) {
+  FEXCore::Allocator::InitializeThread();
+  void* probe = FEXCore::Allocator::aligned_alloc(4096, 8192);
+  if (probe == nullptr) {
+    std::fprintf(stderr, "UB_IL2CPP %s: FEX's allocator has no memory for this thread (rpmalloc heap); not starting it\n", who);
+    return false;
+  }
+  FEXCore::Allocator::aligned_free(probe);
+  if (g_fexThreadsPrepared++ < 4) std::fprintf(stderr, "UB_IL2CPP %s: FEX thread heap ready\n", who);
+  return true;
+}
+
 uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
   MachFault::RegisterThisThread();  // a guest thread il2cpp created: its hardware faults too
   const unsigned long long offset = start >= g_imageBase && start < g_imageEnd ? start - g_imageBase : start;
   std::fprintf(stderr, "UB_IL2CPP guest thread started: start=GameAssembly+%#llx (%d running)\n", offset,
                ++g_guestThreads);
   GuestThread guest;
-  if (!guest.Create(*g_engine, nullptr)) {
+  if (!PrepareFexThread("guest thread") || !guest.Create(*g_engine, nullptr)) {
     --g_guestThreads;
     MachFault::UnregisterThisThread();
     return 0xffffffffu;
@@ -295,7 +314,7 @@ uint64_t BridgeCall(uintptr_t target, const uint64_t (&args)[8]) {
     if (t_bridgeGuest == nullptr) {
       auto* guest = new GuestThread;
       MachFault::RegisterThisThread();
-      if (!guest->Create(*g_engine, nullptr)) {
+      if (!PrepareFexThread("bridge thread") || !guest->Create(*g_engine, nullptr)) {
         delete guest;
         return 0;
       }

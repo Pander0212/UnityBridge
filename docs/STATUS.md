@@ -607,6 +607,17 @@ Next steps, in order:
         (footprint, `os_proc_available_memory`, mapped address space, the 8 largest map entries
         with their VM tags) now goes into every fault report and is logged before the engine,
         after `NativeLoader.load`, before the engine's `il2cpp_init` and at 1/5/10/30 s.
+      - **Fourth device run: not memory.** Footprint 276 MiB with 2795 MiB still granted, address
+        space ample, at the same fault. FEXCore allocates its thread state through its own allocator,
+        **rpmalloc** (`ENABLE_FEX_ALLOCATOR` is on for Darwin; `FEXAllocOperators::operator new` →
+        `rpaligned_alloc`), which keeps a heap per host thread and sets it up on a thread's first
+        allocation; a failed mapping would have logged `Failed to map VMA region.`, which did not
+        appear, so the per-thread heap set-up returned nothing. Step taken: every new host thread
+        that runs guest code (il2cpp's threads in `RunGuestThread`, the engine's threads in
+        `BridgeCall`) now calls `FEXCore::Allocator::InitializeThread()` (`rpmalloc_thread_initialize`)
+        and checks the heap with an allocation of the same shape (`aligned_alloc(4096, 8192)`) before
+        FEX's `CreateThread`; if that still fails the thread is not started (logged) instead of FEX
+        writing through NULL.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

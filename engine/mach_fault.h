@@ -26,4 +26,9 @@ void UnregisterThisThread();
 // report prints it, which names the API in progress when a fault leaves no other trace.
 void NoteImport(std::string_view dll, std::string_view name);
 
+// Writes the process's memory state to stderr, prefixed `tag`: footprint, what iOS still grants
+// (os_proc_available_memory), the address space mapped, and the largest map entries with their
+// VM tag. Also part of every fault report. Async-signal-unsafe only in that it formats with snprintf.
+void DumpMemory(const char* tag);
+
 } // namespace UnityBridge::MachFault

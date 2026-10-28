@@ -34,6 +34,7 @@
 
 #include <csignal>
 #include <dlfcn.h>
+#include <os/proc.h>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -160,6 +161,46 @@ void DumpHostState(const _STRUCT_MCONTEXT64& mc) {
   }
 }
 
+void DumpMemoryImpl(const char* tag) {
+  char buf[256];
+  task_vm_info_data_t vm {};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  const bool haveVm = task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) == KERN_SUCCESS;
+  std::snprintf(buf, sizeof(buf), "%s memory: footprint %llu MiB, iOS grants %llu MiB more, address space %llu MiB mapped\n", tag,
+                haveVm ? static_cast<unsigned long long>(vm.phys_footprint >> 20) : 0ull,
+                static_cast<unsigned long long>(os_proc_available_memory() >> 20),
+                haveVm ? static_cast<unsigned long long>(vm.virtual_size >> 20) : 0ull);
+  WriteStr(buf);
+  // The largest map entries (submaps descended), by size, with VM tag (malloc, Unity's own mmaps, ...).
+  struct Big { uint64_t addr, size; unsigned tag; int prot; } top[8] {};
+  vm_address_t address = 0;
+  natural_t depth = 0;
+  for (int guard = 0; guard < 200000; ++guard) {
+    vm_size_t size = 0;
+    vm_region_submap_info_data_64_t info {};
+    mach_msg_type_number_t n = VM_REGION_SUBMAP_INFO_COUNT_64;
+    if (vm_region_recurse_64(mach_task_self(), &address, &size, &depth, reinterpret_cast<vm_region_recurse_info_t>(&info),
+                             &n) != KERN_SUCCESS)
+      break;
+    if (info.is_submap) { ++depth; continue; }
+    const Big entry {address, size, info.user_tag, info.protection};
+    for (int i = 0; i < 8; ++i) {
+      if (entry.size > top[i].size) {
+        for (int k = 7; k > i; --k) top[k] = top[k - 1];
+        top[i] = entry;
+        break;
+      }
+    }
+    address += size;
+  }
+  for (const auto& b : top) {
+    if (!b.size) break;
+    std::snprintf(buf, sizeof(buf), "%s   %#llx +%llu MiB tag %u prot %d\n", tag, static_cast<unsigned long long>(b.addr),
+                  static_cast<unsigned long long>(b.size >> 20), b.tag, b.prot);
+    WriteStr(buf);
+  }
+}
+
 #pragma pack(push, 4)
 struct ExcRequest {  // EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES message (MIG mach_exception_raise)
   mach_msg_header_t Head;
@@ -214,6 +255,7 @@ struct ExcReply {
   uint64_t rsp = 0;
   if (AetherPS4::Fex::BachataDumpGuestRegisters(buf, sizeof(buf), &rsp)) { WriteStr(buf); WriteStr("\n"); }
   DumpHostState(slot->mc);
+  DumpMemoryImpl("UB_FAULT");
   // The host PC from the Mach message is exact (the guest RIP is only the last checkpoint); the
   // words around it also show whether the fault is inside a live JIT buffer.
   if (slot->hostPc &&
@@ -422,6 +464,8 @@ void NoteImport(std::string_view dll, std::string_view name) {
                 static_cast<int>(name.size()), name.data());
 }
 
+void DumpMemory(const char* tag) { DumpMemoryImpl(tag ? tag : "UB_MEM"); }
+
 } // namespace UnityBridge::MachFault
 
 #else  // not Apple: no Mach exceptions; the host builds never run guest code on a device
@@ -431,6 +475,8 @@ void Install(uintptr_t, uintptr_t) {}
 void RegisterThisThread() {}
 void UnregisterThisThread() {}
 void NoteImport(std::string_view, std::string_view) {}
+void DumpMemory(const char*) {}
+
 } // namespace UnityBridge::MachFault
 
 #endif

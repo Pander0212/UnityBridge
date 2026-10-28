@@ -41,6 +41,7 @@ void *ub_il2cpp_symbol(const char *name);
 void ub_unity_thread_enter(void);
 void ub_unity_thread_leave(void);
 void ub_il2cpp_engine_report(char *out, size_t capacity);
+void ub_memory_dump(const char *tag);
 
 // ---- report -----------------------------------------------------------------------------------
 
@@ -446,7 +447,9 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     setenv("TL_DL_TRACE", "1", 1);
     ub_unity_thread_enter();
     if (!interpose()) { ub_unity_thread_leave(); return 1; }
+    ub_memory_dump("UB_MEM before the engine:");
     if (!start(apk, app_data)) { ub_unity_thread_leave(); line("UNITY: did not get through NativeLoader.load"); return 1; }
+    ub_memory_dump("UB_MEM after NativeLoader.load:");
     line("tl_unity_run: initJni, then the UnityMain thread (surface, resume, nativeRender) ...");
     const bool running = tl_unity_run();
     line("tl_unity_run -> %s", running ? "UnityMain started" : "false");
@@ -457,6 +460,7 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
             ub_il2cpp_engine_report(report, sizeof(report));
             line("after %d s: %lu frames; libil2cpp.so %d dlopen, %d dlsym (%d not exported); %s", s, tl_unity_frames(),
                  g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing, report);
+            ub_memory_dump("UB_MEM");
         }
     }
     line("UNITY: %s, %lu frames", running ? "engine running" : "UnityMain did not start", tl_unity_frames());

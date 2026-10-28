@@ -822,6 +822,7 @@ std::string g_il2cppDataDirWin;
 uint64_t RedirectDir(const char* api, const char* requested) {
   std::fprintf(stderr, "UB_IL2CPP %s(%s) from the engine -> %s\n", api, requested ? requested : "(null)",
                g_il2cppDataDirWin.c_str());
+  MachFault::DumpMemory("UB_MEM before the engine's il2cpp_init:");
   auto* set = reinterpret_cast<uint64_t (*)(const char*)>(Il2cppBridge::Forwarder(api));
   return set ? set(g_il2cppDataDirWin.c_str()) : 0;
 }

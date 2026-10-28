@@ -162,6 +162,9 @@ extern "C" void* ub_il2cpp_symbol(const char* name) {
   return name ? UnityBridge::Il2cppBridge::Symbol(name) : nullptr;
 }
 
+// The process's memory state in the log (footprint, what iOS still grants, address space).
+extern "C" void ub_memory_dump(const char* tag) { UnityBridge::MachFault::DumpMemory(tag); }
+
 extern "C" void ub_unity_thread_enter() { UnityBridge::MachFault::RegisterThisThread(); }
 extern "C" void ub_unity_thread_leave() { UnityBridge::MachFault::UnregisterThisThread(); }
 

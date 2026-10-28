@@ -596,6 +596,17 @@ Next steps, in order:
         PC and LR as `image!symbol+offset` (dladdr; Husk's `tl_ld_symbol_at` for the Android
         libraries) and the frame-pointer chain (read with `vm_read_overwrite`, so a broken frame
         ends the walk instead of faulting in the report).
+      - **Third device run, named:** `pc = FEXCore::Context::ContextImpl::CreateThread+0x34`, on the
+        host thread il2cpp started with `CreateThread` (its finalizer) right after the engine's
+        `il2cpp_init` began: `new InternalThreadState` (an aligned allocation,
+        `aligned_alloc(4096, 0x2000)` → the system `malloc`, FEX's own allocator is off on Darwin)
+        returned NULL and FEX wrote through it. The same path never failed while only GameAssembly
+        ran (M2f, M3a-c); with the Unity engine in the process the system allocator ran out:
+        memory (the iOS limit) or address space. Unity also reports `Memory = 11447mb` on a 6 GB
+        phone, so it may size its heaps for twice the RAM. Not guessed further: `MachFault::DumpMemory`
+        (footprint, `os_proc_available_memory`, mapped address space, the 8 largest map entries
+        with their VM tags) now goes into every fault report and is logged before the engine,
+        after `NativeLoader.load`, before the engine's `il2cpp_init` and at 1/5/10/30 s.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

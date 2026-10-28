@@ -28,4 +28,5 @@ jobs:
       - name: Test
         run: |
           ./build/host/win32-host-test build/host/testdll/ubtest.dll
+          ./build/host/il2cpp-bridge-test
           ./build/host/ub-pe-inspect build/host/testdll/ubtest.dll

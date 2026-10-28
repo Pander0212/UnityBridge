@@ -364,6 +364,28 @@ Next steps, in order:
 - [ ] Build Husk's translation layer inside UnityBridge's app (or UnityBridge as a Husk engine module),
       with FEXCore sharing Husk's JIT arena.
 - [ ] Virtual `libil2cpp.so` with the 228 generic thunks; reverse thunks for callbacks and InternalCalls.
+      - [ ] **M3a, the il2cpp bridge ARM64 → x64** (`engine/il2cpp_bridge.{h,cpp}`): built, host test
+        green, **[i] on iPhone pending**. `Il2cppBridge::Symbol(name)` returns a native ARM64 function
+        pointer for any `il2cpp_*` export of the loaded `GameAssembly.dll` — what `dlsym("libil2cpp.so",
+        name)` will hand libunity. One template-instantiated thunk per bound function (512 slots, no
+        run-time code generation) forwards x0–x7 to rcx, rdx, r8, r9 + four stack slots and returns
+        rax; the runner's `GuestCall` runs it on the calling host thread's own guest thread (created
+        on first use, TLS attach callbacks run) or nested, when the call comes from inside an HLE
+        handler. The 10 functions that take a host callback (`il2cpp_add_internal_call`, the memory,
+        log, plugin, unitytls, GC-heap and debugger-transport hooks) are bound but return 0 with a
+        log line until the reverse thunks exist.
+        Host test `il2cpp-bridge-test` (CI "Host tests", ASan/UBSan): drives native `ms_abi`
+        functions through the thunks — all eight argument slots in order (four on the stack), short
+        signatures, int32 results with junk above them, pointer results, stable pointers, missing
+        exports, the blocked APIs, slot exhaustion, re-init.
+        Device test in the il2cpp probe, after `il2cpp_init`, only through those function pointers:
+        lists every assembly with its class count and the first classes of `Assembly-CSharp`, then
+        runs managed code — `Environment.ProcessorCount` (managed → il2cpp icall → our
+        `GetSystemInfo`, compared with the device's CPU count), `Int32.Parse("1234")` (string
+        argument, boxed result), `"Fellworld on iPhone".ToUpperInvariant()` (instance call, string
+        result) and `Int32.Parse("not a number")`, which must come back as `System.FormatException`:
+        il2cpp throws managed exceptions as C++ exceptions, so this exercises our SEH dispatcher and
+        unwinder with GameAssembly's own C++ frame handler.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

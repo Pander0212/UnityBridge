@@ -16,12 +16,14 @@
 // stack. So the engine, the main guest thread (stack + TEB), the loaded image and the thread runner
 // are never torn down after that point, and the probe runs once per app launch.
 #include "core/fex/fex_guest_engine.h"
+#include "engine/il2cpp_bridge.h"
 #include "engine/mach_fault.h"
 #include "loader/pe_image.h"
 #include "win32/hle.h"
 
 #include <FEXCore/Core/X86Enums.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -30,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -49,6 +52,7 @@ constexpr size_t kPage = 16384;
 
 uintptr_t g_imageBase = 0, g_imageEnd = 0;  // GameAssembly.dll's mapped range, for logging offsets
 std::atomic<int> g_guestThreads {0};         // threads il2cpp created that are running guest code
+thread_local int t_hleDepth = 0;             // >0 while this host thread runs an HLE call for the guest
 
 struct Report {
   std::string text;
@@ -75,10 +79,9 @@ public:
       std::fprintf(stderr, "UB_IL2CPP unexpected syscall rax=%#llx\n", static_cast<unsigned long long>(frame.operation));
       return AetherPS4::Fex::EngineFailure {AetherPS4::Fex::EngineStage::Bridge, ENOSYS};
     }
-    static thread_local int t_depth = 0;
     struct DepthGuard {
-      DepthGuard() { Win32::SetInvokeDepth(++t_depth); }
-      ~DepthGuard() { Win32::SetInvokeDepth(--t_depth); }
+      DepthGuard() { Win32::SetInvokeDepth(++t_hleDepth); }
+      ~DepthGuard() { Win32::SetInvokeDepth(--t_hleDepth); }
     } depthGuard;
 
     Win32::CallContext c;
@@ -271,6 +274,40 @@ uint64_t CallGuestNested(uintptr_t function, std::span<const uint64_t> arguments
   return std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
 }
 
+// Il2cppBridge::GuestCall: runs an il2cpp export for native (ARM64) code on this host thread. From
+// inside an HLE call (guest -> host -> bridge) it nests on the guest thread already running here;
+// otherwise it uses this host thread's own guest thread, created on its first call and kept for as
+// long as the host thread may call in (the main thread's is the one il2cpp_init ran on).
+thread_local GuestThread* t_bridgeGuest = nullptr;
+
+uint64_t BridgeCall(uintptr_t target, const uint64_t (&args)[8]) {
+  AetherPS4::Fex::Win64Call call;
+  call.Rip = target;
+  for (int i = 0; i < 4; ++i) call.Gpr[i] = args[i];
+  call.Stack = std::span<const uint64_t>(args + 4, 4);
+  AetherPS4::Fex::GuestEngine::Thread* thread = nullptr;  // nested
+  if (t_hleDepth == 0) {
+    if (t_bridgeGuest == nullptr) {
+      auto* guest = new GuestThread;
+      MachFault::RegisterThisThread();
+      if (!guest->Create(*g_engine, nullptr)) {
+        delete guest;
+        return 0;
+      }
+      RunTlsCallbacksOn(*guest, Win32::DLL_THREAD_ATTACH);
+      t_bridgeGuest = guest;
+    }
+    thread = t_bridgeGuest->thread;
+  }
+  auto run = g_engine->CallWin64(thread, call);
+  if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
+    std::fprintf(stderr, "UB_IL2CPP bridge call %#lx failed: stage=%d error=%d\n", static_cast<unsigned long>(target),
+                 static_cast<int>(failure->Stage), failure->Error);
+    return 0;
+  }
+  return std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
+}
+
 // Calls export `name` with integer/pointer args; logs and returns rax. Missing export logs a note.
 std::optional<uint64_t> CallExport(GuestThread& guest, Report& report, const Pe::Image& image,
                                    const char* name, std::initializer_list<uint64_t> args) {
@@ -346,6 +383,160 @@ void InstallCrashHandler() {
   sigemptyset(&a.sa_mask);
   a.sa_flags = SA_SIGINFO | SA_ONSTACK;
   for (size_t i = 0; i < std::size(kCaughtSignals); ++i) sigaction(kCaughtSignals[i], &a, &g_oldActions[i]);
+}
+
+// M3 groundwork: the il2cpp C API through the ARM64 bridge, called exactly the way libunity will --
+// plain native function pointers from Il2cppBridge::Symbol, nothing at the call sites knows about
+// FEXCore or the Microsoft x64 convention. Lists the assemblies, then runs real managed code: a
+// static call into an il2cpp icall (which lands in our GetSystemInfo), an argument round trip, an
+// instance method on a string we create, and a managed exception (il2cpp throws it as a C++
+// exception, so this also exercises our SEH with GameAssembly's own __CxxFrameHandler).
+// Returns the number of failed checks.
+int RunBridgeTests(Report& report) {
+  report.Line("--- il2cpp API through the ARM64 bridge (as libunity will call it) ---");
+  bool missing = false;
+  auto api = [&](const char* name) {
+    void* fn = Il2cppBridge::Symbol(name);
+    if (fn == nullptr) {
+      report.Line("  %s: not exported", name);
+      missing = true;
+    }
+    return fn;
+  };
+  using P = void*;
+  const auto domain_get = reinterpret_cast<P (*)()>(api("il2cpp_domain_get"));
+  const auto domain_get_assemblies = reinterpret_cast<P* (*)(P, size_t*)>(api("il2cpp_domain_get_assemblies"));
+  const auto assembly_get_image = reinterpret_cast<P (*)(P)>(api("il2cpp_assembly_get_image"));
+  const auto image_get_name = reinterpret_cast<const char* (*)(P)>(api("il2cpp_image_get_name"));
+  const auto image_get_class_count = reinterpret_cast<size_t (*)(P)>(api("il2cpp_image_get_class_count"));
+  const auto image_get_class = reinterpret_cast<P (*)(P, size_t)>(api("il2cpp_image_get_class"));
+  const auto class_get_name = reinterpret_cast<const char* (*)(P)>(api("il2cpp_class_get_name"));
+  const auto class_get_namespace = reinterpret_cast<const char* (*)(P)>(api("il2cpp_class_get_namespace"));
+  const auto get_corlib = reinterpret_cast<P (*)()>(api("il2cpp_get_corlib"));
+  const auto class_from_name = reinterpret_cast<P (*)(P, const char*, const char*)>(api("il2cpp_class_from_name"));
+  const auto class_get_method_from_name = reinterpret_cast<P (*)(P, const char*, int)>(api("il2cpp_class_get_method_from_name"));
+  const auto runtime_invoke = reinterpret_cast<P (*)(P, P, P*, P*)>(api("il2cpp_runtime_invoke"));
+  const auto object_unbox = reinterpret_cast<P (*)(P)>(api("il2cpp_object_unbox"));
+  const auto object_get_class = reinterpret_cast<P (*)(P)>(api("il2cpp_object_get_class"));
+  const auto string_new = reinterpret_cast<P (*)(const char*)>(api("il2cpp_string_new"));
+  const auto string_chars = reinterpret_cast<const char16_t* (*)(P)>(api("il2cpp_string_chars"));
+  const auto string_length = reinterpret_cast<int32_t (*)(P)>(api("il2cpp_string_length"));
+  const auto format_exception = reinterpret_cast<void (*)(P, char*, int)>(api("il2cpp_format_exception"));
+  if (missing) {
+    report.Line("BRIDGE: exports missing, tests skipped");
+    return 1;
+  }
+
+  int failures = 0;
+  auto check = [&](bool ok, const char* what) {
+    report.Line("%-52s %s", what, ok ? "ok" : "FAIL");
+    if (!ok) ++failures;
+  };
+  auto text = [&](P str) -> std::string {
+    if (str == nullptr) return "(null)";
+    return Win32::ToUtf8(std::u16string_view(string_chars(str), static_cast<size_t>(string_length(str))));
+  };
+  auto className = [&](P klass) {
+    return std::string(class_get_namespace(klass)) + "." + class_get_name(klass);
+  };
+  auto describe = [&](P exc) {
+    char message[512] {};
+    format_exception(exc, message, sizeof(message));
+    return className(object_get_class(exc)) + " (" + message + ")";
+  };
+
+  // 1. What the game is made of.
+  P domain = domain_get();
+  size_t count = 0;
+  P* assemblies = domain_get_assemblies(domain, &count);
+  size_t totalClasses = 0;
+  P gameImage = nullptr;
+  report.Line("%zu assemblies:", count);
+  for (size_t i = 0; i < count; ++i) {
+    P image = assembly_get_image(assemblies[i]);
+    const char* name = image_get_name(image);
+    const size_t classes = image_get_class_count(image);
+    totalClasses += classes;
+    report.Line("  %-44s %6zu classes", name, classes);
+    if (std::string_view(name) == "Assembly-CSharp.dll") gameImage = image;
+  }
+  report.Line("%zu classes in all", totalClasses);
+  check(count > 0 && totalClasses > 0, "assemblies and classes listed through the bridge");
+  if (gameImage != nullptr) {
+    const size_t classes = image_get_class_count(gameImage);
+    report.Line("the game's own code (Assembly-CSharp), first classes:");
+    for (size_t i = 0; i < classes && i < 12; ++i) report.Line("  %s", className(image_get_class(gameImage, i)).c_str());
+  }
+
+  // Finds a corlib method by class and name (first of the given names that exists: stripping may
+  // have removed some).
+  P corlib = get_corlib();
+  auto method = [&](const char* ns, const char* cls, std::initializer_list<const char*> names, int argc) -> P {
+    P klass = class_from_name(corlib, ns, cls);
+    for (const char* name : names) {
+      if (P m = klass ? class_get_method_from_name(klass, name, argc) : nullptr) return m;
+    }
+    report.Line("  %s.%s::%s/%d not found (stripped?)", ns, cls, *names.begin(), argc);
+    return nullptr;
+  };
+
+  // 2. Static call into an il2cpp icall: Environment.ProcessorCount ends in our GetSystemInfo.
+  if (P m = method("System", "Environment", {"get_ProcessorCount"}, 0)) {
+    P exc = nullptr;
+    P boxed = runtime_invoke(m, nullptr, nullptr, &exc);
+    const int32_t cpus = (exc == nullptr && boxed) ? *static_cast<int32_t*>(object_unbox(boxed)) : -1;
+    if (exc) report.Line("  threw %s", describe(exc).c_str());
+    report.Line("  Environment.ProcessorCount = %d (this iPhone: %u)", cpus, std::thread::hardware_concurrency());
+    check(cpus == static_cast<int32_t>(std::max(1u, std::thread::hardware_concurrency())),
+          "managed static call -> icall -> mini Win32");
+  } else {
+    ++failures;
+  }
+
+  // 3. Argument round trip: Int32.Parse("1234").
+  P parse = method("System", "Int32", {"Parse"}, 1);
+  if (parse) {
+    P args[1] = {string_new("1234")};
+    P exc = nullptr;
+    P boxed = runtime_invoke(parse, nullptr, args, &exc);
+    const int32_t value = (exc == nullptr && boxed) ? *static_cast<int32_t*>(object_unbox(boxed)) : -1;
+    if (exc) report.Line("  threw %s", describe(exc).c_str());
+    report.Line("  Int32.Parse(\"1234\") = %d", value);
+    check(value == 1234, "managed string argument, boxed int result");
+  } else {
+    ++failures;
+  }
+
+  // 4. Instance method on a managed string we created.
+  if (P m = method("System", "String", {"ToUpperInvariant", "ToUpper"}, 0)) {
+    P str = string_new("Fellworld on iPhone");
+    P exc = nullptr;
+    P result = runtime_invoke(m, str, nullptr, &exc);
+    if (exc) report.Line("  threw %s", describe(exc).c_str());
+    const std::string upper = exc ? "" : text(result);
+    report.Line("  \"%s\".ToUpper = \"%s\"", text(str).c_str(), upper.c_str());
+    check(upper == "FELLWORLD ON IPHONE", "managed instance call, string result");
+  } else {
+    ++failures;
+  }
+
+  // 5. A managed exception: il2cpp raises it as a C++ exception (_CxxThrowException -> our
+  // RaiseException) and runtime_invoke catches it again (GameAssembly's __CxxFrameHandler + our
+  // unwinder), handing it back in `exc`.
+  if (parse) {
+    P args[1] = {string_new("not a number")};
+    P exc = nullptr;
+    runtime_invoke(parse, nullptr, args, &exc);
+    const std::string what = exc ? describe(exc) : "(no exception)";
+    report.Line("  Int32.Parse(\"not a number\") threw %s", what.c_str());
+    check(exc != nullptr && className(object_get_class(exc)) == "System.FormatException",
+          "managed exception caught and returned (C++ EH + SEH)");
+  } else {
+    ++failures;
+  }
+
+  report.Line("BRIDGE: %s", failures ? "some checks failed (see above)" : "all checks passed");
+  return failures;
 }
 
 } // namespace
@@ -428,6 +619,7 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
 
   // The main guest thread outlives this call: il2cpp registers its stack with the GC.
   GuestThread& guest = *new GuestThread;
+  t_bridgeGuest = &guest;  // native il2cpp calls from this thread run where il2cpp_init ran
   if (!guest.Create(*engine, &report)) {
     Win32::SetGuestCaller(nullptr);
     Win32::SetThreadRunner(nullptr);
@@ -471,6 +663,8 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
                     static_cast<unsigned long long>(*corlib));
       if (const auto domain = CallExport(guest, report, image, "il2cpp_domain_get", {}))
         report.Line("il2cpp_domain_get = %#llx", static_cast<unsigned long long>(*domain));
+      Il2cppBridge::Init([&image](std::string_view name) { return image.Export(name); }, &BridgeCall);
+      RunBridgeTests(report);
     }
   } else {
     report.Line("il2cpp_init did not return (a fault, or the export is missing)");

@@ -42,4 +42,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
             tests/testdll/build.sh)
   add_custom_target(ubtest-dll ALL DEPENDS ${UBTEST_DIR}/ubtest.dll)
   add_test(NAME win32-host-test COMMAND win32-host-test ${UBTEST_DIR}/ubtest.dll)
+
+  # The il2cpp bridge (M3): ARM64 thunks for il2cpp_*, here driving native ms_abi functions.
+  add_executable(il2cpp-bridge-test tests/host/il2cpp_bridge_test.cpp engine/il2cpp_bridge.cpp)
+  target_include_directories(il2cpp-bridge-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(il2cpp-bridge-test PRIVATE -Wall -Wextra)
+  add_test(NAME il2cpp-bridge-test COMMAND il2cpp-bridge-test)
 endif()

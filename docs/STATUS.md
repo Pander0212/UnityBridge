@@ -9,7 +9,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 |---|---|---|
 | M0 | Analyse `GameAssembly.dll`: imports, exports, metadata | done [R] |
 | M1 | Analyse Android `libunity.so` 2021.3.18f1, match the API | done [R] |
-| M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | in progress: FEXCore and a Windows DLL against the mini Win32 run on iPhone [i]; `GameAssembly.dll` not yet |
+| M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | **reached [i] (2026-10-28):** Fellworld's real `GameAssembly.dll` runs `il2cpp_init` to success on iPhone (returns 1, corlib + domain non-null, 0 unimplemented imports) |
 | M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | research done [R]: Husk's translation layer (GPL-2.0+) already runs Android Unity games; bridge measured |
 | M4 | D3D11 shaders converted; first frame | — |
 
@@ -184,8 +184,8 @@ Building blocks chosen (2026-10-26) [R]:
       - Still open: the full `__CxxFrameHandler4` C++ flow (catch-type matching, the consolidate
         callback running the catch funclet) is GameAssembly's own guest code; this step makes the
         engine able to host it, to be confirmed against real `GameAssembly.dll`.
-- [ ] M2f, first real IL2CPP probe (`engine/il2cpp_probe.cpp`, app button "Run il2cpp_init"):
-      **built, [i] on iPhone pending — the first run against a real `GameAssembly.dll`**. Loads
+- [x] M2f, first real IL2CPP probe (`engine/il2cpp_probe.cpp`, app button "Run il2cpp_init"):
+      **[i] `il2cpp_init` succeeds on iPhone against Fellworld's real `GameAssembly.dll` (fifth run, below)**. Loads
       Fellworld's own `GameAssembly.dll` with the PE loader, binds its 206 imports to the mini Win32,
       runs the module's TLS callbacks + `DllMain(DLL_PROCESS_ATTACH)`, calls `il2cpp_set_data_dir`
       (pointing at the game's `<Game>_Data` folder through the `C:\` host-path mapping) and then
@@ -249,6 +249,20 @@ Building blocks chosen (2026-10-26) [R]:
         `__PAGEZERO`; the Mach service thread recognises that second fault and has the kernel load the
         fixed-up thread state plus the NEON state captured at the original fault (`thread_set_state`),
         then resumes the guest. No libc context functions, no assembly.
+      - **Fifth run (2026-10-28, iPhone 15, iOS 26.6.2): `il2cpp_init` succeeded.** 31 unaligned
+        atomic/acquire sites faulted once each, were backpatched by FEX (`LDAPUR`/`LDAPR`→`LDUR`,
+        `STLUR`→`STUR`, 8/4/2-byte, `adj=0` re-execute or `adj=-4` for the store half-barrier) and
+        resumed through the kernel. Then `il2cpp_init returned 1`, `il2cpp_get_corlib = 0x158e30000`,
+        `il2cpp_domain_get = 0x157c73fc0`, **0 unimplemented imports**: the metadata, corlib and root
+        domain are up, the GC initialised, all on our mini Win32 + FEXCore on the phone.
+        One harmless line: `unhandled exception 0x406d1388` is MSVC's thread-naming exception
+        (`RaiseException(MS_VC_EXCEPTION)`); our dispatcher found no guest handler and continued, as a
+        debugger would. Follow-ups, before the real game runs:
+        - check whether that raise sat inside a `__try` our SEH dispatcher missed (or whether il2cpp
+          simply relies on a debugger/vectored handler to swallow it);
+        - the Mach fixup path is single-fault-at-a-time (one global saved context + trampoline stack);
+          make it per-thread before game threads run concurrently, and move it from the probe into the
+          shared device engine so `win32_device.cpp` and the M3 path get it too.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

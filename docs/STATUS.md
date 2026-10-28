@@ -698,6 +698,18 @@ Next steps, in order:
         `eglChooseConfig` before the dialog, so the hardware check is not about EGL configs.
       - **Fix, [i] pending:** a Proxy listener is called through Husk's `tl_proxy_call`, i.e.
         Unity's native `ReflectionHelper.nativeProxyInvoke(handle, "onClick", [dialog, -1])`.
+      - **Device run: past the dialog, first GLES context.** The click reached the engine (the
+        dialog came a second time, OK again), then: `eglChooseConfig` (ES3 bit), off-screen
+        surface 2556x1179, `eglCreateContext` (client version 2), `eglMakeCurrent` on UnityMain
+        and UnityGfxDeviceWorker; `GL_RENDERER = ANGLE (Apple, ANGLE Metal Renderer: Apple A16
+        GPU ...)`, `GL_VERSION = OpenGL ES 3.0 (ANGLE ...)`, the extension list. Then
+        `E/Unity: The resource Internal-ErrorShader.shader could not be loaded from the resource
+        file!` three times and a null-pointer read in libunity (fault address 0x38): **the APK had
+        no `assets/bin/Data/unity default resources`** — a Windows build keeps it in
+        `<Game>_Data/Resources/`, and Unity's Android copy was not in `Documents/Unity`.
+      - **Fix, [i] pending:** the APK always gets `assets/bin/Data/unity default resources`:
+        Unity's Android copy from `Documents/Unity` if there (GLES3 programs), else the game's
+        Windows copy from `Resources/` (loads, but D3D11 programs only).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

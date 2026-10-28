@@ -360,16 +360,21 @@ static bool make_apk(const char *unity_dir, const char *game_data, char *apk, si
             if (g) { fputs("0c2a4f1e7b3d4e5f9a8b6c7d1e2f3a4b", g); fclose(g); }
         }
         add_entry("assets/bin/Data/unity_app_guid", p);
+        // The engine's built-in resources (error shader, default materials, fonts): on Windows in
+        // <Game>_Data/Resources/, on Android at assets/bin/Data/ itself. Unity's Android copy carries
+        // the GLES3 shader programs; the game's Windows copy only D3D11 ones, so the engine loads it
+        // but cannot draw with its shaders.
+        static const char *const kDefaultRes = "assets/bin/Data/unity default resources";
         snprintf(p, sizeof(p), "%s/unity default resources", unity_dir);
-        struct stat st;
-        if (stat(p, &st) == 0) {
-            for (int i = before; i < g_nentries; i++)
-                if (strstr(g_entries[i].name, "/unity default resources")) {
-                    snprintf(g_entries[i].path, sizeof(g_entries[i].path), "%s", p);
-                    g_entries[i].size = (uint64_t)st.st_size;
-                    g_entries[i].mtime = (long)st.st_mtime;
-                    line("  unity default resources: Unity's Android copy instead of the game's");
-                }
+        if (add_entry(kDefaultRes, p)) {
+            line("  unity default resources: Unity's Android copy");
+        } else {
+            snprintf(p, sizeof(p), "%s/Resources/unity default resources", game_data);
+            if (add_entry(kDefaultRes, p))
+                line("  unity default resources: the game's Windows copy (D3D11 shaders only; put Unity's Android "
+                     "copy into Documents/Unity for GLES3)");
+            else
+                line("  unity default resources: none (the engine will not find its error shader)");
         }
         int patched = 0;
         for (int i = before; i < g_nentries; i++) {

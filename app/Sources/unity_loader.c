@@ -40,6 +40,10 @@
 #include <pthread.h>
 #include <zlib.h>
 
+// Husk's runtime (husk-tl-jni-loop.c), not in its headers: call a method on a java.lang.reflect.Proxy
+// the engine or C# built, through Unity's native proxy bridge.
+jobj *tl_proxy_call(jobj *proxy, const char *iface, const char *name, const char *sig, jobj **args, int nargs);
+
 // engine/unity_host.cpp
 void *ub_il2cpp_symbol(const char *name);
 void ub_unity_thread_enter(void);
@@ -469,7 +473,20 @@ static void *press_positive(void *p)
     args[1].j = 0;
     args[1].i = -1;  // DialogInterface.BUTTON_POSITIVE
     line("dialog answered: OK (the positive button's onClick)");
-    tl_jni_call(pc->listener, "onClick", "(Landroid/content/DialogInterface;I)V", args);
+    const char *sig = "(Landroid/content/DialogInterface;I)V";
+    if (!strcmp(tl_jni_class_name(pc->listener), "java/lang/reflect/Proxy")) {
+        // The engine's own listener: a Proxy from ReflectionHelper whose calls go to the native
+        // nativeProxyInvoke(handle, "onClick", args), with the int boxed as Java would.
+        jobj *which = tl_jni_new_object(tl_jni_class("java/lang/Integer"));
+        tl_jni_set_field(which, "value", "I", args[1]);
+        jobj *pargs[2] = {pc->dialog, which};
+        jobj *r = tl_proxy_call(pc->listener, "android/content/DialogInterface$OnClickListener", "onClick", sig, pargs, 2);
+        line("  through the engine's proxy (nativeProxyInvoke)%s", r ? ", returned an object" : "");
+        if (r) tl_jni_unref(r);
+        tl_jni_unref(which);
+    } else {
+        tl_jni_call(pc->listener, "onClick", sig, args);
+    }
     if (tl_jni_pending()) { line("  onClick threw; cleared"); tl_jni_clear(); }
     free(pc);
     return NULL;

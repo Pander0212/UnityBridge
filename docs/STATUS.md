@@ -691,6 +691,13 @@ Next steps, in order:
         listener, `show()` logs `DIALOG ...` and 500 ms later calls its `onClick(dialog, -1)` (OK).
         `TL_EGL_TRACE=1` logs EGL configs and contexts, to see which hardware check Unity fails
         (GLES version or config attributes suspected).
+      - **Device run:** no crash; `DIALOG` logged and answered, but the listener is the engine's
+        own `java.lang.reflect.Proxy` (from `ReflectionHelper.newProxyInstance`), so the plain
+        `onClick` call went nowhere (`UNIMPLEMENTED ... Proxy.onClick`) and the engine kept
+        waiting: 0 frames, `Frames` empty. The EGL trace shows the display and then nothing: no
+        `eglChooseConfig` before the dialog, so the hardware check is not about EGL configs.
+      - **Fix, [i] pending:** a Proxy listener is called through Husk's `tl_proxy_call`, i.e.
+        Unity's native `ReflectionHelper.nativeProxyInvoke(handle, "onClick", [dialog, -1])`.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

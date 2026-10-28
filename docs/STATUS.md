@@ -425,7 +425,8 @@ Next steps, in order:
         and says to reopen it.
       - [x] **M3c, InternalCall signatures from the metadata; the host-callback APIs intercepted**
         (`engine/il2cpp_intercept.{h,cpp}`, 2026-10-28): host test green (`il2cpp-intercept-test`,
-        CI "Host tests", ASan/UBSan; also clean under clang), **[i] on iPhone pending**.
+        CI "Host tests", ASan/UBSan; also clean under clang), **[i] confirmed on iPhone (2026-10-28,
+        commit `aa5b781`, run below)**.
         - `Il2cppBridge::Override(name, native)` makes `Symbol(name)` hand out a native replacement;
           `Il2cppBridge::Forwarder(name)` is an always-forwarding thunk to the real guest export (also
           for the refused host-callback names), which the replacements call.
@@ -471,7 +472,19 @@ Next steps, in order:
           instance `UnityEngine.GameObject::get_activeSelf` (object from `il2cpp_object_new`, kept
           by a GC handle), runs each through `il2cpp_runtime_invoke` and checks our function was hit
           with the right values; then `il2cpp_gchandle_foreach_get_target` (must see that object)
-          and `il2cpp_gc_foreach_heap` with an ARM64 callback. Expected: `INTERCEPT: all checks passed`.
+          and `il2cpp_gc_foreach_heap` with an ARM64 callback.
+        - **Device run (iPhone 15, iOS 26.6.2): `INTERCEPT: all checks passed`**, along with BRIDGE and
+          ICALL in the same run. Signatures derived from Fellworld's real metadata:
+          `Mathf::IsPowerOfTwo` `u8(i)` (64 → 1, 63 → 0), `GammaToLinearSpace` `f(f)` (1.5 → 4.5),
+          `FloatToHalf` `u16(f)` (21 → 42), instance `GameObject::get_activeSelf` `u8(i)`, where
+          our function got the managed object as `this`. Each ran managed wrapper → il2cpp icall
+          lookup → our stub → AAPCS64. `ClosestPowerOfTwo`, `HalfToFloat`, `PerlinNoise` are stripped
+          from this game's metadata and were skipped. `gchandle_foreach_get_target` called our
+          ARM64 callback with `(target, userData)` and saw our object; `gc_foreach_heap` called it
+          twice with `(section, userData, 0x40000)`, so userData is the second argument and a third
+          (size) follows. The three integer slots covered that. 4 registered, 0 failed. 23 more
+          unaligned sites were fixed up on the way; 0 unimplemented imports; alive 5 s later (the
+          log ends there, as it was sent before the 30 s line).
         - Also: CI "Host tests" now also runs on changes under `engine/` (it did not before).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).

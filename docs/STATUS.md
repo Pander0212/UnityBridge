@@ -569,6 +569,22 @@ Next steps, in order:
         InternalCall counts (registered / absent / not bridgeable) at 1, 5, 10 and 30 s. Expected
         stops: no EGL display (no ANGLE yet), the `StandaloneWindows64` platform tag in the data, the
         D3D11-only shaders (M4).
+      - **First device run (2026-10-28):** the APK with the game's data (15 files, 77 MiB; APK
+        107 MB), libmain/libunity loaded as in M3d, `initJni` done, UnityMain started,
+        `nativeRecreateGfxState` and `nativeResume` returned, and the engine's own start-up ran:
+        `MemoryManager: Using 'Dynamic Heap' Allocator`, `SystemInfo CPU = ARM64, Cores = 6,
+        Memory = 11447mb`, `Version '2021.3.18f1 (3129e69bc0c7)' ... Scripting Backend 'il2cpp'`.
+        **libunity opened the virtual libil2cpp.so and resolved 229 il2cpp_* functions** through the
+        bridge (one miss: `JNI_OnLoad`). It then stopped with the dialog `Not enough storage space to
+        install required resources` after `stat(.../base.apk/assets/bin/Data/Managed) -> -1`: an
+        Android build carries il2cpp's data (`Metadata/`, `Resources/`) as `assets/bin/Data/Managed`
+        and copies it to `files/il2cpp` before starting il2cpp; the Windows build has it in
+        `<Game>_Data/il2cpp_data`, which the APK left out. Also missing (logged, not fatal):
+        `assets/bin/Data/unity_app_guid`. No `il2cpp_init` yet, so 0 InternalCalls. **Fix:**
+        `il2cpp_data` goes into the APK as `assets/bin/Data/Managed`, plus a generated
+        `unity_app_guid`. Harmless on the way: OBB lookups (Java `ZipFile` not implemented by
+        Husk), `nativeInitWebRequest` not registered, the engine's fault-signal handlers recorded
+        but not installed by Husk.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

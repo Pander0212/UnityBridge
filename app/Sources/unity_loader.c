@@ -255,8 +255,8 @@ static char *inputs_text(void)
 
 // Writes <unity_dir>/base.apk: classes.dex (Unity's Java side: UnityPlayer, NativeLoader, ..., which
 // Husk's Dalvik runs), libmain.so and libunity.so under lib/arm64-v8a/, and, when game_data is given,
-// that <Game>_Data folder as assets/bin/Data/ (without il2cpp_data, which GameAssembly reads from
-// the device folder itself, and the Windows Plugins). A file named "unity default resources" in
+// that <Game>_Data folder as assets/bin/Data/ (its il2cpp_data as Managed/, the Android layout;
+// without the Windows Plugins). A file named "unity default resources" in
 // unity_dir (from Unity's Android player) takes the place of the game's Windows copy.
 static bool make_apk(const char *unity_dir, const char *game_data, char *apk, size_t apkcap)
 {
@@ -276,6 +276,19 @@ static bool make_apk(const char *unity_dir, const char *game_data, char *apk, si
         static const char *const skip[] = {"il2cpp_data", "Plugins", NULL};
         const int before = g_nentries;
         add_tree(game_data, "assets/bin/Data", skip, 0);
+        // il2cpp's data (Metadata/, Resources/): <Game>_Data/il2cpp_data on Windows, assets/bin/Data/Managed
+        // on Android, which the engine copies to files/il2cpp before it starts il2cpp ("Not enough
+        // storage space to install required resources" when it is missing).
+        snprintf(p, sizeof(p), "%s/il2cpp_data", game_data);
+        add_tree(p, "assets/bin/Data/Managed", NULL, 0);
+        // An Android build carries the app's GUID here; the engine logs an error without it.
+        snprintf(p, sizeof(p), "%s/unity_app_guid", unity_dir);
+        struct stat sg;
+        if (stat(p, &sg) != 0) {
+            FILE *g = fopen(p, "wb");
+            if (g) { fputs("0c2a4f1e7b3d4e5f9a8b6c7d1e2f3a4b", g); fclose(g); }
+        }
+        add_entry("assets/bin/Data/unity_app_guid", p);
         snprintf(p, sizeof(p), "%s/unity default resources", unity_dir);
         struct stat st;
         if (stat(p, &st) == 0) {

@@ -672,6 +672,16 @@ Next steps, in order:
       for the entry-point names), no depot_tools/gn. Plan: build it the same way in CI "Probe IPA"
       (cached), embed `libANGLE-shared.dylib` in the probe app, give the run a Metal layer view,
       and see the first `nativeRender`. Then the D3D11-only shaders (M4) decide what is drawn.
+      - **Built (2026-10-28), [i] on iPhone pending:** `scripts/build-angle-ios.sh` (after Husk's,
+        WebKit pinned at `7e68a669`, `DEVELOPER_DIR` passed through `env -i` so the workflow's Xcode
+        is used, deployment target 17.0) writes `build/angle/libANGLE-shared.dylib` (install name
+        `@rpath/...`); CI "Probe IPA" caches it by the script's hash (`angle-ios-v1-...`), builds it
+        only on a miss (job timeout raised to 180 min for that), embeds and signs it in the app's
+        `Frameworks/`. The engine run passes it to `tl_unity_start` (`angle_egl`, found next to the
+        executable with `dladdr`) with Husk's off-screen mode: no Metal view yet, the engine draws
+        into a pbuffer and Husk saves frames 1-3 and then every 60th as `latest.bmp` into
+        `Documents/Frames` (viewable in the Files app; they stay on the device). The run reports
+        frames rendered and presented at 1/5/10/30/60 s.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

@@ -18,7 +18,9 @@
 // This step runs the Unity driver's startup up to NativeLoader.load (libmain's JNI_OnLoad, libunity
 // loaded, relocated, initialised, its JNI_OnLoad): no graphics yet, and not the engine's own start
 // (initJni/nativeRender), which would initialise il2cpp a second time.
+#define _GNU_SOURCE  // Dl_info/dladdr on glibc (the host syntax check); Darwin has them anyway
 #include "husk-tl-bionic.h"
+#include "husk-tl-egl.h"
 #include "husk-tl-ld.h"
 #include "husk-tl-unity.h"
 
@@ -33,6 +35,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <zlib.h>
 
@@ -451,7 +454,23 @@ static bool interpose(void)
     return true;
 }
 
-static bool start(const char *apk, const char *app_data)
+// ANGLE (EGL + GLES over Metal, scripts/build-angle-ios.sh), embedded in the app's Frameworks folder:
+// its path next to this executable, or NULL when the app carries none.
+static const char *angle_path(void)
+{
+    static char path[1100];
+    Dl_info info;
+    if (!dladdr((const void *)&angle_path, &info) || !info.dli_fname) return NULL;
+    const char *slash = strrchr(info.dli_fname, '/');
+    if (!slash) return NULL;
+    snprintf(path, sizeof(path), "%.*s/Frameworks/libANGLE-shared.dylib", (int)(slash - info.dli_fname), info.dli_fname);
+    struct stat st;
+    return stat(path, &st) == 0 ? path : NULL;
+}
+
+// `frames` (M3f): with ANGLE, draw off-screen and keep frames 1-3 and the latest one (every 60th
+// frame) as BMP files in that folder (Husk's frame capture). NULL: no graphics (M3d/M3e).
+static bool start(const char *apk, const char *app_data, const char *frames)
 {
     mkdir(app_data, 0755);
     tl_unity_config cfg;
@@ -461,6 +480,17 @@ static bool start(const char *apk, const char *app_data)
     cfg.package_name = "io.github.pander0212.unitybridge.game";
     cfg.width = 2556;
     cfg.height = 1179;
+    if (frames) {
+        cfg.angle_egl = angle_path();
+        if (cfg.angle_egl) {
+            mkdir(frames, 0755);
+            cfg.frame_dir = frames;
+            cfg.frame_every = -60;
+            line("graphics: ANGLE %s, frames (BMP) to %s", cfg.angle_egl, frames);
+        } else {
+            line("graphics: no libANGLE-shared.dylib in the app's Frameworks: the engine has no EGL");
+        }
+    }
     line("tl_unity_start: libmain.so JNI_OnLoad, then NativeLoader.load (libunity.so) ...");
     const bool started = tl_unity_start(&cfg);
     line("tl_unity_start -> %s", started ? "true" : "false");
@@ -492,7 +522,7 @@ int ub_unity_probe_run(const char *unity_dir, const char *app_data, char *out, s
         void *domain = domain_get ? domain_get() : NULL;
         line("libil2cpp.so (virtual): il2cpp_domain_get() = %p %s", domain, domain ? "ok" : "FAIL");
     }
-    const bool ok = start(apk, app_data);
+    const bool ok = start(apk, app_data, NULL);
     line("libil2cpp.so: %d dlopen, %d dlsym (%d not exported)", g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing);
     line("UNITY: %s", ok ? "engine loaded (NativeLoader.load succeeded)" : "did not get through (see above)");
     ub_unity_thread_leave();
@@ -502,7 +532,8 @@ int ub_unity_probe_run(const char *unity_dir, const char *app_data, char *out, s
 // M3e: GameAssembly loaded and wired but il2cpp not started (ub_il2cpp_probe_set_engine_mode); the
 // engine starts it. The game's <Game>_Data goes into the APK as the engine's data, then the
 // UnityPlayer start-up runs (initJni, the UnityMain thread with nativeRecreateGfxState, nativeResume,
-// nativeRender), with file and dlopen traces in the log. No graphics yet: there is no EGL display.
+// nativeRender), with file and dlopen traces in the log. Graphics (M3f): ANGLE when the app carries
+// it, drawing off-screen into Documents/Frames.
 int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char *app_data, char *out, size_t capacity)
 {
     g_out = out; g_cap = capacity; g_len = 0;
@@ -516,18 +547,20 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     ub_unity_thread_enter();
     if (!interpose()) { ub_unity_thread_leave(); return 1; }
     ub_memory_dump("UB_MEM before the engine:");
-    if (!start(apk, app_data)) { ub_unity_thread_leave(); line("UNITY: did not get through NativeLoader.load"); return 1; }
+    char frames[1100];
+    snprintf(frames, sizeof(frames), "%s/../Frames", unity_dir);
+    if (!start(apk, app_data, frames)) { ub_unity_thread_leave(); line("UNITY: did not get through NativeLoader.load"); return 1; }
     ub_memory_dump("UB_MEM after NativeLoader.load:");
     line("tl_unity_run: initJni, then the UnityMain thread (surface, resume, nativeRender) ...");
     const bool running = tl_unity_run();
     line("tl_unity_run -> %s", running ? "UnityMain started" : "false");
     char report[2048];
-    for (int s = 1; running && s <= 30; s++) {
+    for (int s = 1; running && s <= 60; s++) {
         sleep(1);
-        if (s == 1 || s == 5 || s == 10 || s == 30) {
+        if (s == 1 || s == 5 || s == 10 || s == 30 || s == 60) {
             ub_il2cpp_engine_report(report, sizeof(report));
-            line("after %d s: %lu frames; libil2cpp.so %d dlopen, %d dlsym (%d not exported); %s", s, tl_unity_frames(),
-                 g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing, report);
+            line("after %d s: %lu frames (%lu presented); libil2cpp.so %d dlopen, %d dlsym (%d not exported); %s", s, tl_unity_frames(),
+                 tl_egl_frames_presented(), g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing, report);
             ub_memory_dump("UB_MEM");
         }
     }

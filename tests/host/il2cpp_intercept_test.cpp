@@ -185,7 +185,18 @@ void RealGcForeachHeap(uintptr_t func, P userData) {
   if (func) reinterpret_cast<void(MS*)(P, uintptr_t, uintptr_t)>(func)(userData, 0x1000, 0x2000);
 }
 
+int g_backtraceInstalls = 0;
+void RealOverrideStackBacktrace(uintptr_t) { ++g_backtraceInstalls; }
+uintptr_t g_liveness[2] = {};
+P RealLivenessAllocateStruct(P filter, Word max, uintptr_t callback, P, uintptr_t reallocate) {
+  g_liveness[0] = callback;
+  g_liveness[1] = reallocate;
+  return max == 64 ? filter : nullptr;
+}
+
 const std::map<std::string, P> g_original = {
+    {"il2cpp_override_stack_backtrace", reinterpret_cast<P>(&RealOverrideStackBacktrace)},
+    {"il2cpp_unity_liveness_allocate_struct", reinterpret_cast<P>(&RealLivenessAllocateStruct)},
     {"il2cpp_add_internal_call", reinterpret_cast<P>(&RealAddInternalCall)},
     {"il2cpp_init", reinterpret_cast<P>(&RealInit)},
     {"il2cpp_set_memory_callbacks", reinterpret_cast<P>(&RealSetMemoryCallbacks)},
@@ -345,6 +356,16 @@ int main() {
             g_heapArgs[2] == reinterpret_cast<P>(0x2000),
         "heap walk: callback gets its three arguments");
   Check(Intercept::GetStats().callbacks >= 3, "callbacks counted");
+
+  // The engine's ARM64 unwinder is never handed to il2cpp; the liveness callbacks are wrapped.
+  reinterpret_cast<void (*)(P)>(Intercept::Replacement("il2cpp_override_stack_backtrace"))(reinterpret_cast<P>(&NNothing));
+  Check(g_backtraceInstalls == 0, "stack backtrace override: not passed on");
+  using LivenessAlloc = P (*)(P, Word, P, P, P);
+  P live = reinterpret_cast<LivenessAlloc>(Intercept::Replacement("il2cpp_unity_liveness_allocate_struct"))(
+      &userData, 64, reinterpret_cast<P>(&NHeap), nullptr, reinterpret_cast<P>(&NMalloc));
+  Check(live == &userData && g_liveness[0] != 0 && g_liveness[0] != reinterpret_cast<uintptr_t>(&NHeap) &&
+            g_liveness[1] != 0 && g_liveness[1] != reinterpret_cast<uintptr_t>(&NMalloc),
+        "liveness: both callbacks wrapped, arguments and result passed through");
 
   if (g_failures) std::printf("RESULT: %d checks failed\n", g_failures);
   else std::printf("RESULT: all checks passed\n");

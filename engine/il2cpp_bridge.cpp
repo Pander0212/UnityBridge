@@ -44,6 +44,10 @@ constexpr std::string_view kHostCallbackApis[] = {
     "il2cpp_gc_set_external_allocation_tracker",
     "il2cpp_gc_set_external_wbarrier_tracker",
     "il2cpp_register_debugger_agent_transport",
+    "il2cpp_override_stack_backtrace",
+    "il2cpp_class_for_each",
+    "il2cpp_unity_liveness_allocate_struct",
+    "il2cpp_unity_set_android_network_up_state_func",
 };
 
 std::mutex g_mutex;

@@ -7,6 +7,7 @@
 // narrow result undefined.
 #include "engine/il2cpp_intercept.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -66,6 +67,10 @@ constexpr std::string_view kIntercepted[] = {
     "il2cpp_gchandle_foreach_get_target",
     "il2cpp_gc_set_external_allocation_tracker",
     "il2cpp_gc_set_external_wbarrier_tracker",
+    "il2cpp_override_stack_backtrace",
+    "il2cpp_class_for_each",
+    "il2cpp_unity_liveness_allocate_struct",
+    "il2cpp_unity_set_android_network_up_state_func",
 };
 
 // Il2CppMemoryCallbacks (il2cpp-api-types.h): seven allocator functions, all integer/pointer.
@@ -470,6 +475,34 @@ void GcSetExternalWbarrierTracker(P func) {  // void (*)(void** ptr)
     set(WrapCallback(func, 1));
 }
 
+// size_t (*)(Il2CppMethodPointer* buffer, size_t maxSize): the engine's unwinder, which fills the
+// buffer with host (ARM64) return addresses. The guest's stack is x86 code under FEX, which that
+// unwinder cannot walk and whose frames il2cpp would then look up as x86 methods; il2cpp keeps its
+// own backtrace (the Windows one, through the mini Win32) instead.
+void OverrideStackBacktrace(P func) {
+  static std::atomic<bool> said {false};
+  if (func != nullptr && !said.exchange(true))
+    std::fprintf(stderr, "UB_IL2CPP_INTERCEPT il2cpp_override_stack_backtrace: the engine's ARM64 unwinder "
+                         "is not installed; il2cpp keeps its own\n");
+}
+
+void ClassForEach(P func, P userData) {  // void (*)(Il2CppClass* klass, void* userData)
+  if (auto* each = Original<void (*)(uintptr_t, P)>("il2cpp_class_for_each")) each(WrapCallback(func, 2), userData);
+}
+
+// The liveness walk (memory profiler, Resources.UnloadUnusedAssets): register_object(Il2CppObject**
+// arr, int size, void* userData) and reallocate(void* ptr, size_t size, void* userData).
+P LivenessAllocateStruct(P filter, Word maxObjectCount, P callback, P userData, P reallocate) {
+  auto* alloc = Original<P (*)(P, Word, uintptr_t, P, uintptr_t)>("il2cpp_unity_liveness_allocate_struct");
+  if (alloc == nullptr) return nullptr;
+  return alloc(filter, maxObjectCount, WrapCallback(callback, 3), userData, WrapCallback(reallocate, 3));
+}
+
+void SetAndroidNetworkUpStateFunc(P func) {  // void (*)(const char* ifName, uint8_t* isUp)
+  if (auto* set = Original<void (*)(uintptr_t)>("il2cpp_unity_set_android_network_up_state_func"))
+    set(WrapCallback(func, 2));
+}
+
 } // namespace
 
 std::span<const std::string_view> Intercepted() { return kIntercepted; }
@@ -497,6 +530,10 @@ void* Replacement(std::string_view name) {
   if (name == "il2cpp_gchandle_foreach_get_target") return reinterpret_cast<void*>(&GchandleForeachGetTarget);
   if (name == "il2cpp_gc_set_external_allocation_tracker") return reinterpret_cast<void*>(&GcSetExternalAllocationTracker);
   if (name == "il2cpp_gc_set_external_wbarrier_tracker") return reinterpret_cast<void*>(&GcSetExternalWbarrierTracker);
+  if (name == "il2cpp_override_stack_backtrace") return reinterpret_cast<void*>(&OverrideStackBacktrace);
+  if (name == "il2cpp_class_for_each") return reinterpret_cast<void*>(&ClassForEach);
+  if (name == "il2cpp_unity_liveness_allocate_struct") return reinterpret_cast<void*>(&LivenessAllocateStruct);
+  if (name == "il2cpp_unity_set_android_network_up_state_func") return reinterpret_cast<void*>(&SetAndroidNetworkUpStateFunc);
   return nullptr;
 }
 

@@ -710,6 +710,19 @@ Next steps, in order:
       - **Fix, [i] pending:** the APK always gets `assets/bin/Data/unity default resources`:
         Unity's Android copy from `Documents/Unity` if there (GLES3 programs), else the game's
         Windows copy from `Resources/` (loads, but D3D11 programs only).
+      - **Device run with Unity's Android copy:** no more shader errors; the engine loaded its
+        built-in resources, reused its shader cache, started FMOD (`24000 Hz stereo`) and read
+        `globalgamemanagers.assets`. Then FEX: `NoExec instruction in entry block` — guest code
+        called `call rax` into libunity.so+0x613f1c, ARM64 code. That function fills
+        `{count, max, buffer}` from the engine's unwinder: the `size_t (*)(Il2CppMethodPointer*,
+        size_t)` the engine hands to **`il2cpp_override_stack_backtrace`**, an API not on the
+        host-callback list, so it went to the guest unwrapped.
+      - **Fix, [i] pending:** `il2cpp_override_stack_backtrace` is intercepted and not passed on
+        (a host unwinder cannot walk the guest's x86 stack; il2cpp keeps its own). Also
+        intercepted, with wrapped callbacks: `il2cpp_class_for_each`,
+        `il2cpp_unity_liveness_allocate_struct` (both callbacks), and
+        `il2cpp_unity_set_android_network_up_state_func`. All four are on the bridge's
+        host-callback list. Host tests cover the refusal and the liveness wrap.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

@@ -525,6 +525,14 @@ Next steps, in order:
         writable view into the nearest one that fits (128 MiB, shrinking to 48 MiB if needed); and
         the app requests Husk's region at the start of the run, before il2cpp_init fragments the
         address space, when `Unity/libunity.so` is present.
+      - **Second run:** the region fix works (Husk's region taken at launch: rx `0x1137e8000`, rw 128 MiB
+        above it, no move needed). Husk then **loaded, relocated and initialised `libmain.so`** (20
+        relocations, 32 `adrp` and one `tpidr` patched), and libmain's `JNI_OnLoad` stopped at
+        `FindClass("com/unity3d/player/NativeLoader")`: NoClassDefFoundError → FatalError → abort.
+        Husk runs Unity's Java side for real in its own Dalvik interpreter and takes the classes from
+        the APK's `classes.dex`, which our APK lacked. **Fix:** Unity's Android player ships a
+        ready `Variations/il2cpp/Release/Classes/classes.dex` (DEX 035, 119 KB); the user copies it
+        into the Unity folder with the two libraries, and the APK carries it (rewritten on every run).
       - Next: let libunity start il2cpp itself (probe without our own `il2cpp_init`), then
         `initJni`/first `nativeRender` without graphics; the game's data as the APK's
         `assets/bin/Data`; ANGLE for EGL/GLES.

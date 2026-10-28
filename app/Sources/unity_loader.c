@@ -4,11 +4,11 @@
 // scripts/fetch-husk.sh, compiled into this app unmodified).
 //
 // Unity's Android libraries are not redistributable and never ship with the app: the user copies
-// libmain.so and libunity.so from Unity's Android player for the game's exact version (2021.3.18f1
-// for Fellworld: Editor/Data/PlaybackEngines/AndroidPlayer/Variations/il2cpp/Release/Libs/arm64-v8a)
-// into Files > On My iPhone > UB Probe > Unity. From them the app writes a minimal APK (stored
-// zip: the two libraries under lib/arm64-v8a/) next to them, which is what Husk's Unity driver
-// starts from.
+// libmain.so, libunity.so and classes.dex from Unity's Android player for the game's exact version
+// (2021.3.18f1 for Fellworld: Editor/Data/PlaybackEngines/AndroidPlayer/Variations/il2cpp/Release,
+// Libs/arm64-v8a and Classes) into Files > On My iPhone > UB Probe > Unity. From them the app writes
+// a minimal APK (stored zip: classes.dex, the two libraries under lib/arm64-v8a/) next to them,
+// which is what Husk's Unity driver starts from.
 //
 // libil2cpp.so is ours: dlopen("libil2cpp.so") from Android code returns a handle of our own, and
 // dlsym on it returns the il2cpp bridge's ARM64 entry points into GameAssembly.dll (ub_il2cpp_symbol).
@@ -176,32 +176,39 @@ static bool write_apk(const char *apk, apk_entry *e, int count)
     return ok && rename(tmp, apk) == 0;
 }
 
-// Writes <dir>/base.apk from <dir>/libmain.so and <dir>/libunity.so unless it is newer than both.
+// Writes <dir>/base.apk from <dir>/libmain.so, <dir>/libunity.so and, if present, <dir>/classes.dex
+// (Unity's Java side: UnityPlayer, NativeLoader, ..., which Husk's Dalvik runs). Rewritten on every
+// run: 25 MB take well under a second, and file times copied out of a zip say nothing reliable.
 static bool make_apk(const char *dir, char *apk, size_t apkcap)
 {
-    static const char *const libs[] = {"libmain.so", "libunity.so"};
+    static const struct { const char *file, *entry; bool required; } parts[] = {
+        {"classes.dex", "classes.dex", false},
+        {"libmain.so", "lib/arm64-v8a/libmain.so", true},
+        {"libunity.so", "lib/arm64-v8a/libunity.so", true},
+    };
     snprintf(apk, apkcap, "%s/base.apk", dir);
-    struct stat sa, sl;
-    bool fresh = stat(apk, &sa) == 0;
-    for (int i = 0; i < 2; i++) {
-        char p[1100];
-        snprintf(p, sizeof(p), "%s/%s", dir, libs[i]);
-        if (stat(p, &sl) != 0) { line("missing %s", p); return false; }
-        if (sl.st_mtime > sa.st_mtime) fresh = false;
-    }
-    if (fresh) { line("APK up to date: %s (%lld bytes)", apk, (long long)sa.st_size); return true; }
-    apk_entry e[2] = {{.name = "lib/arm64-v8a/libmain.so"}, {.name = "lib/arm64-v8a/libunity.so"}};
+    apk_entry e[3];
+    int n = 0;
     bool ok = true;
-    for (int i = 0; i < 2 && ok; i++) {
+    for (int i = 0; i < 3 && ok; i++) {
         char p[1100];
-        snprintf(p, sizeof(p), "%s/%s", dir, libs[i]);
-        ok = read_whole(p, &e[i].data, &e[i].size);
-        if (ok) line("  %s: %zu bytes", libs[i], e[i].size);
+        snprintf(p, sizeof(p), "%s/%s", dir, parts[i].file);
+        struct stat st;
+        if (stat(p, &st) != 0) {
+            if (parts[i].required) { line("missing %s", p); ok = false; }
+            else line("  %s: not there (Unity's Java classes; JNI_OnLoad will not find NativeLoader)", parts[i].file);
+            continue;
+        }
+        memset(&e[n], 0, sizeof(e[n]));
+        e[n].name = parts[i].entry;
+        ok = read_whole(p, &e[n].data, &e[n].size);
+        if (ok) line("  %s: %zu bytes", parts[i].file, e[n++].size);
     }
-    ok = ok && write_apk(apk, e, 2);
-    for (int i = 0; i < 2; i++) free(e[i].data);
-    if (ok && stat(apk, &sa) == 0) line("APK written: %s (%lld bytes)", apk, (long long)sa.st_size);
-    else line("could not write %s (errno %d)", apk, errno);
+    ok = ok && write_apk(apk, e, n);
+    for (int i = 0; i < n; i++) free(e[i].data);
+    struct stat sa;
+    if (ok && stat(apk, &sa) == 0) line("APK written: %s (%lld bytes, %d entries)", apk, (long long)sa.st_size, n);
+    else if (n) line("could not write %s (errno %d)", apk, errno);
     return ok;
 }
 
@@ -218,8 +225,8 @@ int ub_unity_probe_run(const char *unity_dir, const char *data_dir, char *out, s
     if (g_ran++) { line("already ran in this app session; reopen the app"); return 3; }
     char apk[1100];
     if (!make_apk(unity_dir, apk, sizeof(apk))) {
-        line("Put libmain.so and libunity.so from Unity's Android player (the game's Unity version, il2cpp,");
-        line("Release, arm64-v8a) into %s and run again.", unity_dir);
+        line("Put libmain.so, libunity.so (Libs/arm64-v8a) and classes.dex (Classes) from Unity's Android player");
+        line("(the game's Unity version, Variations/il2cpp/Release) into %s and run again.", unity_dir);
         return 2;
     }
     ub_unity_thread_enter();

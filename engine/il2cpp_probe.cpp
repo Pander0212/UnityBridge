@@ -812,9 +812,29 @@ int RunInterceptTests(Report& report) {
   return failures;
 }
 
+// M3e, the engine mode: libunity (under Husk) starts il2cpp itself through the virtual libil2cpp.so.
+// It points il2cpp at its Android data path ("jar:file://...apk!/assets/bin/Data/..."), which the
+// game's Windows file I/O cannot open; il2cpp's metadata lives in <Game>_Data/il2cpp_data on the
+// device, so both directory setters are redirected there.
+bool g_engineMode = false;
+std::string g_il2cppDataDirWin;
+
+uint64_t RedirectDir(const char* api, const char* requested) {
+  std::fprintf(stderr, "UB_IL2CPP %s(%s) from the engine -> %s\n", api, requested ? requested : "(null)",
+               g_il2cppDataDirWin.c_str());
+  auto* set = reinterpret_cast<uint64_t (*)(const char*)>(Il2cppBridge::Forwarder(api));
+  return set ? set(g_il2cppDataDirWin.c_str()) : 0;
+}
+uint64_t RedirectDataDir(const char* requested) { return RedirectDir("il2cpp_set_data_dir", requested); }
+uint64_t RedirectConfigDir(const char* requested) { return RedirectDir("il2cpp_set_config_dir", requested); }
+
 } // namespace
 
 extern "C" int ub_win32_device_has_run();
+
+// Before ub_il2cpp_probe_run: stop after loading GameAssembly and wiring the bridges, without our
+// own il2cpp_init and tests, so that the Unity engine starts il2cpp (M3e).
+extern "C" void ub_il2cpp_probe_set_engine_mode(int on) { g_engineMode = on != 0; }
 
 // Nonzero once the il2cpp probe has started in this process (its runtime then stays up until exit).
 extern "C" int ub_il2cpp_probe_started() { return g_il2cppStarted.load() ? 1 : 0; }
@@ -934,6 +954,22 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   report.Line("data dir: %s  ->  %s", dataDir ? dataDir : "(none)", dataDirWin.c_str());
   CallExport(guest, report, image, "il2cpp_set_data_dir", {reinterpret_cast<uintptr_t>(dataDirWin.c_str())});
   CallExport(guest, report, image, "il2cpp_set_config_dir", {reinterpret_cast<uintptr_t>(dataDirWin.c_str())});
+
+  if (g_engineMode) {
+    // The engine's il2cpp_* calls run on its own threads, each on a guest thread of its own.
+    Il2cppBridge::Init([&image](std::string_view name) { return image.Export(name); }, &BridgeCall);
+    IcallBridge::Init(&runtime);
+    Il2cppIntercept::Init([](std::string_view n) { return Il2cppBridge::Symbol(n); },
+                          [](std::string_view n) { return Il2cppBridge::Forwarder(n); }, false);
+    for (const auto name : Il2cppIntercept::Intercepted()) Il2cppBridge::Override(name, Il2cppIntercept::Replacement(name));
+    g_il2cppDataDirWin = dataDirWin;
+    Il2cppBridge::Override("il2cpp_set_data_dir", reinterpret_cast<void*>(&RedirectDataDir));
+    Il2cppBridge::Override("il2cpp_set_config_dir", reinterpret_cast<void*>(&RedirectConfigDir));
+    report.Line("engine mode: bridges wired, il2cpp_init left to the Unity engine");
+    (void)engine.release();  // as after il2cpp_init: everything stays for the process
+    MachFault::UnregisterThisThread();
+    return finish(0);
+  }
 
   static const char kDomainName[] = "IL2CPP Root Domain";
   report.Line("calling il2cpp_init ...");

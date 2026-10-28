@@ -32,12 +32,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <pthread.h>
 #include <zlib.h>
 
 // engine/unity_host.cpp
 void *ub_il2cpp_symbol(const char *name);
 void ub_unity_thread_enter(void);
 void ub_unity_thread_leave(void);
+void ub_il2cpp_engine_report(char *out, size_t capacity);
 
 // ---- report -----------------------------------------------------------------------------------
 
@@ -108,108 +111,242 @@ static void *ub_dlsym(void *handle, const char *name)
 }
 
 // ---- the synthetic APK -------------------------------------------------------------------------
-// A stored (uncompressed) zip. Each entry's data starts on a 16 KiB boundary (padding in the local
-// header's extra field), as zipalign -P 16 lays out an APK's libraries.
+// A stored (uncompressed) zip, written by streaming each file twice (CRC, then data), so files of any
+// size up to the zip32 limits work. Each entry's data starts on a 16 KiB boundary (padding in the
+// local header's extra field, Android's 0xd935 tag), as zipalign -P 16 lays out an APK.
 
 typedef struct {
-    const char *name;
-    uint8_t *data;
-    size_t size;
+    char name[600];   // entry name in the APK
+    char path[1100];  // source file
+    uint64_t size;
+    long mtime;
     uint32_t crc;
     uint64_t offset;  // of the local header
 } apk_entry;
 
-static void put16(FILE *f, uint16_t v) { fputc(v & 0xff, f); fputc(v >> 8, f); }
-static void put32(FILE *f, uint32_t v) { put16(f, (uint16_t)v); put16(f, (uint16_t)(v >> 16)); }
+static apk_entry *g_entries;
+static int g_nentries, g_capentries;
 
-static bool read_whole(const char *path, uint8_t **data, size_t *size)
+static bool add_entry(const char *name, const char *path)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    *data = n > 0 ? malloc((size_t)n) : NULL;
-    bool ok = *data && fread(*data, 1, (size_t)n, f) == (size_t)n;
-    fclose(f);
-    if (!ok) { free(*data); *data = NULL; return false; }
-    *size = (size_t)n;
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    if (g_nentries == g_capentries) {
+        g_capentries = g_capentries ? g_capentries * 2 : 64;
+        g_entries = realloc(g_entries, sizeof(apk_entry) * (size_t)g_capentries);
+    }
+    apk_entry *e = &g_entries[g_nentries++];
+    memset(e, 0, sizeof(*e));
+    snprintf(e->name, sizeof(e->name), "%s", name);
+    snprintf(e->path, sizeof(e->path), "%s", path);
+    e->size = (uint64_t)st.st_size;
+    e->mtime = (long)st.st_mtime;
     return true;
 }
 
-static bool write_apk(const char *apk, apk_entry *e, int count)
+// Every file under `dir` as `prefix/<relative path>`, skipping top-level folders in `skip`.
+static void add_tree(const char *dir, const char *prefix, const char *const *skip, int depth)
+{
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        bool skipped = false;
+        for (int i = 0; depth == 0 && skip && skip[i]; i++) if (!strcmp(de->d_name, skip[i])) skipped = true;
+        if (skipped) continue;
+        char path[1100], name[600];
+        snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+        snprintf(name, sizeof(name), "%s/%s", prefix, de->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) add_tree(path, name, skip, depth + 1);
+        else add_entry(name, path);
+    }
+    closedir(d);
+}
+
+static void put16(FILE *f, uint16_t v) { fputc(v & 0xff, f); fputc(v >> 8, f); }
+static void put32(FILE *f, uint32_t v) { put16(f, (uint16_t)v); put16(f, (uint16_t)(v >> 16)); }
+
+static bool file_crc(const char *path, uint32_t *crc)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    static uint8_t buf[1 << 20];
+    uLong c = crc32(0, NULL, 0);
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) c = crc32(c, buf, (uInt)n);
+    const bool ok = !ferror(f);
+    fclose(f);
+    *crc = (uint32_t)c;
+    return ok;
+}
+
+static bool copy_file(FILE *out, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    static uint8_t buf[1 << 20];
+    size_t n;
+    bool ok = true;
+    while (ok && (n = fread(buf, 1, sizeof(buf), f)) > 0) ok = fwrite(buf, 1, n, out) == n;
+    ok = ok && !ferror(f);
+    fclose(f);
+    return ok;
+}
+
+static bool write_apk(const char *apk)
 {
     char tmp[1100];
     snprintf(tmp, sizeof(tmp), "%s.tmp", apk);
     FILE *f = fopen(tmp, "wb");
     if (!f) return false;
-    for (int i = 0; i < count; i++) {
-        e[i].crc = (uint32_t)crc32(0, e[i].data, (uInt)e[i].size);
-        e[i].offset = (uint64_t)ftell(f);
-        const size_t nlen = strlen(e[i].name);
-        size_t pad = (16384 - (e[i].offset + 30 + nlen) % 16384) % 16384;
+    bool ok = true;
+    for (int i = 0; i < g_nentries && ok; i++) {
+        apk_entry *e = &g_entries[i];
+        ok = file_crc(e->path, &e->crc);
+        e->offset = (uint64_t)ftello(f);
+        if (e->size >= 0xffffffffull || e->offset >= 0xffffffffull) { line("%s: past the zip32 limits (4 GiB)", e->name); ok = false; break; }
+        const size_t nlen = strlen(e->name);
+        size_t pad = (16384 - (e->offset + 30 + nlen) % 16384) % 16384;
         if (pad && pad < 4) pad += 16384;  // room for the extra field's own header
         put32(f, 0x04034b50); put16(f, 10); put16(f, 0); put16(f, 0); put16(f, 0); put16(f, 0);
-        put32(f, e[i].crc); put32(f, (uint32_t)e[i].size); put32(f, (uint32_t)e[i].size);
+        put32(f, e->crc); put32(f, (uint32_t)e->size); put32(f, (uint32_t)e->size);
         put16(f, (uint16_t)nlen); put16(f, (uint16_t)pad);
-        fwrite(e[i].name, 1, nlen, f);
-        if (pad) {  // 0xd935: Android's alignment extra field
+        fwrite(e->name, 1, nlen, f);
+        if (pad) {
             put16(f, 0xd935); put16(f, (uint16_t)(pad - 4));
             for (size_t k = 4; k < pad; k++) fputc(0, f);
         }
-        fwrite(e[i].data, 1, e[i].size, f);
+        ok = ok && copy_file(f, e->path);
     }
-    const uint64_t cd = (uint64_t)ftell(f);
-    for (int i = 0; i < count; i++) {
-        const size_t nlen = strlen(e[i].name);
+    const uint64_t cd = (uint64_t)ftello(f);
+    for (int i = 0; i < g_nentries && ok; i++) {
+        const apk_entry *e = &g_entries[i];
+        const size_t nlen = strlen(e->name);
         put32(f, 0x02014b50); put16(f, 20); put16(f, 10); put16(f, 0); put16(f, 0); put16(f, 0); put16(f, 0);
-        put32(f, e[i].crc); put32(f, (uint32_t)e[i].size); put32(f, (uint32_t)e[i].size);
+        put32(f, e->crc); put32(f, (uint32_t)e->size); put32(f, (uint32_t)e->size);
         put16(f, (uint16_t)nlen); put16(f, 0); put16(f, 0); put16(f, 0); put16(f, 0); put32(f, 0);
-        put32(f, (uint32_t)e[i].offset);
-        fwrite(e[i].name, 1, nlen, f);
+        put32(f, (uint32_t)e->offset);
+        fwrite(e->name, 1, nlen, f);
     }
-    const uint64_t end = (uint64_t)ftell(f);
-    put32(f, 0x06054b50); put16(f, 0); put16(f, 0); put16(f, (uint16_t)count); put16(f, (uint16_t)count);
+    const uint64_t end = (uint64_t)ftello(f);
+    if (ok && (g_nentries > 0xffff || end >= 0xffffffffull)) { line("APK past the zip32 limits"); ok = false; }
+    put32(f, 0x06054b50); put16(f, 0); put16(f, 0); put16(f, (uint16_t)g_nentries); put16(f, (uint16_t)g_nentries);
     put32(f, (uint32_t)(end - cd)); put32(f, (uint32_t)cd); put16(f, 0);
-    const bool ok = !ferror(f);
+    ok = ok && !ferror(f);
     fclose(f);
-    return ok && rename(tmp, apk) == 0;
+    if (!ok) { remove(tmp); return false; }
+    return rename(tmp, apk) == 0;
 }
 
-// Writes <dir>/base.apk from <dir>/libmain.so, <dir>/libunity.so and, if present, <dir>/classes.dex
-// (Unity's Java side: UnityPlayer, NativeLoader, ..., which Husk's Dalvik runs). Rewritten on every
-// run: 25 MB take well under a second, and file times copied out of a zip say nothing reliable.
-static bool make_apk(const char *dir, char *apk, size_t apkcap)
+// The inputs as one line per entry; an APK whose recorded inputs match is not written again.
+static char *inputs_text(void)
 {
-    static const struct { const char *file, *entry; bool required; } parts[] = {
-        {"classes.dex", "classes.dex", false},
-        {"libmain.so", "lib/arm64-v8a/libmain.so", true},
-        {"libunity.so", "lib/arm64-v8a/libunity.so", true},
-    };
-    snprintf(apk, apkcap, "%s/base.apk", dir);
-    apk_entry e[3];
-    int n = 0;
-    bool ok = true;
-    for (int i = 0; i < 3 && ok; i++) {
-        char p[1100];
-        snprintf(p, sizeof(p), "%s/%s", dir, parts[i].file);
-        struct stat st;
-        if (stat(p, &st) != 0) {
-            if (parts[i].required) { line("missing %s", p); ok = false; }
-            else line("  %s: not there (Unity's Java classes; JNI_OnLoad will not find NativeLoader)", parts[i].file);
-            continue;
-        }
-        memset(&e[n], 0, sizeof(e[n]));
-        e[n].name = parts[i].entry;
-        ok = read_whole(p, &e[n].data, &e[n].size);
-        if (ok) line("  %s: %zu bytes", parts[i].file, e[n++].size);
+    size_t cap = 256 + (size_t)g_nentries * 1800, len = 0;
+    char *t = malloc(cap);
+    t[0] = 0;
+    for (int i = 0; i < g_nentries; i++)
+        len += (size_t)snprintf(t + len, cap - len, "%s\t%s\t%llu\t%ld\n", g_entries[i].name, g_entries[i].path,
+                                (unsigned long long)g_entries[i].size, g_entries[i].mtime);
+    return t;
+}
+
+// Writes <unity_dir>/base.apk: classes.dex (Unity's Java side: UnityPlayer, NativeLoader, ..., which
+// Husk's Dalvik runs), libmain.so and libunity.so under lib/arm64-v8a/, and, when game_data is given,
+// that <Game>_Data folder as assets/bin/Data/ (without il2cpp_data, which GameAssembly reads from
+// the device folder itself, and the Windows Plugins). A file named "unity default resources" in
+// unity_dir (from Unity's Android player) takes the place of the game's Windows copy.
+static bool make_apk(const char *unity_dir, const char *game_data, char *apk, size_t apkcap)
+{
+    g_nentries = 0;
+    snprintf(apk, apkcap, "%s/base.apk", unity_dir);
+    char p[1100];
+    snprintf(p, sizeof(p), "%s/classes.dex", unity_dir);
+    if (!add_entry("classes.dex", p)) line("  classes.dex: not there (Unity's Java classes; JNI_OnLoad will not find NativeLoader)");
+    static const char *const libs[] = {"libmain.so", "libunity.so"};
+    for (int i = 0; i < 2; i++) {
+        char name[64];
+        snprintf(p, sizeof(p), "%s/%s", unity_dir, libs[i]);
+        snprintf(name, sizeof(name), "lib/arm64-v8a/%s", libs[i]);
+        if (!add_entry(name, p)) { line("missing %s", p); return false; }
     }
-    ok = ok && write_apk(apk, e, n);
-    for (int i = 0; i < n; i++) free(e[i].data);
+    if (game_data) {
+        static const char *const skip[] = {"il2cpp_data", "Plugins", NULL};
+        const int before = g_nentries;
+        add_tree(game_data, "assets/bin/Data", skip, 0);
+        snprintf(p, sizeof(p), "%s/unity default resources", unity_dir);
+        struct stat st;
+        if (stat(p, &st) == 0) {
+            for (int i = before; i < g_nentries; i++)
+                if (strstr(g_entries[i].name, "/unity default resources")) {
+                    snprintf(g_entries[i].path, sizeof(g_entries[i].path), "%s", p);
+                    g_entries[i].size = (uint64_t)st.st_size;
+                    g_entries[i].mtime = (long)st.st_mtime;
+                    line("  unity default resources: Unity's Android copy instead of the game's");
+                }
+        }
+        uint64_t bytes = 0;
+        for (int i = before; i < g_nentries; i++) bytes += g_entries[i].size;
+        line("  game data: %d files, %llu MiB as assets/bin/Data", g_nentries - before, (unsigned long long)(bytes >> 20));
+    }
+    char *want = inputs_text();
+    char stamp[1110];
+    snprintf(stamp, sizeof(stamp), "%s.inputs", apk);
+    bool fresh = false;
     struct stat sa;
-    if (ok && stat(apk, &sa) == 0) line("APK written: %s (%lld bytes, %d entries)", apk, (long long)sa.st_size, n);
-    else if (n) line("could not write %s (errno %d)", apk, errno);
+    FILE *sf = fopen(stamp, "rb");
+    if (sf && stat(apk, &sa) == 0) {
+        size_t n = strlen(want);
+        char *have = malloc(n + 2);
+        size_t got = fread(have, 1, n + 1, sf);
+        fresh = got == n && !memcmp(have, want, n);
+        free(have);
+    }
+    if (sf) fclose(sf);
+    bool ok = true;
+    if (fresh) {
+        line("APK up to date: %s (%lld bytes, %d entries)", apk, (long long)sa.st_size, g_nentries);
+    } else {
+        ok = write_apk(apk);
+        if (ok && stat(apk, &sa) == 0) {
+            line("APK written: %s (%lld bytes, %d entries)", apk, (long long)sa.st_size, g_nentries);
+            FILE *w = fopen(stamp, "wb");
+            if (w) { fputs(want, w); fclose(w); }
+        } else {
+            line("could not write %s (errno %d)", apk, errno);
+        }
+    }
+    free(want);
     return ok;
+}
+
+// ---- Android threads report their faults too --------------------------------------------------
+
+typedef int (*pthread_create_fn)(void *, const void *, void *(*)(void *), void *);
+static pthread_create_fn g_bionic_pthread_create;
+typedef struct { void *(*fn)(void *); void *arg; } thread_start;
+
+static void *thread_trampoline(void *p)
+{
+    thread_start s = *(thread_start *)p;
+    free(p);
+    ub_unity_thread_enter();
+    void *r = s.fn(s.arg);
+    ub_unity_thread_leave();
+    return r;
+}
+
+static int ub_pthread_create(void *thread, const void *attr, void *(*fn)(void *), void *arg)
+{
+    thread_start *s = malloc(sizeof(*s));
+    if (!s) return 12;  // ENOMEM
+    s->fn = fn;
+    s->arg = arg;
+    const int r = g_bionic_pthread_create(thread, attr, thread_trampoline, s);
+    if (r != 0) free(s);
+    return r;
 }
 
 // ---- the run -----------------------------------------------------------------------------------
@@ -217,57 +354,99 @@ static bool make_apk(const char *dir, char *apk, size_t apkcap)
 static int g_ran;
 int ub_unity_probe_ran(void) { return g_ran; }
 
-int ub_unity_probe_run(const char *unity_dir, const char *data_dir, char *out, size_t capacity)
+static bool interpose(void)
 {
-    g_out = out; g_cap = capacity; g_len = 0;
-    if (capacity) out[0] = 0;
-    line("--- Unity's Android engine under Husk's runtime (M3d) ---");
-    if (g_ran++) { line("already ran in this app session; reopen the app"); return 3; }
-    char apk[1100];
-    if (!make_apk(unity_dir, apk, sizeof(apk))) {
-        line("Put libmain.so, libunity.so (Libs/arm64-v8a) and classes.dex (Classes) from Unity's Android player");
-        line("(the game's Unity version, Variations/il2cpp/Release) into %s and run again.", unity_dir);
-        return 2;
-    }
-    ub_unity_thread_enter();
-
     g_bionic_dlopen = (dlopen_fn)tl_bionic_find("dlopen");
     g_bionic_dlopen_ext = (dlopen_ext_fn)tl_bionic_find("android_dlopen_ext");
     g_bionic_dlsym = (dlsym_fn)tl_bionic_find("dlsym");
-    if (!g_bionic_dlopen || !g_bionic_dlsym) { line("FAIL Husk's bionic has no dlopen/dlsym"); ub_unity_thread_leave(); return 1; }
+    g_bionic_pthread_create = (pthread_create_fn)tl_bionic_find("pthread_create");
+    if (!g_bionic_dlopen || !g_bionic_dlsym) { line("FAIL Husk's bionic has no dlopen/dlsym"); return false; }
     tl_ld_interpose("dlopen", (void *)&ub_dlopen);
     tl_ld_interpose("android_dlopen_ext", (void *)&ub_android_dlopen_ext);
     tl_ld_interpose("dlsym", (void *)&ub_dlsym);
+    if (g_bionic_pthread_create) tl_ld_interpose("pthread_create", (void *)&ub_pthread_create);
     tl_ld_set_verbosity(1);
+    return true;
+}
 
-    // The virtual libil2cpp.so as libunity will open it.
-    {
-        void *h = ub_dlopen("/data/app/lib/arm64/libil2cpp.so", 2);
-        void *(*domain_get)(void) = (void *(*)(void))ub_dlsym(h, "il2cpp_domain_get");
-        void *domain = domain_get ? domain_get() : NULL;
-        line("libil2cpp.so (virtual): il2cpp_domain_get() = %p %s", domain, domain ? "ok" : "FAIL");
-    }
-
-    mkdir(data_dir, 0755);
+static bool start(const char *apk, const char *app_data)
+{
+    mkdir(app_data, 0755);
     tl_unity_config cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.apk_path = apk;
-    cfg.data_dir = data_dir;
+    cfg.data_dir = app_data;
     cfg.package_name = "io.github.pander0212.unitybridge.game";
     cfg.width = 2556;
     cfg.height = 1179;
     line("tl_unity_start: libmain.so JNI_OnLoad, then NativeLoader.load (libunity.so) ...");
     const bool started = tl_unity_start(&cfg);
     line("tl_unity_start -> %s", started ? "true" : "false");
-
     tl_lib *unity = tl_ld_find_lib("libunity.so"), *mainlib = tl_ld_find_lib("libmain.so");
     line("libmain.so %s, libunity.so %s", mainlib ? "loaded" : "not loaded", unity ? "loaded" : "not loaded");
-    if (unity) {
-        line("  libunity.so at %p, JNI_OnLoad %p", tl_ld_lib_base(unity), tl_ld_sym(unity, "JNI_OnLoad"));
-    }
+    if (unity) line("  libunity.so at %p, JNI_OnLoad %p", tl_ld_lib_base(unity), tl_ld_sym(unity, "JNI_OnLoad"));
     line("unresolved imports (bound to logging stubs): %zu", tl_ld_unresolved_count());
+    return started && unity;
+}
+
+// M3d: after our own il2cpp_init and tests, the engine loaded up to NativeLoader.load.
+int ub_unity_probe_run(const char *unity_dir, const char *app_data, char *out, size_t capacity)
+{
+    g_out = out; g_cap = capacity; g_len = 0;
+    if (capacity) out[0] = 0;
+    line("--- Unity's Android engine under Husk's runtime (M3d) ---");
+    if (g_ran++) { line("already ran in this app session; reopen the app"); return 3; }
+    char apk[1100];
+    if (!make_apk(unity_dir, NULL, apk, sizeof(apk))) {
+        line("Put libmain.so, libunity.so (Libs/arm64-v8a) and classes.dex (Classes) from Unity's Android player");
+        line("(the game's Unity version, Variations/il2cpp/Release) into %s and run again.", unity_dir);
+        return 2;
+    }
+    ub_unity_thread_enter();
+    if (!interpose()) { ub_unity_thread_leave(); return 1; }
+    {   // the virtual libil2cpp.so as libunity will open it
+        void *h = ub_dlopen("/data/app/lib/arm64/libil2cpp.so", 2);
+        void *(*domain_get)(void) = (void *(*)(void))ub_dlsym(h, "il2cpp_domain_get");
+        void *domain = domain_get ? domain_get() : NULL;
+        line("libil2cpp.so (virtual): il2cpp_domain_get() = %p %s", domain, domain ? "ok" : "FAIL");
+    }
+    const bool ok = start(apk, app_data);
     line("libil2cpp.so: %d dlopen, %d dlsym (%d not exported)", g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing);
-    line("UNITY: %s", started && unity ? "engine loaded (NativeLoader.load succeeded)" : "did not get through (see above)");
+    line("UNITY: %s", ok ? "engine loaded (NativeLoader.load succeeded)" : "did not get through (see above)");
     ub_unity_thread_leave();
-    return started && unity ? 0 : 1;
+    return ok ? 0 : 1;
+}
+
+// M3e: GameAssembly loaded and wired but il2cpp not started (ub_il2cpp_probe_set_engine_mode); the
+// engine starts it. The game's <Game>_Data goes into the APK as the engine's data, then the
+// UnityPlayer start-up runs (initJni, the UnityMain thread with nativeRecreateGfxState, nativeResume,
+// nativeRender), with file and dlopen traces in the log. No graphics yet: there is no EGL display.
+int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char *app_data, char *out, size_t capacity)
+{
+    g_out = out; g_cap = capacity; g_len = 0;
+    if (capacity) out[0] = 0;
+    line("--- Unity engine start (M3e): the engine runs il2cpp itself ---");
+    if (g_ran++) { line("already ran in this app session; reopen the app"); return 3; }
+    char apk[1100];
+    if (!make_apk(unity_dir, game_data, apk, sizeof(apk))) return 2;
+    setenv("TL_FILE_TRACE", "1", 1);
+    setenv("TL_DL_TRACE", "1", 1);
+    ub_unity_thread_enter();
+    if (!interpose()) { ub_unity_thread_leave(); return 1; }
+    if (!start(apk, app_data)) { ub_unity_thread_leave(); line("UNITY: did not get through NativeLoader.load"); return 1; }
+    line("tl_unity_run: initJni, then the UnityMain thread (surface, resume, nativeRender) ...");
+    const bool running = tl_unity_run();
+    line("tl_unity_run -> %s", running ? "UnityMain started" : "false");
+    char report[2048];
+    for (int s = 1; running && s <= 30; s++) {
+        sleep(1);
+        if (s == 1 || s == 5 || s == 10 || s == 30) {
+            ub_il2cpp_engine_report(report, sizeof(report));
+            line("after %d s: %lu frames; libil2cpp.so %d dlopen, %d dlsym (%d not exported); %s", s, tl_unity_frames(),
+                 g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing, report);
+        }
+    }
+    line("UNITY: %s, %lu frames", running ? "engine running" : "UnityMain did not start", tl_unity_frames());
+    ub_unity_thread_leave();
+    return running ? 0 : 1;
 }

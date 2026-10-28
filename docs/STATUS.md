@@ -548,6 +548,27 @@ Next steps, in order:
         `initJni`/first `nativeRender` without graphics (probe without our own `il2cpp_init`), then
         `initJni`/first `nativeRender` without graphics; the game's data as the APK's
         `assets/bin/Data`; ANGLE for EGL/GLES.
+- [ ] **M3e, the engine starts il2cpp itself** (2026-10-28, built, **[i] on iPhone pending**). App
+      button "Run Unity engine (libunity starts il2cpp)":
+      - `ub_il2cpp_probe_set_engine_mode`: the probe loads GameAssembly, runs its TLS callbacks and
+        `DllMain`, sets the data/config dirs, wires `Il2cppBridge`, `IcallBridge` and the intercept
+        (`runtimeUp = false`, so InternalCalls registered before `il2cpp_init` wait and are made
+        when the intercepted `il2cpp_init` succeeds), and stops: no `il2cpp_init` of ours, no tests.
+        libunity's `il2cpp_set_data_dir`/`il2cpp_set_config_dir` (an Android `jar:` path GameAssembly's
+        Windows file I/O cannot open) are redirected to the device's `<Game>_Data/il2cpp_data`.
+      - The APK now also carries the game's `<Game>_Data` as `assets/bin/Data/` (without
+        `il2cpp_data` and the Windows `Plugins`), streamed (CRC pass, then copy; any file size within
+        zip32), rewritten only when the inputs (name, path, size, mtime) change. A `unity default
+        resources` in the Unity folder replaces the game's Windows copy. Host-checked with Python's
+        `zipfile` (nested folders, skips, a file larger than the copy buffer, the cache).
+      - `pthread_create` of the Android libraries is interposed so each of Unity's threads registers
+        with `MachFault` (fault reports instead of a silent exit).
+      - Then Husk's `tl_unity_run`: `initJni`, `nativeInitWebRequest` and the helper classes, the
+        UnityMain thread (`nativeRecreateGfxState`, `nativeResume`, `nativeRender` per frame), with
+        `TL_FILE_TRACE`/`TL_DL_TRACE` on; the probe reports frames, the libil2cpp.so lookups and the
+        InternalCall counts (registered / absent / not bridgeable) at 1, 5, 10 and 30 s. Expected
+        stops: no EGL display (no ANGLE yet), the `StandaloneWindows64` platform tag in the data, the
+        D3D11-only shaders (M4).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

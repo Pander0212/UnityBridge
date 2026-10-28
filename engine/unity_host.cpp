@@ -15,7 +15,9 @@
 //  - hardware-fault reports for the thread that runs Android code (MachFault).
 #include "core/ios/ios_jit_allocator.h"
 #include "engine/il2cpp_bridge.h"
+#include "engine/il2cpp_intercept.h"
 #include "engine/mach_fault.h"
+#include "win32/hle.h"
 
 #include <mach/mach.h>
 #include <mach/vm_map.h>
@@ -162,3 +164,22 @@ extern "C" void* ub_il2cpp_symbol(const char* name) {
 
 extern "C" void ub_unity_thread_enter() { UnityBridge::MachFault::RegisterThisThread(); }
 extern "C" void ub_unity_thread_leave() { UnityBridge::MachFault::UnregisterThisThread(); }
+
+// What the engine did with il2cpp (M3e): InternalCalls registered through the intercept, and the
+// Windows imports GameAssembly called that the mini Win32 does not implement.
+extern "C" void ub_il2cpp_engine_report(char* out, size_t capacity) {
+  const auto st = UnityBridge::Il2cppIntercept::GetStats();
+  int n = std::snprintf(out, capacity,
+                        "InternalCalls: %zu registered, %zu absent from the metadata, %zu not bridgeable, %zu pending; "
+                        "%zu callbacks wrapped",
+                        st.registered, st.absent, st.failed, st.pending, st.callbacks);
+  if (auto* rt = UnityBridge::Win32::Runtime::Current()) {
+    const auto calls = rt->UnimplementedCalls();
+    if (n > 0 && static_cast<size_t>(n) < capacity)
+      n += std::snprintf(out + n, capacity - n, "; unimplemented imports called: %zu", calls.size());
+    for (const auto& c : calls) {
+      if (n <= 0 || static_cast<size_t>(n) >= capacity) break;
+      n += std::snprintf(out + n, capacity - n, " %s", c.c_str());
+    }
+  }
+}

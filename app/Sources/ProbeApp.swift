@@ -94,7 +94,11 @@ struct ProbeView: View {
                         .buttonStyle(.bordered)
                         .disabled(running || jit != .ready || il2cppStarted)
                 }
-                Button("Run il2cpp_init (GameAssembly.dll)", action: runIl2cpp)
+                Button("Run il2cpp_init (GameAssembly.dll)", action: { runIl2cpp(engine: false) })
+                    .buttonStyle(.bordered)
+                    .disabled(running || jit != .ready || il2cppStarted || windowsDLLRan)
+                // M3e: the Unity engine (under Husk) starts il2cpp itself, with the game's data.
+                Button("Run Unity engine (libunity starts il2cpp)", action: { runIl2cpp(engine: true) })
                     .buttonStyle(.bordered)
                     .disabled(running || jit != .ready || il2cppStarted || windowsDLLRan)
                 // The il2cpp runtime stays up once started, and the two tests share the mini Win32:
@@ -213,7 +217,7 @@ struct ProbeView: View {
     /// First real IL2CPP probe: loads Fellworld's own GameAssembly.dll and calls il2cpp_init.
     /// The user places GameAssembly.dll and the game's *_Data folder in
     /// Files › On My iPhone › UB Probe › Game. No game file ships in the app.
-    private func runIl2cpp() {
+    private func runIl2cpp(engine: Bool) {
         jit = JITState.current
         guard jit == .ready else { return }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -244,6 +248,7 @@ struct ProbeView: View {
            let data = entries.first(where: { $0.lastPathComponent.hasSuffix("_Data") }) {
             dataDir = data
         }
+        let gameData = dataDir  // the <Game>_Data folder: the engine's data (M3e)
         let il2cppData = dataDir.appendingPathComponent("il2cpp_data", isDirectory: true)
         if FileManager.default.fileExists(atPath: il2cppData.appendingPathComponent("Metadata").path) {
             dataDir = il2cppData
@@ -262,10 +267,15 @@ struct ProbeView: View {
             // Husk's region first, while the address space is still unfragmented: its writable
             // view must end up within 3 GiB of the executable one.
             if haveUnity { _ = husk_ios_jit_get_mapping() }
+            ub_il2cpp_probe_set_engine_mode(engine ? 1 : 0)
             var buffer = [CChar](repeating: 0, count: 65536)
             let status = ub_il2cpp_probe_run(dll.path, dataDir.path, profile.path, &buffer, buffer.count)
             var text = String(cString: buffer) + "\nexit status \(status)"
-            if status == 0 {
+            if status == 0 && engine {
+                var unity = [CChar](repeating: 0, count: 16384)
+                let unityStatus = ub_unity_engine_run(unityDir.path, gameData.path, unityData.path, &unity, unity.count)
+                text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
+            } else if status == 0 {
                 var unity = [CChar](repeating: 0, count: 16384)
                 let unityStatus = ub_unity_probe_run(unityDir.path, unityData.path, &unity, unity.count)
                 text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"

@@ -8,14 +8,23 @@
 // The FEXCore + mini-Win32 glue mirrors engine/win32_device.cpp (the device-confirmed ubtest
 // runner): one guest thread per call through GuestEngine::CallWin64, TLS and SEH wired up, the
 // bridge realizing non-local resumes. It is duplicated here deliberately rather than shared, to
-// keep the proven ubtest runner untouched.
+// keep the proven ubtest runner untouched. Hardware faults (FEX's unaligned-atomic fixups) go through
+// the shared engine/mach_fault.
+//
+// After il2cpp_init the runtime lives for the rest of the process: il2cpp has started threads of its
+// own (the GC finalizer, ...) that keep running guest code, and the GC scans the main thread's
+// stack. So the engine, the main guest thread (stack + TEB), the loaded image and the thread runner
+// are never torn down after that point, and the probe runs once per app launch.
 #include "core/fex/fex_guest_engine.h"
+#include "engine/mach_fault.h"
 #include "loader/pe_image.h"
 #include "win32/hle.h"
 
 #include <FEXCore/Core/X86Enums.h>
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdarg>
 #include <cstdio>
@@ -27,18 +36,10 @@
 #include <pthread.h>
 #include <string>
 #include <sys/mman.h>
+#include <thread>
 #include <unistd.h>
 #include <variant>
 #include <vector>
-
-#if defined(__APPLE__)
-#ifndef _XOPEN_SOURCE
-#define _XOPEN_SOURCE 1  // Darwin <ucontext.h> hard-errors on its deprecated declarations without this
-#endif
-#include <ucontext.h>    // ucontext_t / _STRUCT_MCONTEXT64, to drive FEX's fault fixup
-#include <mach/mach.h>
-#include <mach/arm/thread_status.h>
-#endif
 
 namespace {
 
@@ -46,12 +47,8 @@ using namespace UnityBridge;
 namespace X86 = FEXCore::X86State;
 constexpr size_t kPage = 16384;
 
-// Lock-free breadcrumb: "dll!name" of the most recent Win32 import the guest dispatched. The crash
-// path reads it to name the API in progress (or the last one) when a fault leaves no other trace.
-char g_lastImport[160] = "(none yet)";
-
-void RegisterMachThisThread();  // registers the Mach fault port on the calling thread (defined below)
-void InstallMachHandler();      // creates the Mach exception port + service thread once (defined below)
+uintptr_t g_imageBase = 0, g_imageEnd = 0;  // GameAssembly.dll's mapped range, for logging offsets
+std::atomic<int> g_guestThreads {0};         // threads il2cpp created that are running guest code
 
 struct Report {
   std::string text;
@@ -87,10 +84,8 @@ public:
     Win32::CallContext c;
     c.id = static_cast<uint32_t>(frame.operation & 0xffff);
     {
-      const auto nm = runtime->StubName(c.id);  // record the API before it runs, for the crash path
-      std::snprintf(g_lastImport, sizeof(g_lastImport), "%.*s!%.*s",
-                    static_cast<int>(nm.first.size()), nm.first.data(),
-                    static_cast<int>(nm.second.size()), nm.second.data());
+      const auto nm = runtime->StubName(c.id);  // record the API before it runs, for a fault report
+      MachFault::NoteImport(nm.first, nm.second);
     }
     c.gpr[0] = frame.gpr[X86::REG_RCX];
     c.gpr[1] = frame.gpr[X86::REG_RDX];
@@ -231,9 +226,16 @@ void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
 }
 
 uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
-  RegisterMachThisThread();  // a guest thread il2cpp created: catch its hardware faults too
+  MachFault::RegisterThisThread();  // a guest thread il2cpp created: its hardware faults too
+  const unsigned long long offset = start >= g_imageBase && start < g_imageEnd ? start - g_imageBase : start;
+  std::fprintf(stderr, "UB_IL2CPP guest thread started: start=GameAssembly+%#llx (%d running)\n", offset,
+               ++g_guestThreads);
   GuestThread guest;
-  if (!guest.Create(*g_engine, nullptr)) return 0xffffffffu;
+  if (!guest.Create(*g_engine, nullptr)) {
+    --g_guestThreads;
+    MachFault::UnregisterThisThread();
+    return 0xffffffffu;
+  }
   RunTlsCallbacksOn(guest, Win32::DLL_THREAD_ATTACH);
   AetherPS4::Fex::Win64Call call;
   call.Rip = start;
@@ -249,6 +251,9 @@ uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
   RunTlsCallbacksOn(guest, Win32::DLL_THREAD_DETACH);
   Win32::FreeThreadTls(guest.tls);
   g_engine->DestroyThread(guest.thread);
+  std::fprintf(stderr, "UB_IL2CPP guest thread ended: start=GameAssembly+%#llx code=%#llx (%d running)\n", offset,
+               static_cast<unsigned long long>(code), --g_guestThreads);
+  MachFault::UnregisterThisThread();
   return code;
 }
 
@@ -343,225 +348,6 @@ void InstallCrashHandler() {
   for (size_t i = 0; i < std::size(kCaughtSignals); ++i) sigaction(kCaughtSignals[i], &a, &g_oldActions[i]);
 }
 
-void RestoreCrashHandler() {
-  for (size_t i = 0; i < std::size(kCaughtSignals); ++i) sigaction(kCaughtSignals[i], &g_oldActions[i], nullptr);
-}
-
-// ---- Mach exception handler (iOS) --------------------------------------------------------------
-// On iOS under StikDebug the debugger holds the TASK-level Mach exception port and tells debugserver
-// to IGNORE EXC_BAD_ACCESS/EXC_BAD_INSTRUCTION (QSetIgnoredExceptions, see third_party/madeira).
-// A hardware fault therefore reaches no handler at all -- the FEX port registers none -- and never
-// becomes a BSD signal, so FEXCore's own fault fixup never runs and the process dies silently.
-//
-// The faults we see are not il2cpp bugs: FEX translates x86 unaligned atomic / load-acquire accesses
-// (il2cpp's metadata structs are packed, so 8-byte fields land on 4-byte offsets) into ARM64
-// load-acquire (e.g. LDAPUR), which the CPU rejects when unaligned -> EXC_BAD_ACCESS. FEXCore handles
-// exactly this in HandleGuestSignal: on a BUS_ADRALN fault inside its code buffer it backpatches the
-// JIT'd instruction to a non-atomic sequence (so that site never faults again) and resumes one
-// instruction on. That path needs the FAULTING thread's thread-local FEX state, so it must run ON
-// that thread, not on the Mach service thread. We therefore register a THREAD-level port on each
-// guest thread (checked before the task port, so debugserver's BRK/JIT path is untouched), and the
-// service thread redirects the faulting thread onto MachTrampoline, which builds a ucontext from the
-// faulting state and calls HandleGuestSignal (BUS_ADRALN) to let FEX fix up. Only if FEX cannot
-// handle it does the trampoline log the full fault report (guest RIP/registers, exact faulting ARM64
-// words, last import) and _exit.
-//
-// Resuming after a successful fixup cannot use setcontext(): on Apple arm64 the ucontext functions
-// are stubs that fail with ENOTSUP (device-confirmed: the fixup succeeded, setcontext returned, and
-// the trampoline fell through to the fatal report). Instead the trampoline deliberately touches
-// kResumeMagic, an address inside __PAGEZERO; that second EXC_BAD_ACCESS reaches our port, and the
-// service thread recognises it and has the kernel load the fixed-up thread state plus the NEON state
-// captured at the original fault (thread_set_state), then resumes the guest. No libc, no assembly.
-#if defined(__APPLE__)
-constexpr uintptr_t kResumeMagic = 0xfe5c0;    // in __PAGEZERO (< 4 GiB): never mapped, so touching it faults
-volatile sig_atomic_t g_resumeReady = 0;       // set by the trampoline just before it touches kResumeMagic
-uintptr_t g_imageBase = 0, g_imageEnd = 0;     // GameAssembly.dll mapped range, for locating a guest RIP
-mach_port_t g_excPort = MACH_PORT_NULL;
-pthread_t g_excThread;
-volatile sig_atomic_t g_inFatal = 0;           // one-shot latch for the non-recoverable report
-volatile uint64_t g_faultHostPc = 0, g_faultAddr = 0, g_excCode = 0;
-volatile int g_excType = 0;
-_STRUCT_MCONTEXT64 g_savedMc;                   // faulting thread state handed to the trampoline
-alignas(16) uint8_t g_trampStack[256 * 1024];  // the trampoline runs here, safe even on a stack overflow
-
-#pragma pack(push, 4)
-struct ExcRequest {  // EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES message (MIG mach_exception_raise)
-  mach_msg_header_t Head;
-  mach_msg_body_t msgh_body;
-  mach_msg_port_descriptor_t thread;
-  mach_msg_port_descriptor_t task;
-  NDR_record_t NDR;
-  exception_type_t exception;
-  mach_msg_type_number_t codeCnt;
-  int64_t code[2];
-  uint8_t pad[64];  // room for the trailer the kernel appends on receive
-};
-struct ExcReply {
-  mach_msg_header_t Head;
-  NDR_record_t NDR;
-  kern_return_t RetCode;
-};
-#pragma pack(pop)
-
-// Runs ON the faulting thread (so FEX's thread-local state is live), on g_trampStack.
-void MachTrampoline() {
-  // First give FEX a chance to fix up an unaligned atomic/load-acquire access (the common case). It
-  // backpatches the JIT and, on success, we resume straight into the fixed-up guest -- no return.
-  siginfo_t si {};
-  si.si_signo = SIGBUS;
-  si.si_code = BUS_ADRALN;
-  si.si_addr = reinterpret_cast<void*>(g_faultAddr);
-  ucontext_t uc {};
-  uc.uc_mcontext = &g_savedMc;
-  uc.uc_mcsize = sizeof(g_savedMc);
-  if (AetherPS4::Fex::HandleGuestSignal(SIGBUS, &si, &uc)) {
-    // g_savedMc now holds pc+adjustment and the fixed-up registers. Hand it to the service thread,
-    // which loads it into this thread when the deliberate fault below arrives.
-    g_resumeReady = 1;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);  // publish g_savedMc/g_resumeReady before the fault
-    *reinterpret_cast<volatile uint32_t*>(kResumeMagic) = 0;
-    _exit(72);  // unreachable: the service thread never resumes us here
-  }
-
-  // Not a recoverable alignment fault: a real fault in il2cpp or our HLE. Report it once and die.
-  if (g_inFatal) _exit(71);
-  g_inFatal = 1;
-  g_inCrash = 1;
-  char buf[4096];
-  std::snprintf(buf, sizeof(buf),
-                "\nUB_IL2CPP ==== FATAL MACH EXCEPTION type=%d code=%#llx fault_addr=%#llx host_pc=%#llx ====\n",
-                g_excType, static_cast<unsigned long long>(g_excCode),
-                static_cast<unsigned long long>(g_faultAddr), static_cast<unsigned long long>(g_faultHostPc));
-  WriteStr(buf);
-  WriteStr("UB_IL2CPP last win32 import before fault: ");
-  WriteStr(g_lastImport);
-  WriteStr("\n");
-
-  uint64_t rip = 0, syscallNo = 0;
-  if (AetherPS4::Fex::BachataQueryGuestRipSyscall(&rip, &syscallNo)) {
-    std::snprintf(buf, sizeof(buf), "UB_IL2CPP guest rip=%#llx rax(syscall)=%#llx\n",
-                  static_cast<unsigned long long>(rip), static_cast<unsigned long long>(syscallNo));
-    WriteStr(buf);
-    if (g_imageBase && rip >= g_imageBase && rip < g_imageEnd) {
-      std::snprintf(buf, sizeof(buf), "UB_IL2CPP   -> inside GameAssembly.dll at +%#llx\n",
-                    static_cast<unsigned long long>(rip - g_imageBase));
-      WriteStr(buf);
-    }
-  } else {
-    WriteStr("UB_IL2CPP no active FEX guest thread at the fault\n");
-  }
-  uint64_t rsp = 0;
-  if (AetherPS4::Fex::BachataDumpGuestRegisters(buf, sizeof(buf), &rsp)) { WriteStr(buf); WriteStr("\n"); }
-  // The exact faulting ARM64 instruction words (host PC from the Mach message is precise, unlike the
-  // guest RIP which is only the last checkpoint); also tells us if the fault is inside a JIT buffer.
-  if (g_faultHostPc &&
-      AetherPS4::Fex::BachataDumpHostCodeWords(reinterpret_cast<void*>(g_faultHostPc), buf, sizeof(buf))) {
-    WriteStr(buf);
-    WriteStr("\n");
-  }
-  if (g_faultAddr &&
-      AetherPS4::Fex::BachataDescribeHostFaultAddress(reinterpret_cast<void*>(g_faultAddr), buf, sizeof(buf))) {
-    WriteStr(buf);
-    WriteStr("\n");
-  }
-  WriteStr("UB_IL2CPP ==== end of fault report; exiting ====\n");
-  _exit(70);
-}
-
-void SendReply(ExcRequest* req, kern_return_t ret) {
-  ExcReply reply {};
-  reply.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(req->Head.msgh_bits), 0);
-  reply.Head.msgh_size = sizeof(reply);
-  reply.Head.msgh_remote_port = req->Head.msgh_remote_port;
-  reply.Head.msgh_local_port = MACH_PORT_NULL;
-  reply.Head.msgh_id = req->Head.msgh_id + 100;  // MIG reply id convention
-  reply.NDR = NDR_record;
-  reply.RetCode = ret;
-  mach_msg(&reply.Head, MACH_SEND_MSG, sizeof(reply), 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-}
-
-void* MachServer(void*) {
-  for (;;) {
-    ExcRequest req {};
-    kern_return_t kr = mach_msg(&req.Head, MACH_RCV_MSG, 0, sizeof(req), g_excPort,
-                                MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-    if (kr != KERN_SUCCESS) continue;
-
-    const mach_port_t faultThread = req.thread.name;
-    const uint64_t faultAddr = req.codeCnt >= 2 ? static_cast<uint64_t>(req.code[1]) : 0;
-
-    // The trampoline's deliberate fault after a successful FEX fixup: load the fixed-up state (and
-    // the NEON state captured at the original fault) into the thread and resume the guest.
-    if (g_resumeReady && faultAddr == kResumeMagic) {
-      g_resumeReady = 0;
-      thread_set_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&g_savedMc.__ss),
-                       ARM_THREAD_STATE64_COUNT);
-      thread_set_state(faultThread, ARM_NEON_STATE64, reinterpret_cast<thread_state_t>(&g_savedMc.__ns),
-                       ARM_NEON_STATE64_COUNT);
-      SendReply(&req, KERN_SUCCESS);
-      continue;
-    }
-
-    g_excType = req.exception;
-    g_excCode = req.codeCnt >= 1 ? static_cast<uint64_t>(req.code[0]) : 0;
-    g_faultAddr = faultAddr;
-
-    // Redirect the faulting thread onto the trampoline (so FEX's thread-local fixup runs on the right
-    // thread). Not one-shot: every unaligned site faults once, is fixed up and resumed, and never
-    // faults again -- so we must keep handling. The trampoline's own g_inFatal latch stops a loop if
-    // a fault is genuinely unrecoverable. No per-fault logging here: the common case is a silent,
-    // successful fixup, and logging each one would flood probe.log.
-    arm_thread_state64_t ts {};
-    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
-    if (g_inFatal == 0 &&
-        thread_get_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), &count) == KERN_SUCCESS) {
-      g_faultHostPc = (uint64_t)(arm_thread_state64_get_pc(ts));  // macro yields uint64 (arm64) or void* (arm64e)
-      g_savedMc.__ss = ts;  // the trampoline fixes this up (and resumes) or reports it
-      // Captured now, before the trampoline's C code clobbers them, and restored on resume.
-      mach_msg_type_number_t neonCount = ARM_NEON_STATE64_COUNT;
-      thread_get_state(faultThread, ARM_NEON_STATE64, reinterpret_cast<thread_state_t>(&g_savedMc.__ns), &neonCount);
-      arm_thread_state64_t nts = ts;
-      const uintptr_t sp = (reinterpret_cast<uintptr_t>(g_trampStack) + sizeof(g_trampStack)) & ~uintptr_t {15};
-      arm_thread_state64_set_sp(nts, sp);
-      arm_thread_state64_set_pc_fptr(nts, &MachTrampoline);
-      thread_set_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&nts), ARM_THREAD_STATE64_COUNT);
-      SendReply(&req, KERN_SUCCESS);  // resume the faulting thread at the trampoline
-    } else {
-      SendReply(&req, KERN_FAILURE);  // in the fatal report already (or no state): let it die honestly
-    }
-  }
-  return nullptr;
-}
-
-// Registers our Mach port on the calling thread for the hardware-fault exceptions. Thread-level
-// ports are consulted before the task port, so this takes priority over debugserver without
-// replacing its handling of BRK (EXC_BREAKPOINT), which we never register for.
-void RegisterMachThisThread() {
-  if (g_excPort == MACH_PORT_NULL) return;
-  mach_port_t self = mach_thread_self();
-  thread_set_exception_ports(self, EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_ARITHMETIC,
-                             g_excPort, EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES, ARM_THREAD_STATE64);
-  mach_port_deallocate(mach_task_self(), self);
-}
-
-// Creates the exception port and its service thread once per process; idempotent.
-void InstallMachHandler() {
-  if (g_excPort != MACH_PORT_NULL) return;
-  const mach_port_t task = mach_task_self();
-  if (mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &g_excPort) != KERN_SUCCESS) {
-    g_excPort = MACH_PORT_NULL;
-    return;
-  }
-  mach_port_insert_right(task, g_excPort, g_excPort, MACH_MSG_TYPE_MAKE_SEND);
-  pthread_create(&g_excThread, nullptr, &MachServer, nullptr);
-  pthread_detach(g_excThread);
-  RegisterMachThisThread();  // the probe's own guest thread runs here
-}
-#else
-void RegisterMachThisThread() {}
-void InstallMachHandler() {}
-#endif
-
 } // namespace
 
 // Loads GameAssembly.dll from `dllPath`, points il2cpp at `dataDir` (the host path of the game's
@@ -574,6 +360,13 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
     return status;
   };
   report.Line("UnityBridge IL2CPP probe: GameAssembly.dll under FEXCore");
+  // il2cpp_init can run once per process, and the runtime it starts lives until the app exits.
+  static bool s_ran = false;
+  if (s_ran) {
+    report.Line("Already ran in this app session: il2cpp is up and stays up. Close and reopen the app to run again.");
+    return finish(3);
+  }
+  s_ran = true;
 
   std::ifstream in(dllPath, std::ios::binary);
   const std::vector<uint8_t> file {std::istreambuf_iterator<char>(in), {}};
@@ -589,7 +382,9 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   static Win32::Runtime runtime(Win32::StubKind::Bridge, {static_cast<uint8_t*>(stubs.base), stubs.size});
   Win32::Runtime::SetCurrent(&runtime);
 
-  auto loaded = Pe::Load(file, [](const Pe::Import& imp) { return Win32::Runtime::Current()->Resolve(imp.dll, imp.Symbol()); });
+  // Kept for the process: the registered module's export lookup refers to this image.
+  auto& loaded = *new Pe::LoadResult(
+      Pe::Load(file, [](const Pe::Import& imp) { return Win32::Runtime::Current()->Resolve(imp.dll, imp.Symbol()); }));
   if (!loaded.image) {
     report.Line("FAIL load: %s", loaded.error.c_str());
     return finish(1);
@@ -631,7 +426,8 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   Win32::SetGuestCaller(&CallGuestNested);
   Win32::SetThreadRunner(&RunGuestThread);
 
-  GuestThread guest;
+  // The main guest thread outlives this call: il2cpp registers its stack with the GC.
+  GuestThread& guest = *new GuestThread;
   if (!guest.Create(*engine, &report)) {
     Win32::SetGuestCaller(nullptr);
     Win32::SetThreadRunner(nullptr);
@@ -643,12 +439,11 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   // Catch a fault inside il2cpp (or our handlers) and log the guest RIP before the process dies.
   InstallCrashHandler();
   report.Line("crash catcher installed (SIGSEGV/BUS/ABRT/ILL/FPE)");
-#if defined(__APPLE__)
   g_imageBase = reinterpret_cast<uintptr_t>(image.base);
   g_imageEnd = g_imageBase + image.size;
-  InstallMachHandler();
-  report.Line("mach exception handler installed (BAD_ACCESS/BAD_INSTRUCTION/ARITHMETIC)");
-#endif
+  MachFault::Install(g_imageBase, g_imageEnd);
+  MachFault::RegisterThisThread();
+  report.Line("mach exception handler installed (BAD_ACCESS/BAD_INSTRUCTION/ARITHMETIC, per thread)");
 
   // The loader runs the module's TLS callbacks and then DllMain with DLL_PROCESS_ATTACH.
   RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_ATTACH);
@@ -660,7 +455,7 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
 
   // Point il2cpp at the game's data folder (where it finds il2cpp_data/Metadata/global-metadata.dat).
   // The path is a Windows path mapping back to the device folder through the mini Win32.
-  const std::string dataDirWin = Win32::ToUtf8(Win32::WindowsPath(dataDir ? dataDir : ""));
+  static const std::string dataDirWin = Win32::ToUtf8(Win32::WindowsPath(dataDir ? dataDir : ""));
   report.Line("data dir: %s  ->  %s", dataDir ? dataDir : "(none)", dataDirWin.c_str());
   CallExport(guest, report, image, "il2cpp_set_data_dir", {reinterpret_cast<uintptr_t>(dataDirWin.c_str())});
   CallExport(guest, report, image, "il2cpp_set_config_dir", {reinterpret_cast<uintptr_t>(dataDirWin.c_str())});
@@ -688,12 +483,18 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   const bool ok = initResult && *initResult != 0;
   report.Line("RESULT: %s", ok ? "il2cpp_init succeeded" : "il2cpp_init did not succeed (see above)");
 
-  RestoreCrashHandler();
-  Win32::FreeThreadTls(guest.tls);
-  engine->DestroyThread(guest.thread);
-  Win32::SetGuestCaller(nullptr);
-  Win32::SetThreadRunner(nullptr);
-  engine->Shutdown();
-  g_engine = nullptr;
+  // No teardown from here on (see the top of the file): il2cpp's threads keep running guest code.
+  // Only this host thread goes away, so it leaves fault handling; its guest stack and TEB stay.
+  (void)engine.release();
+  report.Line("guest threads still running: %d (engine kept alive for them)", g_guestThreads.load());
+  MachFault::UnregisterThisThread();
+
+  // Proof of life for the runtime: if the app survives, these show up in probe.log.
+  std::thread([] {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::fprintf(stderr, "UB_IL2CPP still alive 5 s after il2cpp_init (%d guest threads running)\n", g_guestThreads.load());
+    std::this_thread::sleep_for(std::chrono::seconds(25));
+    std::fprintf(stderr, "UB_IL2CPP still alive 30 s after il2cpp_init (%d guest threads running)\n", g_guestThreads.load());
+  }).detach();
   return finish(ok ? 0 : 1);
 }

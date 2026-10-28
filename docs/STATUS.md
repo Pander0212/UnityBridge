@@ -260,9 +260,22 @@ Building blocks chosen (2026-10-26) [R]:
         debugger would. Follow-ups, before the real game runs:
         - check whether that raise sat inside a `__try` our SEH dispatcher missed (or whether il2cpp
           simply relies on a debugger/vectored handler to swallow it);
-        - the Mach fixup path is single-fault-at-a-time (one global saved context + trampoline stack);
-          make it per-thread before game threads run concurrently, and move it from the probe into the
-          shared device engine so `win32_device.cpp` and the M3 path get it too.
+        - ~~the Mach fixup path is single-fault-at-a-time~~ — done, see the next entry.
+      - **The app still crashed after that success** (the log ended at `RESULT: il2cpp_init succeeded`).
+        Cause: the probe then tore everything down — `SetThreadRunner(nullptr)`, `engine->Shutdown()`,
+        `g_engine = nullptr`, the main guest thread's stack and TEB unmapped — while the threads
+        il2cpp_init had started (`CreateThread` → a detached host thread running guest code: the GC
+        finalizer, …) kept running guest code, and the GC holds the main thread's stack. **Fix:**
+        after `il2cpp_init` nothing is torn down any more (engine, main guest thread, loaded image,
+        thread runner live for the process; the probe runs once per app launch), guest threads are
+        logged as they start/end, and the probe logs a proof of life 5 s and 30 s later.
+      - **Fault handling moved into a shared module, per thread** (`engine/mach_fault.{h,cpp}`, used
+        by `il2cpp_probe.cpp` and now also the ubtest runner `win32_device.cpp`): each registered
+        host thread has its own saved context, trampoline stack and breadcrumb (no global state shared
+        between faulting threads); fixups are serialised and remembered per site, so a second thread
+        faulting on an instruction another thread already patched just re-runs it; the port rights each
+        exception message carries are released; a thread faulting while another writes the report
+        parks, so the report is never cut short.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

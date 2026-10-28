@@ -13,6 +13,7 @@
 // share a 16 KiB iOS page, which the engine's static MappedRanges (16 KiB aligned, never writable
 // and executable) cannot express.
 #include "core/fex/fex_guest_engine.h"
+#include "engine/mach_fault.h"
 #include "loader/pe_image.h"
 #include "win32/hle.h"
 
@@ -238,8 +239,12 @@ void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
 }
 
 uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
+  MachFault::RegisterThisThread();  // report a hardware fault instead of dying silently
   GuestThread guest;
-  if (!guest.Create(*g_engine, nullptr)) return 0xffffffffu;
+  if (!guest.Create(*g_engine, nullptr)) {
+    MachFault::UnregisterThisThread();
+    return 0xffffffffu;
+  }
   // The Windows loader runs the TLS callbacks with DLL_THREAD_ATTACH before the start routine.
   RunTlsCallbacksOn(guest, Win32::DLL_THREAD_ATTACH);
   AetherPS4::Fex::Win64Call call;
@@ -256,6 +261,7 @@ uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
   RunTlsCallbacksOn(guest, Win32::DLL_THREAD_DETACH);
   Win32::FreeThreadTls(guest.tls);
   g_engine->DestroyThread(guest.thread);
+  MachFault::UnregisterThisThread();
   return code;
 }
 
@@ -364,6 +370,10 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
     return finish(1);
   }
 
+  // Hardware faults in guest code: FEX's unaligned-atomic fixups, or a fault report (engine/mach_fault).
+  MachFault::Install(reinterpret_cast<uintptr_t>(image.base), reinterpret_cast<uintptr_t>(image.base) + image.size);
+  MachFault::RegisterThisThread();
+
   int failures = 0;
 
   // The initial thread runs the TLS callbacks with DLL_PROCESS_ATTACH before any export, as the
@@ -395,6 +405,7 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   report.Line("%-40s %s", "unimplemented import returns 0", missingOk ? "ok" : "FAIL");
 
   RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_DETACH);
+  MachFault::UnregisterThisThread();
   Win32::FreeThreadTls(guest.tls);
   engine->DestroyThread(guest.thread);
   Win32::SetGuestCaller(nullptr);

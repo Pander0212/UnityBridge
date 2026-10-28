@@ -437,8 +437,11 @@ static void *thread_trampoline(void *p)
     return r;
 }
 
+static int g_threads;  // started by the Android libraries
+
 static int ub_pthread_create(void *thread, const void *attr, void *(*fn)(void *), void *arg)
 {
+    __atomic_add_fetch(&g_threads, 1, __ATOMIC_RELAXED);
     thread_start *s = malloc(sizeof(*s));
     if (!s) return 12;  // ENOMEM
     s->fn = fn;
@@ -446,6 +449,21 @@ static int ub_pthread_create(void *thread, const void *attr, void *(*fn)(void *)
     const int r = g_bionic_pthread_create(thread, attr, thread_trampoline, s);
     if (r != 0) free(s);
     return r;
+}
+
+// ---- fewer cores ----------------------------------------------------------------------------------
+// The engine starts a job worker per core but one (and per-thread allocators with their own 256 MiB
+// regions, below), which the address space of an app without the extended-virtual-addressing
+// entitlement cannot hold (M3f). Husk reports TL_NCPU cores in sysconf and /proc and /sys; its
+// sched_getaffinity, where Unity reads its big.LITTLE mask, does not, hence this one.
+#define UB_NCPU "2"
+static int ub_sched_getaffinity(int pid, size_t size, void *mask)
+{
+    (void)pid;
+    memset(mask, 0, size);
+    const long n = atol(getenv("TL_NCPU") ? getenv("TL_NCPU") : UB_NCPU);
+    for (long i = 0; i < n && (size_t)(i / 8) < size; i++) ((uint8_t *)mask)[i / 8] |= (uint8_t)(1u << (i % 8));
+    return 0;
 }
 
 // ---- aligned reservations without the slack -----------------------------------------------------
@@ -641,6 +659,7 @@ static bool interpose(void)
     tl_ld_interpose("android_dlopen_ext", (void *)&ub_android_dlopen_ext);
     tl_ld_interpose("dlsym", (void *)&ub_dlsym);
     if (g_bionic_pthread_create) tl_ld_interpose("pthread_create", (void *)&ub_pthread_create);
+    tl_ld_interpose("sched_getaffinity", (void *)&ub_sched_getaffinity);
     if (g_bionic_mmap && g_bionic_munmap) {
         tl_ld_interpose("mmap", (void *)&ub_mmap);
         tl_ld_interpose("mmap64", (void *)&ub_mmap);
@@ -743,6 +762,7 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     // M3f: who holds the address space. Every guest mmap/munmap; one of 64 MiB or more also names
     // the library function that asked. (TL_EGL_TRACE showed EGL working; off again, it is noisy.)
     setenv("TL_MM_TRACE", "1", 1);
+    setenv("TL_NCPU", UB_NCPU, 0);  // fewer job workers: see ub_sched_getaffinity
     tl_jni_register_hle(g_dialog_hle);  // before Husk's own tables: these win
     ub_unity_thread_enter();
     if (!interpose()) { ub_unity_thread_leave(); return 1; }
@@ -760,8 +780,8 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
         if (s == 1 || s == 5 || s == 10 || s == 30 || s == 60) {
             ub_il2cpp_engine_report(report, sizeof(report));
             line("after %d s: %lu frames (%lu presented); libil2cpp.so %d dlopen, %d dlsym (%d not exported); %d aligned "
-                 "reservations (%d not); %s", s, tl_unity_frames(), tl_egl_frames_presented(), g_il2cpp_opens, g_il2cpp_syms,
-                 g_il2cpp_missing, g_aligned, g_aligned_failed, report);
+                 "reservations (%d not); %d threads started; %s", s, tl_unity_frames(), tl_egl_frames_presented(), g_il2cpp_opens,
+                 g_il2cpp_syms, g_il2cpp_missing, g_aligned, g_aligned_failed, g_threads, report);
             ub_memory_dump("UB_MEM");
         }
     }

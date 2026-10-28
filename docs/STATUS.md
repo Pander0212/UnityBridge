@@ -774,6 +774,15 @@ Next steps, in order:
         tail it then unmaps was never mapped and is ignored. Needs an aligned 256 MiB slot instead
         of a 512 MiB gap and leaves no trimmed holes. The report counts these reservations. If
         Unity wants more regions than ~8 GiB hold, the next lever is fewer or smaller regions.
+      - **Device run:** the aligned reservations work (`13 aligned reservations (0 not)` after
+        1 s, no trimmed holes), but the engine still wants more: at the fault ~16 regions (3,984
+        MiB reserved), 856 MiB free in pieces, the largest 368 MiB, and no aligned 256 MiB slot
+        left, so the fallback through Husk failed too (`mmap FAILED`, same null write). Thread
+        stacks (tag 30) grew from 106 to 528 MiB while the engine ran.
+      - **Next, [i] pending:** the Android side sees 2 cores (`TL_NCPU=2`, and a
+        `sched_getaffinity` in front of Husk's, which ignores it; Unity read its big.LITTLE mask
+        `0x3f` there): fewer job workers, so fewer threads, stacks and per-thread allocators with
+        their regions. The report counts the threads the Android libraries start.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

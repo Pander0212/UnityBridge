@@ -757,6 +757,23 @@ Next steps, in order:
         address space from `TASK_VM_INFO.max_address` and counts the space above the last mapping.
         The entitlement `com.apple.developer.kernel.extended-virtual-addressing` is requested;
         whether the signing grants it shows in that end address. `TL_EGL_TRACE` off again.
+      - **Device run (signed with a free developer account in Sideloadly):** the address space
+        ends at `0x458000000` (~17.4 GiB; the entitlement is not granted, as expected for a free
+        account). The trace names the holder: **libunity's low-level virtual-memory allocator**
+        (vtable at libunity+0x1804960, reserve at +0x36595c) reserves a 256 MiB region aligned to
+        256 MiB per allocator (alignment hard-wired, `mov w8, #0x10000000`; ownership keyed by
+        address >> 28) through Baselib's reserve (+0xeec74): `mmap(NULL, 0x1fffc000, PROT_NONE)`,
+        then `munmap` of the edges outside the aligned window. Ten regions at start-up, more while
+        running, sixteen (4 GiB) at the fault; the guest's mmaps net 4.6 GiB, the footprint is
+        ~300 MiB. The seventeenth found no 512 MiB gap (880 MiB free in pieces). No large
+        `VirtualAlloc` on the game side.
+      - **Fix, [i] pending:** `mmap`/`mmap64`/`munmap` of the Android libraries are interposed in
+        front of Husk's (`unity_loader.c`): a reservation of the form `2R - page` (R a power of
+        two >= 64 MiB, anonymous, PROT_NONE, no address) gets the aligned window directly from
+        `vm_map` with an alignment mask, so Baselib finds it aligned and skips the front unmap; the
+        tail it then unmaps was never mapped and is ignored. Needs an aligned 256 MiB slot instead
+        of a 512 MiB gap and leaves no trimmed holes. The report counts these reservations. If
+        Unity wants more regions than ~8 GiB hold, the next lever is fewer or smaller regions.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

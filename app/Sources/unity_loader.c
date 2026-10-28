@@ -39,6 +39,10 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <zlib.h>
+#include <sys/mman.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 
 // Husk's runtime (husk-tl-jni-loop.c), not in its headers: call a method on a java.lang.reflect.Proxy
 // the engine or C# built, through Unity's native proxy bridge.
@@ -444,6 +448,98 @@ static int ub_pthread_create(void *thread, const void *attr, void *(*fn)(void *)
     return r;
 }
 
+// ---- aligned reservations without the slack -----------------------------------------------------
+// Unity's low-level virtual-memory allocator gives each of its allocators regions of 256 MiB aligned
+// to 256 MiB (it keys ownership by address >> 28). Baselib gets one by reserving twice that less a
+// page (an mmap of 0x1fffc000, PROT_NONE) and unmapping the edges outside the aligned window. An app
+// without the extended-virtual-addressing entitlement has ~8 GiB beside the shared cache (M3f): the
+// sixteenth or so region finds no 512 MiB gap, and every trimmed edge leaves a hole behind. Here such
+// a request gets the aligned window directly (vm_map with an alignment mask; Baselib then finds it
+// aligned and skips the front unmap), and the tail it then unmaps -- never mapped -- is ignored.
+typedef void *(*mmap_fn)(void *, size_t, int, int, int, long);
+typedef int (*munmap_fn)(void *, size_t);
+static mmap_fn g_bionic_mmap;
+static munmap_fn g_bionic_munmap;
+#define UB_MAX_TAILS 128
+static struct { uintptr_t start, end; } g_tails[UB_MAX_TAILS];  // the unmapped tails, by range
+static pthread_mutex_t g_tails_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_aligned, g_aligned_failed;
+
+// The window size R if (len, prot, flags) is "R aligned to R" in Baselib's form: len = 2R - page, R a
+// power of two of at least 64 MiB, an anonymous private reservation with no address asked for.
+static size_t aligned_request(void *addr, size_t len, int prot, int flags, int fd)
+{
+    if (addr || prot != 0 || fd != -1 || flags != 0x22) return 0;  // MAP_PRIVATE | MAP_ANONYMOUS
+    static const size_t pages[] = {4096, 16384, 65536};
+    for (int i = 0; i < 3; i++) {
+        const size_t r = (len + pages[i]) / 2;
+        if ((len + pages[i]) % 2 == 0 && r >= ((size_t)64 << 20) && (r & (r - 1)) == 0) return r;
+    }
+    return 0;
+}
+
+static void *reserve_aligned(size_t r)
+{
+#ifdef __APPLE__
+    vm_address_t a = 0;
+    if (vm_map(mach_task_self(), &a, r, r - 1, VM_FLAGS_ANYWHERE, MACH_PORT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL,
+               VM_INHERIT_COPY) != KERN_SUCCESS)
+        return NULL;
+    return (void *)a;
+#else
+    void *p = mmap(NULL, 2 * r, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    const uintptr_t b = (uintptr_t)p, a = (b + r - 1) & ~(uintptr_t)(r - 1);
+    if (a > b) munmap(p, a - b);
+    munmap((void *)(a + r), b + 2 * r - (a + r));
+    return (void *)a;
+#endif
+}
+
+static void *ub_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
+{
+    const size_t r = aligned_request(addr, len, prot, flags, fd);
+    if (r) {
+        void *a = reserve_aligned(r);
+        pthread_mutex_lock(&g_tails_lock);
+        int slot = -1;
+        for (int i = 0; a && i < UB_MAX_TAILS && slot < 0; i++) if (!g_tails[i].start) slot = i;
+        if (a && slot >= 0) {
+            g_tails[slot].start = (uintptr_t)a + r;
+            g_tails[slot].end = (uintptr_t)a + len;
+            ++g_aligned;
+        } else {
+            ++g_aligned_failed;
+        }
+        pthread_mutex_unlock(&g_tails_lock);
+        if (a && slot >= 0) {
+            if (g_aligned <= 3) line("  aligned reservation: %zu MiB at %p directly (asked %#zx)", r >> 20, a, len);
+            return a;
+        }
+        if (a) munmap(a, r);  // no slot left to remember the tail: Husk's way instead
+    }
+    return g_bionic_mmap(addr, len, prot, flags, fd, off);
+}
+
+static int ub_munmap(void *addr, size_t len)
+{
+    const uintptr_t a = (uintptr_t)addr, e = a + len;
+    pthread_mutex_lock(&g_tails_lock);
+    for (int i = 0; i < UB_MAX_TAILS; i++) {
+        if (!g_tails[i].start || a >= g_tails[i].end || e <= g_tails[i].start) continue;
+        // Within a tail: nothing there is ours. The tail goes once all of it was given back.
+        const bool whole = a <= g_tails[i].start && e >= g_tails[i].end;
+        const uintptr_t keep_end = g_tails[i].start;
+        if (whole) g_tails[i].start = g_tails[i].end = 0;
+        pthread_mutex_unlock(&g_tails_lock);
+        // A range that also covers mapped memory before the tail: that part is unmapped for real.
+        if (a < keep_end) return g_bionic_munmap(addr, keep_end - a);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_tails_lock);
+    return g_bionic_munmap(addr, len);
+}
+
 // ---- dialogs are answered -----------------------------------------------------------------------
 // Husk's Java world shows an AlertDialog by logging it ("DIALOG ...") and never presses a button, so
 // an engine that waits for the answer (Unity's "device does not match the hardware requirements"
@@ -538,11 +634,18 @@ static bool interpose(void)
     g_bionic_dlopen_ext = (dlopen_ext_fn)tl_bionic_find("android_dlopen_ext");
     g_bionic_dlsym = (dlsym_fn)tl_bionic_find("dlsym");
     g_bionic_pthread_create = (pthread_create_fn)tl_bionic_find("pthread_create");
+    g_bionic_mmap = (mmap_fn)tl_bionic_find("mmap");
+    g_bionic_munmap = (munmap_fn)tl_bionic_find("munmap");
     if (!g_bionic_dlopen || !g_bionic_dlsym) { line("FAIL Husk's bionic has no dlopen/dlsym"); return false; }
     tl_ld_interpose("dlopen", (void *)&ub_dlopen);
     tl_ld_interpose("android_dlopen_ext", (void *)&ub_android_dlopen_ext);
     tl_ld_interpose("dlsym", (void *)&ub_dlsym);
     if (g_bionic_pthread_create) tl_ld_interpose("pthread_create", (void *)&ub_pthread_create);
+    if (g_bionic_mmap && g_bionic_munmap) {
+        tl_ld_interpose("mmap", (void *)&ub_mmap);
+        tl_ld_interpose("mmap64", (void *)&ub_mmap);
+        tl_ld_interpose("munmap", (void *)&ub_munmap);
+    }
     tl_ld_set_verbosity(1);
     return true;
 }
@@ -656,8 +759,9 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
         sleep(1);
         if (s == 1 || s == 5 || s == 10 || s == 30 || s == 60) {
             ub_il2cpp_engine_report(report, sizeof(report));
-            line("after %d s: %lu frames (%lu presented); libil2cpp.so %d dlopen, %d dlsym (%d not exported); %s", s, tl_unity_frames(),
-                 tl_egl_frames_presented(), g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing, report);
+            line("after %d s: %lu frames (%lu presented); libil2cpp.so %d dlopen, %d dlsym (%d not exported); %d aligned "
+                 "reservations (%d not); %s", s, tl_unity_frames(), tl_egl_frames_presented(), g_il2cpp_opens, g_il2cpp_syms,
+                 g_il2cpp_missing, g_aligned, g_aligned_failed, report);
             ub_memory_dump("UB_MEM");
         }
     }

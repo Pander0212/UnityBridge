@@ -33,6 +33,7 @@
 #include "core/fex/fex_guest_engine.h"
 
 #include <csignal>
+#include <dlfcn.h>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -84,6 +85,79 @@ thread_local char t_lastImport[160] = "(none yet)";
 
 void WriteStr(const char* s) {
   if (s) { ssize_t n = write(2, s, std::strlen(s)); (void)n; }
+}
+
+// Husk's loader, when linked in (the probe app): names addresses inside the Android libraries it
+// loaded, which dladdr does not know.
+extern "C" const char* tl_ld_symbol_at(const void* addr, const char** lib_name, const void** sym_addr)
+    __attribute__((weak_import));
+
+// "addr = image!symbol+offset" for a host address: the app and system images through dladdr, the
+// Android libraries through Husk's loader.
+void DescribeAddress(const char* what, uint64_t addr) {
+  char buf[512];
+  Dl_info info {};
+  if (addr && dladdr(reinterpret_cast<void*>(addr), &info) && info.dli_fname) {
+    const char* image = std::strrchr(info.dli_fname, '/');
+    image = image ? image + 1 : info.dli_fname;
+    const uint64_t base = reinterpret_cast<uint64_t>(info.dli_saddr ? info.dli_saddr : info.dli_fbase);
+    std::snprintf(buf, sizeof(buf), "UB_FAULT %s %#llx = %s!%s+%#llx (image +%#llx)\n", what,
+                  static_cast<unsigned long long>(addr), image, info.dli_sname ? info.dli_sname : "?",
+                  static_cast<unsigned long long>(addr - base),
+                  static_cast<unsigned long long>(addr - reinterpret_cast<uint64_t>(info.dli_fbase)));
+    WriteStr(buf);
+    return;
+  }
+  if (addr && tl_ld_symbol_at) {
+    const char* lib = nullptr;
+    const void* symAddr = nullptr;
+    const char* sym = tl_ld_symbol_at(reinterpret_cast<const void*>(addr), &lib, &symAddr);
+    if (lib) {
+      std::snprintf(buf, sizeof(buf), "UB_FAULT %s %#llx = %s!%s+%#llx\n", what, static_cast<unsigned long long>(addr),
+                    lib, sym ? sym : "?",
+                    static_cast<unsigned long long>(addr - reinterpret_cast<uint64_t>(symAddr)));
+      WriteStr(buf);
+      return;
+    }
+  }
+  std::snprintf(buf, sizeof(buf), "UB_FAULT %s %#llx (no image)\n", what, static_cast<unsigned long long>(addr));
+  WriteStr(buf);
+}
+
+// The faulting thread's registers and its frame-pointer chain. Memory is read with
+// vm_read_overwrite, so a broken frame ends the walk instead of faulting inside the report.
+void DumpHostState(const _STRUCT_MCONTEXT64& mc) {
+  char buf[256];
+  for (int i = 0; i < 29; i += 4) {
+    int n = std::snprintf(buf, sizeof(buf), "UB_FAULT ");
+    for (int k = i; k < i + 4 && k < 29; ++k)
+      n += std::snprintf(buf + n, sizeof(buf) - n, " x%-2d=%016llx", k, static_cast<unsigned long long>(mc.__ss.__x[k]));
+    std::snprintf(buf + n, sizeof(buf) - n, "\n");
+    WriteStr(buf);
+  }
+  const uint64_t fp = (uint64_t)(arm_thread_state64_get_fp(mc.__ss)), lr = (uint64_t)(arm_thread_state64_get_lr(mc.__ss)),
+                 sp = (uint64_t)(arm_thread_state64_get_sp(mc.__ss)), pc = (uint64_t)(arm_thread_state64_get_pc(mc.__ss));
+  std::snprintf(buf, sizeof(buf), "UB_FAULT  fp=%016llx lr=%016llx sp=%016llx pc=%016llx\n",
+                static_cast<unsigned long long>(fp), static_cast<unsigned long long>(lr),
+                static_cast<unsigned long long>(sp), static_cast<unsigned long long>(pc));
+  WriteStr(buf);
+  DescribeAddress("pc", pc & 0x0000ffffffffffffull);
+  DescribeAddress("lr", lr & 0x0000ffffffffffffull);
+  uint64_t frame = fp;
+  for (int depth = 0; depth < 24 && frame && !(frame & 7); ++depth) {
+    uint64_t pair[2] = {};
+    vm_size_t got = 0;
+    if (vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(frame), sizeof(pair),
+                          reinterpret_cast<vm_address_t>(pair), &got) != KERN_SUCCESS || got != sizeof(pair))
+      break;
+    const uint64_t ret = pair[1] & 0x0000ffffffffffffull;  // strip a pointer-authentication signature
+    if (!ret) break;
+    char what[16];
+    std::snprintf(what, sizeof(what), "#%d", depth);
+    DescribeAddress(what, ret);
+    if (pair[0] <= frame) break;  // frames grow upward; anything else is not a chain
+    frame = pair[0];
+  }
 }
 
 #pragma pack(push, 4)
@@ -139,6 +213,7 @@ struct ExcReply {
   }
   uint64_t rsp = 0;
   if (AetherPS4::Fex::BachataDumpGuestRegisters(buf, sizeof(buf), &rsp)) { WriteStr(buf); WriteStr("\n"); }
+  DumpHostState(slot->mc);
   // The host PC from the Mach message is exact (the guest RIP is only the last checkpoint); the
   // words around it also show whether the fault is inside a live JIT buffer.
   if (slot->hostPc &&

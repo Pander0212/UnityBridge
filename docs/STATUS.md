@@ -585,6 +585,17 @@ Next steps, in order:
         `unity_app_guid`. Harmless on the way: OBB lookups (Java `ZipFile` not implemented by
         Husk), `nativeInitWebRequest` not registered, the engine's fault-signal handlers recorded
         but not installed by Husk.
+      - **Second device run:** with `Managed/` in the APK the engine copied il2cpp's data to
+        `files/il2cpp` (`Metadata/global-metadata.dat`, `Resources/mscorlib.dll-resources.dat`,
+        `unity.ver`), then called `il2cpp_set_config_dir` and `il2cpp_set_data_dir` (both redirected
+        to the device's `il2cpp_data`) and **started il2cpp itself**: GameAssembly's start-up ran as
+        in M2f (the same unaligned-atomic fixups, il2cpp's first thread). Then a fatal
+        `EXC_BAD_ACCESS` in native code of the app binary (`host_pc=0x102768a2c`, not a FEX guest
+        thread), `fault_addr=0x328`: a function writing fields of a struct at `x0 = NULL`. The report
+        had no names, so `engine/mach_fault.cpp` now adds the registers (x0-x28, fp, lr, sp), the
+        PC and LR as `image!symbol+offset` (dladdr; Husk's `tl_ld_symbol_at` for the Android
+        libraries) and the frame-pointer chain (read with `vm_read_overwrite`, so a broken frame
+        ends the walk instead of faulting in the report).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

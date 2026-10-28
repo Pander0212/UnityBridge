@@ -682,6 +682,15 @@ Next steps, in order:
         into a pbuffer and Husk saves frames 1-3 and then every 60th as `latest.bmp` into
         `Documents/Frames` (viewable in the Files app; they stay on the device). The run reports
         frames rendered and presented at 1/5/10/30/60 s.
+      - **First device run with ANGLE:** ANGLE loaded, the EGL display was created (ANGLE over
+        Metal), the engine got past the old stop. Then Unity opened a dialog "Warning: Your device
+        does not match the hardware requirements of this application." and rendered 0 frames in
+        60 s, no fault: it waits for the dialog's answer (Husk only logs dialogs).
+      - **Next run, [i] pending:** a JNI HLE table (`g_dialog_hle` in `unity_loader.c`, registered
+        before `tl_unity_start`) answers dialogs: `AlertDialog.Builder.setPositiveButton` keeps the
+        listener, `show()` logs `DIALOG ...` and 500 ms later calls its `onClick(dialog, -1)` (OK).
+        `TL_EGL_TRACE=1` logs EGL configs and contexts, to see which hardware check Unity fails
+        (GLES version or config attributes suspected).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

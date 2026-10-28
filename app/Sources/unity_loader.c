@@ -21,6 +21,7 @@
 #define _GNU_SOURCE  // Dl_info/dladdr on glibc (the host syntax check); Darwin has them anyway
 #include "husk-tl-bionic.h"
 #include "husk-tl-egl.h"
+#include "husk-tl-jni.h"
 #include "husk-tl-ld.h"
 #include "husk-tl-unity.h"
 
@@ -434,6 +435,76 @@ static int ub_pthread_create(void *thread, const void *attr, void *(*fn)(void *)
     return r;
 }
 
+// ---- dialogs are answered -----------------------------------------------------------------------
+// Husk's Java world shows an AlertDialog by logging it ("DIALOG ...") and never presses a button, so
+// an engine that waits for the answer (Unity's "device does not match the hardware requirements"
+// warning, M3f) waits forever. These HLE methods, registered before Husk's (the first table wins),
+// keep the positive button's listener and press it half a second after show(), on a thread of its
+// own (the engine may hold a lock while it shows the dialog), as a user tapping OK would.
+
+static jvalue jl(void *p) { jvalue v; v.j = 0; v.l = p; return v; }
+static void ub_Builder_setPositive(tl_jcall *c)
+{
+    tl_jni_set_field(c->self, "ub_positive", "Ljava/lang/Object;", jl(c->args[1].l ? tl_jni_ref(c->args[1].l) : NULL));
+    c->ret = jl(tl_jni_ref(c->self));
+}
+static jobj *dialog_from(jobj *builder)
+{
+    jobj *d = tl_jni_new_object(tl_jni_class("android/app/AlertDialog"));
+    static const char *const fields[][2] = {{"title", "Ljava/lang/String;"}, {"message", "Ljava/lang/String;"},
+                                           {"ub_positive", "Ljava/lang/Object;"}};
+    for (int i = 0; i < 3; i++) {
+        jobj *v = tl_jni_get_field(builder, fields[i][0], fields[i][1]).l;
+        tl_jni_set_field(d, fields[i][0], fields[i][1], jl(v ? tl_jni_ref(v) : NULL));
+    }
+    return d;
+}
+typedef struct { jobj *listener, *dialog; } pending_click;
+static void *press_positive(void *p)
+{
+    pending_click *pc = p;
+    usleep(500 * 1000);
+    jvalue args[2];
+    args[0] = jl(pc->dialog);
+    args[1].j = 0;
+    args[1].i = -1;  // DialogInterface.BUTTON_POSITIVE
+    line("dialog answered: OK (the positive button's onClick)");
+    tl_jni_call(pc->listener, "onClick", "(Landroid/content/DialogInterface;I)V", args);
+    if (tl_jni_pending()) { line("  onClick threw; cleared"); tl_jni_clear(); }
+    free(pc);
+    return NULL;
+}
+static void ub_Dialog_show(tl_jcall *c)
+{
+    const char *title = tl_jni_string(tl_jni_get_field(c->self, "title", "Ljava/lang/String;").l);
+    const char *message = tl_jni_string(tl_jni_get_field(c->self, "message", "Ljava/lang/String;").l);
+    line("DIALOG \"%s\": %s", title ? title : "", message ? message : "");
+    jobj *listener = tl_jni_get_field(c->self, "ub_positive", "Ljava/lang/Object;").l;
+    if (!listener) { line("  (no positive button to press)"); return; }
+    pending_click *pc = malloc(sizeof(*pc));
+    pc->listener = tl_jni_ref(listener);
+    pc->dialog = tl_jni_ref(c->self);
+    pthread_t t;
+    if (pthread_create(&t, NULL, press_positive, pc) == 0) pthread_detach(t);
+    else free(pc);
+}
+static void ub_Builder_create(tl_jcall *c) { c->ret = jl(dialog_from(c->self)); }
+static void ub_Builder_show(tl_jcall *c)
+{
+    jobj *d = dialog_from(c->self);
+    ub_Dialog_show(&(tl_jcall){.self = d});
+    c->ret = jl(d);
+}
+static const tl_jhle g_dialog_hle[] = {
+    {"android/app/AlertDialog$Builder", "setPositiveButton",
+     "(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;", ub_Builder_setPositive},
+    {"android/app/AlertDialog$Builder", "create", "()Landroid/app/AlertDialog;", ub_Builder_create},
+    {"android/app/AlertDialog$Builder", "show", "()Landroid/app/AlertDialog;", ub_Builder_show},
+    {"android/app/Dialog", "show", "()V", ub_Dialog_show},
+    {"android/app/AlertDialog", "show", "()V", ub_Dialog_show},
+    {NULL, NULL, NULL, NULL},
+};
+
 // ---- the run -----------------------------------------------------------------------------------
 
 static int g_ran;
@@ -544,6 +615,8 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     if (!make_apk(unity_dir, game_data, apk, sizeof(apk))) return 2;
     setenv("TL_FILE_TRACE", "1", 1);
     setenv("TL_DL_TRACE", "1", 1);
+    setenv("TL_EGL_TRACE", "1", 1);  // M3f: every EGL call with its result (configs, context, surfaces)
+    tl_jni_register_hle(g_dialog_hle);  // before Husk's own tables: these win
     ub_unity_thread_enter();
     if (!interpose()) { ub_unity_thread_leave(); return 1; }
     ub_memory_dump("UB_MEM before the engine:");

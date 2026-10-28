@@ -276,6 +276,8 @@ Building blocks chosen (2026-10-26) [R]:
         faulting on an instruction another thread already patched just re-runs it; the port rights each
         exception message carries are released; a thread faulting while another writes the report
         parks, so the report is never cut short.
+      - **Sixth run (2026-10-28): the app stays up after `il2cpp_init`** (user-reported; the log with the
+        guest-thread count and the 5 s / 30 s proof-of-life lines is still to be attached here).
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.
@@ -363,7 +365,7 @@ Next steps, in order:
       with FEXCore sharing Husk's JIT arena.
 - [ ] Virtual `libil2cpp.so` with the 228 generic thunks; reverse thunks for callbacks and InternalCalls.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
-- [ ] Prerequisite from M2e: TLS and exceptions in the mini Win32 (needed before `il2cpp_init` gets far).
+- [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.
 
 ## M4 research: D3D11 shaders → GLES3 (2026-10-27) [R]

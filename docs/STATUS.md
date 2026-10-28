@@ -487,7 +487,9 @@ Next steps, in order:
           log ends there, as it was sent before the 30 s line).
         - Also: CI "Host tests" now also runs on changes under `engine/` (it did not before).
 - [ ] **M3d, Unity's Android engine under Husk's runtime, next to GameAssembly under FEXCore**
-      (2026-10-28, in progress: built in CI, **[i] on iPhone pending**).
+      (2026-10-28, in progress: CI "Probe IPA" green on the first try, run 40719413995, commit
+      `22dd07c`: all of Husk's C/ObjC sources compiled and linked, IPA 0.86 → 1.58 MB;
+      **[i] on iPhone pending**).
       - Husk's translation layer (`src/translation-layer{,-next}`, ~59k lines C/ObjC, GPL-2.0-or-later)
         is fetched at a pinned commit (`scripts/fetch-husk.sh`, Husk `4ac6552`) and compiled into the
         probe app unmodified, with Husk's own build settings (`app/project.yml`; `third_party/husk/PROVENANCE.md`).

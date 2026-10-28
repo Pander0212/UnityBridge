@@ -161,6 +161,8 @@ void DumpHostState(const _STRUCT_MCONTEXT64& mc) {
   }
 }
 
+void DumpAddressSpace(const char* tag);
+
 void DumpMemoryImpl(const char* tag) {
   char buf[256];
   task_vm_info_data_t vm {};
@@ -198,6 +200,63 @@ void DumpMemoryImpl(const char* tag) {
     std::snprintf(buf, sizeof(buf), "%s   %#llx +%llu MiB tag %u prot %d\n", tag, static_cast<unsigned long long>(b.addr),
                   static_cast<unsigned long long>(b.size >> 20), b.tag, b.prot);
     WriteStr(buf);
+  }
+  DumpAddressSpace(tag);
+}
+
+// Where the address space goes: the top-level map entries below the first kernel-reserved one
+// (an app without the extended-virtual-addressing entitlement ends there), summed by VM tag (0:
+// plain mmap/vm_allocate, 1-11: malloc zones, 30: stacks, ...) and by "reserved only" (no access),
+// and the free gaps between them: the largest gap is the biggest mmap that can still succeed.
+void DumpAddressSpace(const char* tag) {
+  char buf[256];
+  struct TagSum { unsigned tag; uint64_t bytes; } sums[16] {};
+  uint64_t reservedOnly = 0, used = 0, freeTotal = 0, gapMax = 0, gapAt = 0, ceiling = 0, prevEnd = 0;
+  int gaps512 = 0;
+  vm_address_t address = 0x100000000;  // above __PAGEZERO
+  prevEnd = address;
+  for (int guard = 0; guard < 200000; ++guard) {
+    vm_size_t size = 0;
+    vm_region_extended_info_data_t info {};
+    mach_msg_type_number_t n = VM_REGION_EXTENDED_INFO_COUNT;
+    mach_port_t object = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &address, &size, VM_REGION_EXTENDED_INFO, reinterpret_cast<vm_region_info_t>(&info),
+                     &n, &object) != KERN_SUCCESS)
+      break;
+    // The kernel's reserved ranges past the app's limit are untagged, inaccessible and >= 1 GiB.
+    if (address >= 0xfc0000000ull && info.protection == 0) { ceiling = address; break; }
+    if (address > prevEnd) {
+      const uint64_t gap = address - prevEnd;
+      freeTotal += gap;
+      if (gap >= (512ull << 20)) ++gaps512;
+      if (gap > gapMax) { gapMax = gap; gapAt = prevEnd; }
+    }
+    used += size;
+    if (info.protection == 0) reservedOnly += size;
+    for (auto& s : sums) {
+      if (s.bytes == 0 || s.tag == info.user_tag) { s.tag = info.user_tag; s.bytes += size; break; }
+    }
+    prevEnd = address + size;
+    address += size;
+  }
+  if (!ceiling) ceiling = prevEnd;
+  std::snprintf(buf, sizeof(buf),
+                "%s address space below %#llx: %llu MiB mapped (%llu MiB reserved, no access), %llu MiB free; "
+                "largest gap %llu MiB at %#llx, %d gaps of 512 MiB or more\n",
+                tag, static_cast<unsigned long long>(ceiling), static_cast<unsigned long long>(used >> 20),
+                static_cast<unsigned long long>(reservedOnly >> 20), static_cast<unsigned long long>(freeTotal >> 20),
+                static_cast<unsigned long long>(gapMax >> 20), static_cast<unsigned long long>(gapAt), gaps512);
+  WriteStr(buf);
+  // The tags, biggest first (a selection sort over at most 16).
+  for (int k = 0; k < 6; ++k) {
+    int best = -1;
+    for (int i = 0; i < 16; ++i)
+      if (sums[i].bytes && (best < 0 || sums[i].bytes > sums[best].bytes)) best = i;
+    if (best < 0) break;
+    std::snprintf(buf, sizeof(buf), "%s   tag %u: %llu MiB\n", tag, sums[best].tag,
+                  static_cast<unsigned long long>(sums[best].bytes >> 20));
+    WriteStr(buf);
+    sums[best].bytes = 0;
   }
 }
 

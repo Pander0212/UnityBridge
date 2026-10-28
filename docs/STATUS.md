@@ -723,6 +723,20 @@ Next steps, in order:
         `il2cpp_unity_liveness_allocate_struct` (both callbacks), and
         `il2cpp_unity_set_android_network_up_state_func`. All four are on the bridge's
         host-callback list. Host tests cover the refusal and the liveness wrap.
+      - **Device run:** the backtrace override was refused as planned (`UB_IL2CPP_INTERCEPT ...
+        not installed`) and the engine got further: it loaded the game's scene data, and now
+        reports `Desired shader compiler platform 5 is not available in shader blob` for each of
+        the game's shaders (5 = GLES3x; the game's shaders are D3D11 only, **as expected: M4**).
+        Then `mm: mmap FAILED len=0x1fffc000 prot=0 flags=0x22 errno=12`, a 512 MiB address-space
+        reservation by the engine refused with ENOMEM, and a null-pointer write in libunity right
+        after (its allocator did not expect the failure). Address space mapped (without the
+        kernel's reserved ranges at 0xfc0000000 and 0x1000000000): ~7 GiB before the engine
+        (mostly the shared cache), ~12.5 GiB at the fault.
+      - **Next, [i] pending:** the memory report now also walks the address space below the
+        first kernel-reserved range: mapped/reserved/free totals, the largest free gap, how many
+        gaps of 512 MiB or more are left, and the totals by VM tag. That shows whether the
+        reservation failed for lack of a large enough gap (fragmentation, or a low ceiling for an
+        app without the extended-virtual-addressing entitlement) and who holds the space.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

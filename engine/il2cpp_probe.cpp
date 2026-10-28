@@ -16,6 +16,7 @@
 // stack. So the engine, the main guest thread (stack + TEB), the loaded image and the thread runner
 // are never torn down after that point, and the probe runs once per app launch.
 #include "core/fex/fex_guest_engine.h"
+#include "engine/icall_bridge.h"
 #include "engine/il2cpp_bridge.h"
 #include "engine/mach_fault.h"
 #include "loader/pe_image.h"
@@ -153,6 +154,7 @@ struct HostMemory {
 struct CallResult {
   bool ok = false;
   uint64_t rax = 0;
+  uint64_t xmm0 = 0;
 };
 
 struct GuestThread {
@@ -215,6 +217,7 @@ CallResult CallWindows(GuestThread& guest, Report& report, uintptr_t target, std
   }
   out.ok = true;
   out.rax = std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
+  out.xmm0 = std::get<Core::GuestExecutionState>(run).Xmm[0][0];
   return out;
 }
 
@@ -540,6 +543,84 @@ int RunBridgeTests(Report& report) {
   return failures;
 }
 
+// M3b groundwork: the reverse (x64 -> ARM64) InternalCall thunks, the other half of the libunity
+// bridge. These native ARM64 functions stand in for libunity's engine functions; the probe registers
+// each through IcallBridge, then calls the resulting guest x86 stub the way GameAssembly's managed
+// code will -- a real Microsoft x64 call with integer args in rcx/rdx/r8/r9 and floats in xmm0-3 --
+// and checks the value came back right. Proves the convention switch without libunity present.
+int64_t IcallAddInts(int64_t a, int64_t b, int64_t c) { return a + 100 * b + 10000 * c; }
+double IcallMixSum(int64_t n, double x, int64_t m, double y) { return n + 10 * x + 100 * m + 1000 * y; }
+double IcallScaleFloat(float x) { return static_cast<double>(x) * 2.0; }
+
+int RunIcallBridgeTests(Report& report, GuestThread& guest) {
+  report.Line("--- il2cpp InternalCall reverse thunks (x64 -> ARM64, as GameAssembly will call them) ---");
+  using IcallBridge::Kind;
+  int failures = 0;
+  auto check = [&](bool ok, const char* what) {
+    report.Line("%-52s %s", what, ok ? "ok" : "FAIL");
+    if (!ok) ++failures;
+  };
+
+  // Calls guest stub `rip` with Microsoft x64 placement: argument i's integer in Gpr[i], its
+  // floating bits in Xmm[i]'s low 8 bytes (i < 4). `kinds` says which, matching the registered
+  // signature. `xmm` holds the raw register contents so a 32-bit float (its 4 bytes in the low
+  // dword) and a 64-bit double can both be expressed exactly as a Microsoft caller would leave them.
+  auto call = [&](uintptr_t rip, std::initializer_list<Kind> kinds, std::initializer_list<uint64_t> ints,
+                  std::initializer_list<uint64_t> xmm) {
+    AetherPS4::Fex::Win64Call c;
+    c.Rip = rip;
+    auto nextInt = ints.begin();
+    auto nextXmm = xmm.begin();
+    unsigned i = 0;
+    for (Kind k : kinds) {
+      if (k == Kind::Float) c.Xmm[i][0] = *nextXmm++;
+      else c.Gpr[i] = *nextInt++;
+      ++i;
+    }
+    CallResult out;
+    auto run = g_engine->CallWin64(guest.thread, c);
+    if (const auto* f = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
+      report.Line("  call failed: stage=%d error=%d", static_cast<int>(f->Stage), f->Error);
+      return out;
+    }
+    out.ok = true;
+    out.rax = std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
+    out.xmm0 = std::get<Core::GuestExecutionState>(run).Xmm[0][0];
+    return out;
+  };
+  auto asDouble = [](uint64_t bits) { double d; std::memcpy(&d, &bits, 8); return d; };
+  auto doubleBits = [](double d) { uint64_t b; std::memcpy(&b, &d, 8); return b; };
+  auto floatBits = [](float f) { uint32_t b; std::memcpy(&b, &f, 4); return static_cast<uint64_t>(b); };
+
+  const auto ints = IcallBridge::Make(reinterpret_cast<uintptr_t>(&IcallAddInts),
+                                      {.argCount = 3, .args = {Kind::Int, Kind::Int, Kind::Int}, .ret = Kind::Int});
+  const auto mix = IcallBridge::Make(reinterpret_cast<uintptr_t>(&IcallMixSum),
+                                     {.argCount = 4, .args = {Kind::Int, Kind::Float, Kind::Int, Kind::Float},
+                                      .ret = Kind::Float});
+  const auto scale = IcallBridge::Make(reinterpret_cast<uintptr_t>(&IcallScaleFloat),
+                                       {.argCount = 1, .args = {Kind::Float}, .ret = Kind::Float});
+  if (!ints || !mix || !scale) {
+    report.Line("ICALL: could not make the thunks");
+    return 1;
+  }
+
+  const auto r1 = call(*ints, {Kind::Int, Kind::Int, Kind::Int}, {7, 3, 5}, {});
+  report.Line("  AddInts(7,3,5) = %lld", static_cast<long long>(r1.rax));
+  check(r1.ok && r1.rax == 50307, "three integer arguments, integer return");
+
+  const auto r2 = call(*mix, {Kind::Int, Kind::Float, Kind::Int, Kind::Float}, {1, 3},
+                       {doubleBits(2.0), doubleBits(4.0)});
+  report.Line("  MixSum(1,2.0,3,4.0) = %g", asDouble(r2.xmm0));
+  check(r2.ok && asDouble(r2.xmm0) == 1 + 20 + 300 + 4000, "interleaved int/double arguments, double return");
+
+  const auto r3 = call(*scale, {Kind::Float}, {}, {floatBits(2.5f)});  // a real 32-bit float in the low dword
+  report.Line("  ScaleFloat(2.5) = %g", asDouble(r3.xmm0));
+  check(r3.ok && asDouble(r3.xmm0) == 5.0, "32-bit float argument, double return");
+
+  report.Line("ICALL: %s", failures ? "some checks failed (see above)" : "all checks passed");
+  return failures;
+}
+
 } // namespace
 
 extern "C" int ub_win32_device_has_run();
@@ -676,6 +757,8 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
         report.Line("il2cpp_domain_get = %#llx", static_cast<unsigned long long>(*domain));
       Il2cppBridge::Init([&image](std::string_view name) { return image.Export(name); }, &BridgeCall);
       RunBridgeTests(report);
+      IcallBridge::Init(&runtime);
+      RunIcallBridgeTests(report, guest);
     }
   } else {
     report.Line("il2cpp_init did not return (a fault, or the export is missing)");

@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <initializer_list>
 #include <optional>
@@ -96,6 +97,11 @@ public:
   // diagnostic breadcrumb that records the last import a crashing thread was dispatching.
   std::pair<std::string_view, std::string_view> StubName(uint32_t id) const;
 
+  // A fresh guest stub whose call runs `handler`, for a callback the guest calls (an il2cpp
+  // InternalCall reverse thunk). Returns the stub address, or nullopt if stub space is exhausted.
+  // The handler must outlive the Runtime; `name` is only for diagnostics.
+  std::optional<uintptr_t> BindCallback(Handler handler, std::string name = "callback");
+
   static Runtime* Current();  // the instance Dispatch() for host stubs goes to
   static void SetCurrent(Runtime* runtime);
 
@@ -112,6 +118,7 @@ private:
   uintptr_t hostEntry_;
   std::vector<Stub> bound_;
   std::vector<std::string> unimplemented_;
+  std::deque<Function> callbacks_;  // synthetic Functions for BindCallback; pointers must stay stable
 };
 
 // Modules the guest can see through GetModuleHandle/GetProcAddress/LoadLibrary: loaded PE images

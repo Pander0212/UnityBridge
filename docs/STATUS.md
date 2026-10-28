@@ -395,6 +395,27 @@ Next steps, in order:
         checks passed`, 0 unimplemented imports, 1 il2cpp guest thread running, alive 5 s and 30 s
         later; the app stays up indefinitely after that (user-confirmed). After a fresh launch the
         ubtest runner, now with `MachFault`, still passes every check.
+      - [ ] **M3b, the InternalCall reverse thunks x64 → ARM64** (`engine/icall_bridge.{h,cpp}`,
+        `engine/call_native_{arm64,sysv}.S`): host test green, **[i] on iPhone pending**. The game's
+        x86-64 code calls engine functions that libunity provides as native ARM64 (AAPCS64);
+        `IcallBridge::Make(fn, signature)` returns a guest x86 stub (through the new
+        `Win32::Runtime::BindCallback`) that, called with the Microsoft x64 convention, re-lays the
+        arguments for AAPCS64 and calls `fn`. Microsoft x64 gives each argument a positional slot;
+        AAPCS64 fills x0–x7 and d0–d7 by two independent counters, so the thunk walks the arguments
+        and, per the signature (`Int`/`Float` per arg + return), appends each to the next integer or
+        floating register, then calls through a tiny trampoline (`ub_call_native`: loads the argument
+        registers, returns the integer and floating results together). Up to 8 of each; the 16
+        engine functions with more arguments (M1) and real stack arguments are not handled yet.
+        Signatures are supplied explicitly here; deriving them from the method metadata, and
+        intercepting `il2cpp_add_internal_call` to wrap libunity's pointers, is the next step (it also
+        unblocks the 10 host-callback `il2cpp_*` functions the forward bridge still refuses).
+        Host test `icall-bridge-test` (CI "Host tests", ASan/UBSan) drives native System V functions
+        through the thunks: integer, pointer, 32-bit float and double arguments, their interleaving
+        (independent register counters), integer vs floating returns, and six integer arguments (two
+        off the Microsoft stack). Device self-test in the probe after `il2cpp_init`: registers native
+        ARM64 stand-ins and calls their stubs through `CallWin64` with real Microsoft x64 placement
+        (ints in rcx/rdx/r8/r9, floats in xmm0–3) — `AddInts`, `MixSum` (interleaved int/double,
+        double return) and `ScaleFloat` (a true 32-bit float argument).
         Running the Windows DLL test in the same app session *after* il2cpp crashes: both runners share
         the mini Win32 (module list, TLS and unwind registries, thread runner, guest caller), and the
         ubtest runner starts a second FEX engine next to il2cpp's live one, then resets those globals

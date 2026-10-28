@@ -48,4 +48,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
   target_include_directories(il2cpp-bridge-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(il2cpp-bridge-test PRIVATE -Wall -Wextra)
   add_test(NAME il2cpp-bridge-test COMMAND il2cpp-bridge-test)
+
+  # The reverse (x64 -> native) il2cpp InternalCall thunks (M3b): here calling System V functions.
+  add_executable(icall-bridge-test tests/host/icall_bridge_test.cpp engine/icall_bridge.cpp
+                 engine/call_native_sysv.S win32/host_entry_x64.S)
+  target_link_libraries(icall-bridge-test PRIVATE ub_win32)
+  target_include_directories(icall-bridge-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(icall-bridge-test PRIVATE -Wall -Wextra)
+  add_test(NAME icall-bridge-test COMMAND icall-bridge-test)
 endif()

@@ -113,6 +113,15 @@ std::pair<std::string_view, std::string_view> Runtime::StubName(uint32_t id) con
   return {};
 }
 
+std::optional<uintptr_t> Runtime::BindCallback(Handler handler, std::string name) {
+  std::scoped_lock lock {g_mutex};
+  const auto id = static_cast<uint32_t>(bound_.size());
+  if ((size_t {id} + 1) * kStubSize > stubs_.size()) return std::nullopt;
+  Function& fn = callbacks_.emplace_back(Function {"callback", name, handler});
+  bound_.push_back({id, &fn, "callback", std::move(name)});
+  return EmitStub(id);
+}
+
 const Function* Runtime::Lookup(std::string_view dll, std::string_view name) const {
   const auto lowerDll = Lower(dll);
   for (const auto& f : Functions()) {

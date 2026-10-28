@@ -486,7 +486,8 @@ Next steps, in order:
           unaligned sites were fixed up on the way; 0 unimplemented imports; alive 5 s later (the
           log ends there, as it was sent before the 30 s line).
         - Also: CI "Host tests" now also runs on changes under `engine/` (it did not before).
-- [ ] **M3d, Unity's Android engine under Husk's runtime, next to GameAssembly under FEXCore**
+- [x] **M3d, Unity's Android engine under Husk's runtime, next to GameAssembly under FEXCore**
+      **[i] reached on iPhone 15, iOS 26.6.2, 2026-10-28 (third run, commit `7ce09d3`)**
       (2026-10-28, in progress: CI "Probe IPA" green on the first try, run 40719413995, commit
       `22dd07c`: all of Husk's C/ObjC sources compiled and linked, IPA 0.86 → 1.58 MB;
       **[i] on iPhone pending**).
@@ -533,7 +534,18 @@ Next steps, in order:
         the APK's `classes.dex`, which our APK lacked. **Fix:** Unity's Android player ships a
         ready `Variations/il2cpp/Release/Classes/classes.dex` (DEX 035, 119 KB); the user copies it
         into the Unity folder with the two libraries, and the APK carries it (rewritten on every run).
-      - Next: let libunity start il2cpp itself (probe without our own `il2cpp_init`), then
+      - **Third run: `UNITY: engine loaded (NativeLoader.load succeeded)`.** With `classes.dex`
+        (120 classes) in the APK: libmain's `JNI_OnLoad` → `0x10006` (JNI 1.6); `NativeLoader.load`
+        made libmain load **`libunity.so` (25.4 MiB): 54,766 relocations, 3,880 `tpidr` and 50,632
+        `adrp` sites patched, 5,346 `x18` instructions rewritten, all 424 constructors run, its
+        `JNI_OnLoad` called**; `NativeLoader.load -> 1`, **0 unresolved imports**. libmain opened
+        the virtual `libil2cpp.so` itself (as on Android) and asked it for `JNI_OnLoad`, which
+        GameAssembly does not export (NULL, harmless: on Android libil2cpp has none either worth
+        calling here). In the same process: GameAssembly under FEXCore with il2cpp up and every
+        BRIDGE/ICALL/INTERCEPT check passing. Husk's region at launch: rx `0x1174e8000`, rw 128 MiB
+        above (no move needed).
+      - Next (M3e): let libunity start il2cpp itself (probe without our own `il2cpp_init`), then
+        `initJni`/first `nativeRender` without graphics (probe without our own `il2cpp_init`), then
         `initJni`/first `nativeRender` without graphics; the game's data as the APK's
         `assets/bin/Data`; ANGLE for EGL/GLES.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.

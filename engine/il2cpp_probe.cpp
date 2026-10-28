@@ -922,6 +922,16 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
                              reinterpret_cast<uintptr_t>(image.base) + image.size,
                              reinterpret_cast<uintptr_t>(image.base) + image.pdataRva, image.pdataSize);
 
+  // Catch a fault inside il2cpp, FEXCore's own start-up or our handlers and log it before the process
+  // dies: installed before the engine is created, so a fault in FEXCore's initialisation is reported too.
+  InstallCrashHandler();
+  report.Line("crash catcher installed (SIGSEGV/BUS/ABRT/ILL/FPE)");
+  g_imageBase = reinterpret_cast<uintptr_t>(image.base);
+  g_imageEnd = g_imageBase + image.size;
+  MachFault::Install(g_imageBase, g_imageEnd);
+  MachFault::RegisterThisThread();
+  report.Line("mach exception handler installed (BAD_ACCESS/BAD_INSTRUCTION/ARITHMETIC, per thread)");
+
   static Win32Bridge bridge;
   bridge.runtime = &runtime;
   bridge.executable = {
@@ -952,15 +962,6 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
     g_engine = nullptr;
     return finish(1);
   }
-
-  // Catch a fault inside il2cpp (or our handlers) and log the guest RIP before the process dies.
-  InstallCrashHandler();
-  report.Line("crash catcher installed (SIGSEGV/BUS/ABRT/ILL/FPE)");
-  g_imageBase = reinterpret_cast<uintptr_t>(image.base);
-  g_imageEnd = g_imageBase + image.size;
-  MachFault::Install(g_imageBase, g_imageEnd);
-  MachFault::RegisterThisThread();
-  report.Line("mach exception handler installed (BAD_ACCESS/BAD_INSTRUCTION/ARITHMETIC, per thread)");
 
   // The loader runs the module's TLS callbacks and then DllMain with DLL_PROCESS_ATTACH.
   RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_ATTACH);

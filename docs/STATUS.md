@@ -629,6 +629,17 @@ Next steps, in order:
         (`posix_memalign`, `malloc_size`); rpmalloc is no longer built. This changes every FEX run,
         so the earlier device checks (il2cpp probe: BRIDGE/ICALL/INTERCEPT; the Windows DLL test)
         are to be repeated with it.
+      - **Sixth device run (both buttons): the app died silently right after loading GameAssembly**,
+        before FEXCore's first JIT region, with no report (the fault catchers were only installed
+        after the engine was created). The system branch of FEX's `AllocatorHooks.cpp` is written
+        for glibc: Darwin's `aligned_alloc`/`posix_memalign` return NULL (EINVAL) for an alignment
+        below `sizeof(void*)`, and `aligned_alloc` for a size that is not a multiple of it, and FEX
+        asks for `alignof(T)` of 1, 2 or 4 (`fextl::vector<uint8_t>`, ...). **Fixes:**
+        `scripts/build-fexcore-ios.sh` patches that branch at build time (idempotent, like the CMake
+        hook; checked on a copy of the real file: three call sites, a second run changes nothing):
+        alignment raised to at least 16 (a power of two), the size rounded up; and the il2cpp probe
+        now installs the crash catcher and `MachFault` before `GuestEngine::Create`, so a fault in
+        FEXCore's own start-up is reported.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

@@ -57,6 +57,40 @@ if marker not in text:
     open(path, "w").write(text.replace(anchor, hook))
 PY
 
+# Built with ENABLE_FEX_ALLOCATOR=OFF (below), FEXCore's allocations go through the system branch of
+# AllocatorHooks.cpp, written for glibc. Darwin's aligned_alloc and posix_memalign refuse an
+# alignment below sizeof(void*) (EINVAL, NULL), and aligned_alloc also a size that is not a multiple
+# of the alignment; FEX asks for alignof(T) of 1, 2 or 4 (fextl::vector<uint8_t>, ...). Raise the
+# alignment to 16 and round the size up. Idempotent.
+python3 - "$FEX/FEXCore/Source/Utils/AllocatorHooks.cpp" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = "// UnityBridge: Darwin alignment rules"
+if marker not in text:
+    edits = [
+        ("  return ::posix_memalign(&ptr, align, s) == 0 ? ptr : nullptr;\n",
+         "  return ::posix_memalign(&ptr, DarwinAlign(align), s) == 0 ? ptr : nullptr;\n"),
+        ("  return ::posix_memalign(r, a, s);\n",
+         "  return ::posix_memalign(r, DarwinAlign(a), s);\n"),
+        ("  return ::aligned_alloc(a, s);\n",
+         "  const size_t align = DarwinAlign(a);\n  return ::aligned_alloc(align, (s + align - 1) & ~(align - 1));\n"),
+    ]
+    for old, new in edits:
+        assert text.count(old) == 1, "AllocatorHooks.cpp changed; update the UnityBridge patch: " + old
+        text = text.replace(old, new)
+    anchor = "#else\nvoid InitializeThread() {}\n"
+    assert text.count(anchor) == 1, "AllocatorHooks.cpp changed; update the UnityBridge patch (anchor)"
+    text = text.replace(anchor, anchor + """%s: at least 16, a power of two
+static inline size_t DarwinAlign(size_t a) {
+  size_t r = 16;
+  while (r < a) r <<= 1;
+  return r;
+}
+""" % marker)
+    open(path, "w").write(text)
+PY
+
 AP="$ROOT/third_party/aetherps4/src"
 ENGINE_SOURCES="$AP/core/fex/fex_guest_engine.cpp;$AP/core/guest_cpu/guest_cpu.cpp;$AP/core/guest_cpu/hle_call_adapter.cpp;$AP/core/ios/ios_jit_allocator.cpp;$ROOT/engine/probe_runner.cpp;$ROOT/engine/win32_device.cpp;$ROOT/engine/il2cpp_probe.cpp;$ROOT/engine/mach_fault.cpp;$ROOT/engine/il2cpp_bridge.cpp;$ROOT/engine/icall_bridge.cpp;$ROOT/engine/il2cpp_intercept.cpp;$ROOT/engine/unity_host.cpp;$ROOT/engine/call_native_arm64.S"
 # The PE loader and the mini Win32, the same sources the host tests build.

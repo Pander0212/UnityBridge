@@ -737,6 +737,26 @@ Next steps, in order:
         gaps of 512 MiB or more are left, and the totals by VM tag. That shows whether the
         reservation failed for lack of a large enough gap (fragmentation, or a low ceiling for an
         app without the extended-virtual-addressing entitlement) and who holds the space.
+      - **Device run: the address space is full.** Below the first kernel range:
+
+        | when | mapped | of it reserved, no access | free in gaps | largest gap |
+        |---|---|---|---|---|
+        | before the engine | 7,146 MiB | 4 MiB | 1,071 MiB | 721 MiB |
+        | after NativeLoader.load | 7,524 MiB | 259 MiB | 693 MiB | 292 MiB |
+        | before il2cpp_init | 10,750 MiB | 3,006 MiB | 785 MiB | 230 MiB |
+        | at the fault | 12,814 MiB | 3,984 MiB | 513 MiB | 207 MiB |
+
+        Tag 32 (the shared cache) is 5,472 MiB throughout; tag 0 (plain mmap) grows from 1,210 to
+        6,368 MiB, ~3 GiB of it reserved without access between `NativeLoader.load` and the
+        engine's `il2cpp_init` (the engine's start-up). The highest mappings are near 0x3e3000000:
+        the app's usable range ends around 16 GiB, not at 0xfc0000000, so ~8 GiB are left after
+        the shared cache, and no gap of 512 MiB remains for the allocator's reservation.
+      - **Next, [i] pending:** `TL_MM_TRACE` on (Husk logs every guest mmap; one of 64 MiB or more
+        with the library function that asked), large `VirtualAlloc` reservations from the game
+        side logged (`UB_WIN32 VirtualAlloc(...) N MiB`), the report reads the real end of the
+        address space from `TASK_VM_INFO.max_address` and counts the space above the last mapping.
+        The entitlement `com.apple.developer.kernel.extended-virtual-addressing` is requested;
+        whether the signing grants it shows in that end address. `TL_EGL_TRACE` off again.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

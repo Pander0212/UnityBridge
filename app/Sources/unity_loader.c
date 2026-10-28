@@ -637,7 +637,9 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     if (!make_apk(unity_dir, game_data, apk, sizeof(apk))) return 2;
     setenv("TL_FILE_TRACE", "1", 1);
     setenv("TL_DL_TRACE", "1", 1);
-    setenv("TL_EGL_TRACE", "1", 1);  // M3f: every EGL call with its result (configs, context, surfaces)
+    // M3f: who holds the address space. Every guest mmap/munmap; one of 64 MiB or more also names
+    // the library function that asked. (TL_EGL_TRACE showed EGL working; off again, it is noisy.)
+    setenv("TL_MM_TRACE", "1", 1);
     tl_jni_register_hle(g_dialog_hle);  // before Husk's own tables: these win
     ub_unity_thread_enter();
     if (!interpose()) { ub_unity_thread_leave(); return 1; }

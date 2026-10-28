@@ -148,6 +148,9 @@ uint64_t VirtualAlloc(CallContext& c) {
     return SetError(ERROR_INVALID_PARAMETER, 0);  // Windows fails when the requested range is taken
   }
   g_reservations[reinterpret_cast<uintptr_t>(p)] = {size, protect};
+  if (size >= (64u << 20))  // the big ones, to see who holds the address space
+    std::fprintf(stderr, "UB_WIN32 VirtualAlloc(%s) %zu MiB at %p\n", (type & MEM_COMMIT) ? "reserve+commit" : "reserve",
+                 size >> 20, p);
   return reinterpret_cast<uint64_t>(p);
 }
 

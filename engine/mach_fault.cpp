@@ -239,9 +239,21 @@ void DumpAddressSpace(const char* tag) {
     prevEnd = address + size;
     address += size;
   }
+  // The real end of the app's address space (below the kernel's reserved ranges for an app without
+  // the extended-virtual-addressing entitlement): the space above the last mapping counts as free.
+  task_vm_info_data_t vm {};
+  mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) == KERN_SUCCESS &&
+      count >= TASK_VM_INFO_COUNT && vm.max_address > prevEnd) {
+    const uint64_t tail = vm.max_address - prevEnd;
+    freeTotal += tail;
+    if (tail >= (512ull << 20)) ++gaps512;
+    if (tail > gapMax) { gapMax = tail; gapAt = prevEnd; }
+    ceiling = vm.max_address;
+  }
   if (!ceiling) ceiling = prevEnd;
   std::snprintf(buf, sizeof(buf),
-                "%s address space below %#llx: %llu MiB mapped (%llu MiB reserved, no access), %llu MiB free; "
+                "%s address space up to %#llx: %llu MiB mapped (%llu MiB reserved, no access), %llu MiB free; "
                 "largest gap %llu MiB at %#llx, %d gaps of 512 MiB or more\n",
                 tag, static_cast<unsigned long long>(ceiling), static_cast<unsigned long long>(used >> 20),
                 static_cast<unsigned long long>(reservedOnly >> 20), static_cast<unsigned long long>(freeTotal >> 20),

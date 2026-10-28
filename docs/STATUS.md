@@ -215,17 +215,30 @@ Building blocks chosen (2026-10-26) [R]:
         app to register its *own* thread-level Mach handler (as Wine does). The AetherPS4 FEX port
         registers none, so a hardware fault reaches no handler, never becomes a BSD signal, and the
         process vanishes with no trace.
-      - **Fix (this commit): own Mach exception handler in the probe.** A thread-level port on every
-        guest thread catches `EXC_BAD_ACCESS`/`BAD_INSTRUCTION`/`ARITHMETIC` (never `BREAKPOINT`, so
-        debugserver's BRK/JIT path is untouched). Because the guest RIP/register diagnostics are
-        thread-local to the *faulting* thread (not the Mach service thread), the handler redirects the
-        faulting thread onto a trampoline on a private stack that logs guest RIP (+ offset into
-        `GameAssembly.dll`), guest registers, the exact faulting ARM64 words (`BachataDumpHostCodeWords`,
-        which also reveals whether the fault is inside a live JIT buffer), the fault address, and the
-        last Win32 import dispatched (new lock-free breadcrumb), then `_exit`s. The next run's log will
-        say definitively whether this is an unrecovered JIT alias fault (→ wire FEX recovery) or a real
-        fault in il2cpp / our HLE (→ the RIP/breadcrumb name where). Only the il2cpp probe installs it;
-        the device-confirmed ubtest runner (`win32_device.cpp`, 31/31) is untouched.
+      - **Own Mach exception handler → fault located.** A thread-level port on each guest thread
+        catches `EXC_BAD_ACCESS`/`BAD_INSTRUCTION`/`ARITHMETIC` (never `BREAKPOINT`, so debugserver's
+        BRK/JIT path is untouched); since the guest diagnostics are thread-local to the *faulting*
+        thread, the service thread redirects it onto a trampoline that logs on its own thread. The
+        **third device run reported the fault**: `EXC_BAD_ACCESS` at `0x30140004c`, host PC inside the
+        JIT buffer, faulting instruction `0xD9408294` = **`LDAPUR Xt,[Xn,#8]`** (an ARM64 load-acquire)
+        with `Xn=0x301400044` → target `0x...4c` is only 4-byte aligned. **Diagnosis: not an il2cpp bug
+        and not a missing API** — it is the classic x86→ARM64 hazard: FEX translates an x86 *unaligned*
+        atomic / acquire access (il2cpp's metadata structs are packed, so an 8-byte field sits on a
+        4-byte offset) into an ARM64 load-acquire, which the CPU rejects when unaligned. x86 allows it;
+        ARM64 does not.
+      - **Fix (this commit): let FEX fix up the fault.** FEXCore already handles exactly this in
+        `HandleGuestSignal` — on a `BUS_ADRALN` fault inside its code buffer it backpatches the JIT'd
+        instruction to a non-atomic sequence (so that static site never faults again) and resumes one
+        instruction on. That path needs the faulting thread's thread-local FEX state, so the trampoline
+        now, *on the faulting thread*, synthesizes a `ucontext` from the fault and calls
+        `HandleGuestSignal(SIGBUS, BUS_ADRALN)`; on success it `setcontext()`s straight back into the
+        fixed-up guest (NEON state captured by the service thread beforehand so `setcontext` restores
+        it intact). Only if FEX cannot handle a fault does the trampoline log the full report (guest
+        RIP + offset, registers, exact ARM64 words, last Win32 import breadcrumb) and `_exit`. Because
+        the backpatch makes each site fault just once, this is self-limiting, not a per-access trap.
+        Only the il2cpp probe installs it; the device-confirmed ubtest runner (`win32_device.cpp`,
+        31/31) is untouched. If this clears the alignment faults, `il2cpp_init` should get materially
+        further — possibly all the way.
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

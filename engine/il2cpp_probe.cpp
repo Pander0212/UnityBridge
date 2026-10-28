@@ -32,6 +32,10 @@
 #include <vector>
 
 #if defined(__APPLE__)
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 1  // Darwin <ucontext.h> hard-errors on getcontext/setcontext without this
+#endif
+#include <ucontext.h>    // ucontext_t / _STRUCT_MCONTEXT64 / setcontext, to drive FEX's fault fixup
 #include <mach/mach.h>
 #include <mach/arm/thread_status.h>
 #endif
@@ -347,20 +351,28 @@ void RestoreCrashHandler() {
 // On iOS under StikDebug the debugger holds the TASK-level Mach exception port and tells debugserver
 // to IGNORE EXC_BAD_ACCESS/EXC_BAD_INSTRUCTION (QSetIgnoredExceptions, see third_party/madeira).
 // A hardware fault therefore reaches no handler at all -- the FEX port registers none -- and never
-// becomes a BSD signal, so the process dies silently and our sigaction catcher above never runs.
-// We register our own THREAD-level port on each guest thread (checked before the task port, so this
-// never disturbs debugserver's BRK handling). The diagnostics we most want -- the guest RIP and
-// registers -- are thread-local to the FAULTING thread, which is not the thread servicing the Mach
-// message, so the handler redirects the faulting thread onto MachTrampoline (on a clean private
-// stack) and lets it log its own state there before exiting. Fault basics (type, address, host PC)
-// are logged from the service thread first, in case the redirect itself cannot run.
+// becomes a BSD signal, so FEXCore's own fault fixup never runs and the process dies silently.
+//
+// The faults we see are not il2cpp bugs: FEX translates x86 unaligned atomic / load-acquire accesses
+// (il2cpp's metadata structs are packed, so 8-byte fields land on 4-byte offsets) into ARM64
+// load-acquire (e.g. LDAPUR), which the CPU rejects when unaligned -> EXC_BAD_ACCESS. FEXCore handles
+// exactly this in HandleGuestSignal: on a BUS_ADRALN fault inside its code buffer it backpatches the
+// JIT'd instruction to a non-atomic sequence (so that site never faults again) and resumes one
+// instruction on. That path needs the FAULTING thread's thread-local FEX state, so it must run ON
+// that thread, not on the Mach service thread. We therefore register a THREAD-level port on each
+// guest thread (checked before the task port, so debugserver's BRK/JIT path is untouched), and the
+// service thread redirects the faulting thread onto MachTrampoline, which: builds a ucontext from the
+// faulting state, calls HandleGuestSignal (BUS_ADRALN) to let FEX fix up and, on success, setcontext()s
+// straight back into the fixed-up guest; only if FEX cannot handle it does it log the full fault
+// report (guest RIP/registers, exact faulting ARM64 words, last import) and _exit.
 #if defined(__APPLE__)
 uintptr_t g_imageBase = 0, g_imageEnd = 0;     // GameAssembly.dll mapped range, for locating a guest RIP
 mach_port_t g_excPort = MACH_PORT_NULL;
 pthread_t g_excThread;
-volatile sig_atomic_t g_redirected = 0;        // one-shot: only the first fault is redirected
+volatile sig_atomic_t g_inFatal = 0;           // one-shot latch for the non-recoverable report
 volatile uint64_t g_faultHostPc = 0, g_faultAddr = 0, g_excCode = 0;
 volatile int g_excType = 0;
+_STRUCT_MCONTEXT64 g_savedMc;                   // faulting thread state handed to the trampoline
 alignas(16) uint8_t g_trampStack[256 * 1024];  // the trampoline runs here, safe even on a stack overflow
 
 #pragma pack(push, 4)
@@ -382,8 +394,24 @@ struct ExcReply {
 };
 #pragma pack(pop)
 
-// Runs ON the faulting thread (so Bachata's thread-local guest state is live), on g_trampStack.
+// Runs ON the faulting thread (so FEX's thread-local state is live), on g_trampStack.
 void MachTrampoline() {
+  // First give FEX a chance to fix up an unaligned atomic/load-acquire access (the common case). It
+  // backpatches the JIT and, on success, we resume straight into the fixed-up guest -- no return.
+  siginfo_t si {};
+  si.si_signo = SIGBUS;
+  si.si_code = BUS_ADRALN;
+  si.si_addr = reinterpret_cast<void*>(g_faultAddr);
+  ucontext_t uc {};
+  uc.uc_mcontext = &g_savedMc;
+  uc.uc_mcsize = sizeof(g_savedMc);
+  if (AetherPS4::Fex::HandleGuestSignal(SIGBUS, &si, &uc)) {
+    setcontext(&uc);  // resume at pc+adjustment with the fixed-up registers; never returns on success
+  }
+
+  // Not a recoverable alignment fault: a real fault in il2cpp or our HLE. Report it once and die.
+  if (g_inFatal) _exit(71);
+  g_inFatal = 1;
   g_inCrash = 1;
   char buf[4096];
   std::snprintf(buf, sizeof(buf),
@@ -450,18 +478,21 @@ void* MachServer(void*) {
     g_excCode = req.codeCnt >= 1 ? static_cast<uint64_t>(req.code[0]) : 0;
     g_faultAddr = req.codeCnt >= 2 ? static_cast<uint64_t>(req.code[1]) : 0;
 
-    char buf[256];
-    std::snprintf(buf, sizeof(buf), "\nUB_IL2CPP (mach) exception type=%d code=%#llx addr=%#llx\n",
-                  g_excType, static_cast<unsigned long long>(g_excCode),
-                  static_cast<unsigned long long>(g_faultAddr));
-    WriteStr(buf);
-
+    // Redirect the faulting thread onto the trampoline (so FEX's thread-local fixup runs on the right
+    // thread). Not one-shot: every unaligned site faults once, is fixed up and resumed, and never
+    // faults again -- so we must keep handling. The trampoline's own g_inFatal latch stops a loop if
+    // a fault is genuinely unrecoverable. No per-fault logging here: the common case is a silent,
+    // successful fixup, and logging each one would flood probe.log.
     arm_thread_state64_t ts {};
     mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
-    if (g_redirected == 0 &&
+    if (g_inFatal == 0 &&
         thread_get_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), &count) == KERN_SUCCESS) {
       g_faultHostPc = (uint64_t)(arm_thread_state64_get_pc(ts));  // macro yields uint64 (arm64) or void* (arm64e)
-      g_redirected = 1;
+      g_savedMc.__ss = ts;  // the trampoline fixes this up (and resumes) or reports it
+      // setcontext() restores the whole mcontext, so the NEON state must be real too, or the guest's
+      // vector registers would be zeroed on resume.
+      mach_msg_type_number_t neonCount = ARM_NEON_STATE64_COUNT;
+      thread_get_state(faultThread, ARM_NEON_STATE64, reinterpret_cast<thread_state_t>(&g_savedMc.__ns), &neonCount);
       arm_thread_state64_t nts = ts;
       const uintptr_t sp = (reinterpret_cast<uintptr_t>(g_trampStack) + sizeof(g_trampStack)) & ~uintptr_t {15};
       arm_thread_state64_set_sp(nts, sp);
@@ -469,7 +500,7 @@ void* MachServer(void*) {
       thread_set_state(faultThread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&nts), ARM_THREAD_STATE64_COUNT);
       SendReply(&req, KERN_SUCCESS);  // resume the faulting thread at the trampoline
     } else {
-      SendReply(&req, KERN_FAILURE);  // already redirected (or no state): let it escalate/die honestly
+      SendReply(&req, KERN_FAILURE);  // in the fatal report already (or no state): let it die honestly
     }
   }
   return nullptr;

@@ -486,6 +486,34 @@ Next steps, in order:
           unaligned sites were fixed up on the way; 0 unimplemented imports; alive 5 s later (the
           log ends there, as it was sent before the 30 s line).
         - Also: CI "Host tests" now also runs on changes under `engine/` (it did not before).
+- [ ] **M3d, Unity's Android engine under Husk's runtime, next to GameAssembly under FEXCore**
+      (2026-10-28, in progress: built in CI, **[i] on iPhone pending**).
+      - Husk's translation layer (`src/translation-layer{,-next}`, ~59k lines C/ObjC, GPL-2.0-or-later)
+        is fetched at a pinned commit (`scripts/fetch-husk.sh`, Husk `4ac6552`) and compiled into the
+        probe app unmodified, with Husk's own build settings (`app/project.yml`; `third_party/husk/PROVENANCE.md`).
+        Not in the repository. Its loader core alone pulls in most of it (bionic's tables reach JNI,
+        Dalvik, EGL, audio), so the whole C side is built; nothing from Husk's app (QEMU, ANGLE, UI).
+      - Executable memory: Husk's loader asks for a StikDebug region by name
+        (`husk_ios_jit_get_mapping`, which Husk's QEMU library exports); `engine/unity_host.cpp`
+        provides it from the same BreakpointJIT allocator FEXCore uses, one 128 MiB region on first use.
+      - **The virtual `libil2cpp.so`** (`app/Sources/unity_loader.c`): `dlopen`, `android_dlopen_ext`
+        and `dlsym` of every Android library bind (Husk's `tl_ld_interpose`) to ours: `libil2cpp.so`
+        by any path is our handle, `dlsym` on it is `Il2cppBridge::Symbol` (with the M3c overrides),
+        a global `dlsym` of an `il2cpp_*` name too; everything else goes on to Husk's bionic.
+      - The user copies `libmain.so` and `libunity.so` from Unity's Android player for the game's
+        version (2021.3.18f1: `Editor/Data/PlaybackEngines/AndroidPlayer/Variations/il2cpp/Release/Libs/arm64-v8a/`)
+        into `Files › On My iPhone › UB Probe › Unity`; the app writes `base.apk` there (stored zip,
+        both libraries under `lib/arm64-v8a/`, data 16 KiB-aligned with Android's `0xd935` extra
+        field; checked on the host with Python's `zipfile`: valid, CRCs, alignment).
+      - Device step (after the il2cpp tests, same button): checks the virtual library
+        (`il2cpp_domain_get` through `dlopen`/`dlsym`), then Husk's `tl_unity_start` with the APK:
+        JNI and Husk's Java HLE world, `libmain.so` loaded and its `JNI_OnLoad`, then
+        `NativeLoader.load` (libmain loads `libunity.so`: map, relocate, constructors, `JNI_OnLoad`).
+        Logs every `libil2cpp.so` open/lookup and the unresolved imports. Stops there: the engine's
+        own start (`initJni`, `nativeRender`) would run `il2cpp_init` a second time and needs EGL.
+      - Next: let libunity start il2cpp itself (probe without our own `il2cpp_init`), then
+        `initJni`/first `nativeRender` without graphics; the game's data as the APK's
+        `assets/bin/Data`; ANGLE for EGL/GLES.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

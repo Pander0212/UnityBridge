@@ -250,12 +250,22 @@ struct ProbeView: View {
         }
         let profile = docs.appendingPathComponent("Profile", isDirectory: true)
         try? FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        // M3d: Unity's Android engine (libmain.so, libunity.so from Unity's Android player, supplied by
+        // the user like the game files) under Husk's runtime, once il2cpp is up.
+        let unityDir = docs.appendingPathComponent("Unity", isDirectory: true)
+        try? FileManager.default.createDirectory(at: unityDir, withIntermediateDirectories: true)
+        let unityData = docs.appendingPathComponent("UnityAppData", isDirectory: true)
         running = true
         report = ""
         Thread.detachNewThread {
             var buffer = [CChar](repeating: 0, count: 65536)
             let status = ub_il2cpp_probe_run(dll.path, dataDir.path, profile.path, &buffer, buffer.count)
-            let text = String(cString: buffer) + "\nexit status \(status)"
+            var text = String(cString: buffer) + "\nexit status \(status)"
+            if status == 0 {
+                var unity = [CChar](repeating: 0, count: 16384)
+                let unityStatus = ub_unity_probe_run(unityDir.path, unityData.path, &unity, unity.count)
+                text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
+            }
             DispatchQueue.main.async {
                 report = text
                 running = false

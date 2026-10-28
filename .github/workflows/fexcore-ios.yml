@@ -69,6 +69,8 @@ jobs:
           mkdir -p app/Generated
           cp build/testdll/ubtest.dll app/Generated/ubtest.dll
           ls -la app/Generated/ubtest.dll
+      - name: Fetch Husk's Android runtime
+        run: bash scripts/fetch-husk.sh
       - name: Build the app
         run: |
           set -euo pipefail

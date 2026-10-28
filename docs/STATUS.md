@@ -157,7 +157,8 @@ Building blocks chosen (2026-10-26) [R]:
         outer `__except`; and the table primitives (`RtlCaptureContext` → `RtlLookupFunctionEntry` →
         `RtlVirtualUnwind` step out one frame, `RtlPcToFileHeader`, `RtlCaptureStackBackTrace`).
 - [x] M2e step 4, guest language handlers (`win32/ntdll_exception.cpp`, `engine/win32_device.cpp`)
-      **host test green, 31 of 31; [i] on iPhone pending**: GameAssembly's exception handlers are not
+      **[i] iPhone 15 (A16), iOS 26.6.2, 2026-10-28: all 31 of 31 pass** (commit `64fc365`), now through
+      the guest-handler path and the device veneer escape: GameAssembly's exception handlers are not
       ours — its statically linked CRT provides its own `__C_specific_handler` and `__CxxFrameHandler*`,
       guest code that the OS dispatcher names in the `.pdata`/`UNWIND_INFO` and that itself calls our
       (noreturn) `RtlUnwindEx`. The dispatcher now drives such a guest handler through `CallGuest`; the
@@ -179,7 +180,7 @@ Building blocks chosen (2026-10-26) [R]:
       - `ubtest.dll` now provides its **own** `__C_specific_handler` (like GameAssembly) instead of
         importing ours, so all three SEH checks exercise the guest-handler path and its `RtlUnwindEx`.
         The host validates everything but the device-only veneer escape (host needs none); the escape
-        is the one piece that only the iPhone run exercises.
+        is the one piece that only the iPhone run exercises, and the 2026-10-28 device run confirmed it.
       - Still open: the full `__CxxFrameHandler4` C++ flow (catch-type matching, the consolidate
         callback running the catch funclet) is GameAssembly's own guest code; this step makes the
         engine able to host it, to be confirmed against real `GameAssembly.dll`.

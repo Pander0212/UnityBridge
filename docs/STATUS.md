@@ -395,7 +395,7 @@ Next steps, in order:
         checks passed`, 0 unimplemented imports, 1 il2cpp guest thread running, alive 5 s and 30 s
         later; the app stays up indefinitely after that (user-confirmed). After a fresh launch the
         ubtest runner, now with `MachFault`, still passes every check.
-      - [ ] **M3b, the InternalCall reverse thunks x64 → ARM64** (`engine/icall_bridge.{h,cpp}`,
+      - [x] **M3b, the InternalCall reverse thunks x64 → ARM64** (`engine/icall_bridge.{h,cpp}`,
         `engine/call_native_{arm64,sysv}.S`): host test green, **[i] on iPhone pending**. The game's
         x86-64 code calls engine functions that libunity provides as native ARM64 (AAPCS64);
         `IcallBridge::Make(fn, signature)` returns a guest x86 stub (through the new
@@ -416,6 +416,8 @@ Next steps, in order:
         ARM64 stand-ins and calls their stubs through `CallWin64` with real Microsoft x64 placement
         (ints in rcx/rdx/r8/r9, floats in xmm0–3) — `AddInts`, `MixSum` (interleaved int/double,
         double return) and `ScaleFloat` (a true 32-bit float argument).
+        **[i] on iPhone (2026-10-28): `ICALL: all checks passed`** — `AddInts(7,3,5)=50307`,
+        `MixSum(1,2.0,3,4.0)=4321`, `ScaleFloat(2.5)=5`; both bridge directions confirmed in one run.
         Running the Windows DLL test in the same app session *after* il2cpp crashes: both runners share
         the mini Win32 (module list, TLS and unwind registries, thread runner, guest caller), and the
         ubtest runner starts a second FEX engine next to il2cpp's live one, then resets those globals

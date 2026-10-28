@@ -123,6 +123,8 @@ typedef struct {
     long mtime;
     uint32_t crc;
     uint64_t offset;  // of the local header
+    int64_t patch_at;  // file offset of a 4-byte rewrite applied while copying, or -1
+    uint8_t patch[4];
 } apk_entry;
 
 static apk_entry *g_entries;
@@ -142,7 +144,57 @@ static bool add_entry(const char *name, const char *path)
     snprintf(e->path, sizeof(e->path), "%s", path);
     e->size = (uint64_t)st.st_size;
     e->mtime = (long)st.st_mtime;
+    e->patch_at = -1;
     return true;
+}
+
+// Unity's serialized files (globalgamemanagers, level*, *.assets, ...) record the build target they
+// were made for, and the Android player refuses another one ("created for another build target",
+// 19 = StandaloneWindows64). The field follows the Unity version string at the start of the
+// metadata. If `path` is such a file built for a desktop target, the entry's copy in the APK says
+// Android (13) instead; the game's own file is not changed. Header (big-endian): metadataSize,
+// fileSize, version, dataOffset; from version 9 an endianness byte + 3 reserved; from 22 another
+// 4 + 8 + 8 + 8 bytes. Then the version string and the int32 target (in the file's endianness).
+static void plan_platform_patch(apk_entry *e)
+{
+    FILE *f = fopen(e->path, "rb");
+    if (!f) return;
+    uint8_t h[160];
+    const size_t n = fread(h, 1, sizeof(h), f);
+    fclose(f);
+    if (n < 48) return;
+    const uint32_t version = (uint32_t)h[8] << 24 | (uint32_t)h[9] << 16 | (uint32_t)h[10] << 8 | h[11];
+    if (version < 9 || version > 30) return;
+    const size_t header = version >= 22 ? 48 : 20;
+    const bool big = h[16] != 0;
+    size_t end = header;
+    while (end < n && h[end] != 0) {
+        if (!((h[end] >= '0' && h[end] <= '9') || h[end] == '.' || (h[end] >= 'a' && h[end] <= 'z'))) return;
+        ++end;
+    }
+    // A Unity version like "2021.3.18f1": digits first, a dot, terminated in the bytes read.
+    if (end >= n || end + 5 > n || end - header < 5 || h[header] < '1' || h[header] > '9' || !memchr(h + header, '.', end - header)) return;
+    const size_t at = end + 1;
+    const uint8_t *t = h + at;
+    const uint32_t target = big ? ((uint32_t)t[0] << 24 | (uint32_t)t[1] << 16 | (uint32_t)t[2] << 8 | t[3])
+                                : ((uint32_t)t[3] << 24 | (uint32_t)t[2] << 16 | (uint32_t)t[1] << 8 | t[0]);
+    // Desktop targets: 2 StandaloneOSX, 5 StandaloneWindows, 19 StandaloneWindows64, 24 StandaloneLinux64.
+    if (target != 2 && target != 5 && target != 19 && target != 24) return;
+    const uint32_t android = 13;
+    for (int i = 0; i < 4; i++) e->patch[i] = (uint8_t)(big ? android >> (24 - 8 * i) : android >> (8 * i));
+    e->patch_at = (int64_t)at;
+    static int logged;
+    if (logged++ < 3) line("  %s: build target %u -> 13 (Android) in the APK copy", e->name, target);
+}
+
+// Applies an entry's planned rewrite to the chunk [pos, pos + n) of its file.
+static void apply_patch(const apk_entry *e, uint8_t *buf, uint64_t pos, size_t n)
+{
+    if (e->patch_at < 0) return;
+    for (int i = 0; i < 4; i++) {
+        const uint64_t at = (uint64_t)e->patch_at + (uint64_t)i;
+        if (at >= pos && at < pos + n) buf[at - pos] = e->patch[i];
+    }
 }
 
 // Every file under `dir` as `prefix/<relative path>`, skipping top-level folders in `skip`.
@@ -170,28 +222,38 @@ static void add_tree(const char *dir, const char *prefix, const char *const *ski
 static void put16(FILE *f, uint16_t v) { fputc(v & 0xff, f); fputc(v >> 8, f); }
 static void put32(FILE *f, uint32_t v) { put16(f, (uint16_t)v); put16(f, (uint16_t)(v >> 16)); }
 
-static bool file_crc(const char *path, uint32_t *crc)
+static bool file_crc(const apk_entry *e, uint32_t *crc)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(e->path, "rb");
     if (!f) return false;
     static uint8_t buf[1 << 20];
     uLong c = crc32(0, NULL, 0);
     size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) c = crc32(c, buf, (uInt)n);
+    uint64_t pos = 0;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        apply_patch(e, buf, pos, n);
+        c = crc32(c, buf, (uInt)n);
+        pos += n;
+    }
     const bool ok = !ferror(f);
     fclose(f);
     *crc = (uint32_t)c;
     return ok;
 }
 
-static bool copy_file(FILE *out, const char *path)
+static bool copy_file(FILE *out, const apk_entry *e)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(e->path, "rb");
     if (!f) return false;
     static uint8_t buf[1 << 20];
     size_t n;
     bool ok = true;
-    while (ok && (n = fread(buf, 1, sizeof(buf), f)) > 0) ok = fwrite(buf, 1, n, out) == n;
+    uint64_t pos = 0;
+    while (ok && (n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        apply_patch(e, buf, pos, n);
+        ok = fwrite(buf, 1, n, out) == n;
+        pos += n;
+    }
     ok = ok && !ferror(f);
     fclose(f);
     return ok;
@@ -206,7 +268,7 @@ static bool write_apk(const char *apk)
     bool ok = true;
     for (int i = 0; i < g_nentries && ok; i++) {
         apk_entry *e = &g_entries[i];
-        ok = file_crc(e->path, &e->crc);
+        ok = file_crc(e, &e->crc);
         e->offset = (uint64_t)ftello(f);
         if (e->size >= 0xffffffffull || e->offset >= 0xffffffffull) { line("%s: past the zip32 limits (4 GiB)", e->name); ok = false; break; }
         const size_t nlen = strlen(e->name);
@@ -220,7 +282,7 @@ static bool write_apk(const char *apk)
             put16(f, 0xd935); put16(f, (uint16_t)(pad - 4));
             for (size_t k = 4; k < pad; k++) fputc(0, f);
         }
-        ok = ok && copy_file(f, e->path);
+        ok = ok && copy_file(f, e);
     }
     const uint64_t cd = (uint64_t)ftello(f);
     for (int i = 0; i < g_nentries && ok; i++) {
@@ -247,10 +309,10 @@ static char *inputs_text(void)
 {
     size_t cap = 256 + (size_t)g_nentries * 1800, len = 0;
     char *t = malloc(cap);
-    t[0] = 0;
+    len = (size_t)snprintf(t, cap, "apk-format 2\n");  // bump when the APK's contents change for the same inputs
     for (int i = 0; i < g_nentries; i++)
-        len += (size_t)snprintf(t + len, cap - len, "%s\t%s\t%llu\t%ld\n", g_entries[i].name, g_entries[i].path,
-                                (unsigned long long)g_entries[i].size, g_entries[i].mtime);
+        len += (size_t)snprintf(t + len, cap - len, "%s\t%s\t%llu\t%ld\t%lld\n", g_entries[i].name, g_entries[i].path,
+                                (unsigned long long)g_entries[i].size, g_entries[i].mtime, (long long)g_entries[i].patch_at);
     return t;
 }
 
@@ -301,6 +363,12 @@ static bool make_apk(const char *unity_dir, const char *game_data, char *apk, si
                     line("  unity default resources: Unity's Android copy instead of the game's");
                 }
         }
+        int patched = 0;
+        for (int i = before; i < g_nentries; i++) {
+            plan_platform_patch(&g_entries[i]);
+            if (g_entries[i].patch_at >= 0) ++patched;
+        }
+        line("  %d serialized files rewritten to build target Android (13)", patched);
         uint64_t bytes = 0;
         for (int i = before; i < g_nentries; i++) bytes += g_entries[i].size;
         line("  game data: %d files, %llu MiB as assets/bin/Data", g_nentries - before, (unsigned long long)(bytes >> 20));

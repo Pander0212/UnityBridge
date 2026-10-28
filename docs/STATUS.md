@@ -640,6 +640,24 @@ Next steps, in order:
         alignment raised to at least 16 (a power of two), the size rounded up; and the il2cpp probe
         now installs the crash catcher and `MachFault` before `GuestEngine::Create`, so a fault in
         FEXCore's own start-up is reported.
+      - **Seventh device run (2026-10-28): no crash on either button.** "Run il2cpp_init": BRIDGE,
+        ICALL and INTERCEPT all pass again with FEX on the system malloc. **"Run Unity engine": the
+        engine started il2cpp itself** (`il2cpp_init` through the virtual libil2cpp.so, 230 symbols
+        looked up, 2 not exported: `JNI_OnLoad`, `end`), and **registered its InternalCalls through
+        the M3c intercept: 1,341 registered with signatures from the metadata, 18 refused**
+        (more than 8 arguments of one register kind, e.g. `Graphics::Internal_DrawMesh_Injected`,
+        `Mesh::SetIndicesImpl`, `TextGenerator::Populate_Internal_Injected` with 23), 7,063 names
+        not in Fellworld's metadata (stripped). `il2cpp_unity_install_unitytls_interface` refused
+        as planned. Footprint ~250 MiB. Then, as expected, the engine refused the data:
+        `globalgamemanagers` was `created for another build target ... File's Build target is: 19`
+        → `Unable to initialize the Unity Engine`. **Fix:** the APK copy of every serialized file
+        built for a desktop target (2, 5, 19, 24) now says 13 (Android): the field after the Unity
+        version string in the metadata (header: 20 bytes before v22, 48 from v22; endianness from
+        the header byte); the game's own files are untouched. Host-checked with synthetic headers
+        (v22 LE, v17, v22 BE, an Android file and a JSON file left alone; zip CRCs valid). The APK
+        input stamp got a format number so existing APKs are rewritten.
+      - Open for the stack-argument InternalCalls (18): `ub_call_native` and `Signature` need
+        AAPCS64 stack slots (as the 16 seen in M1).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

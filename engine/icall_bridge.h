@@ -20,24 +20,32 @@ namespace UnityBridge::Win32 { class Runtime; }
 
 namespace UnityBridge::IcallBridge {
 
-// Argument and return kinds that differ between the conventions. Pointers and every integer width
+// Argument and return kinds that differ between the conventions. Pointers and 32/64-bit integers
 // are Int; float and double are Float (a 32-bit float still occupies a full register slot either
-// way, so the thunk treats r4 and r8 the same). Void returns use Int and the result is ignored.
-enum class Kind : uint8_t { Int, Float };
+// way and its bits move unchanged, so the thunk treats r4 and r8 the same). Void returns use Int and
+// the result is ignored. The 8- and 16-bit kinds (bool is UInt8, char is UInt16) are Int that the
+// thunk sign- or zero-extends in both directions: a Microsoft x64 caller leaves the upper bits of a
+// narrow argument undefined, while Apple's arm64 ABI lets the callee assume them extended to 32 bits.
+enum class Kind : uint8_t { Int, Float, Int8, UInt8, Int16, UInt16 };
+
+constexpr size_t kMaxArgs = 16;  // at most 8 integer and 8 floating
 
 struct Signature {
-  uint8_t argCount = 0;  // including the instance pointer for an instance method
-  Kind args[8] = {};     // args[i] is argument i; arguments past 8 are not supported yet
+  uint8_t argCount = 0;     // including the instance pointer for an instance method
+  Kind args[kMaxArgs] = {};  // args[i] is argument i
   Kind ret = Kind::Int;
 };
+
+// True if `signature` fits AAPCS64's argument registers: at most 8 Float and 8 non-Float arguments.
+bool FitsRegisters(const Signature& signature);
 
 constexpr size_t kMaxThunks = 2048;  // Fellworld registers ~1,371 engine InternalCalls (M1)
 
 // Binds the reverse thunks to the runtime that owns the guest stubs. Clears earlier thunks.
 void Init(Win32::Runtime* runtime);
 
-// A guest x86 stub for ARM64 function `fn` with `signature`, or nullopt if the runtime is out of
-// stub space or every thunk slot is taken. Stable: the same fn+signature need not be deduplicated,
+// A guest x86 stub for ARM64 function `fn` with `signature`, or nullopt if the signature does not
+// fit the registers, the runtime is out of stub space or every thunk slot is taken. Stable: the same fn+signature need not be deduplicated,
 // each call makes a new thunk.
 std::optional<uintptr_t> Make(uintptr_t fn, const Signature& signature);
 

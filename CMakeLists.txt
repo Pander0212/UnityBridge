@@ -56,4 +56,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
   target_include_directories(icall-bridge-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(icall-bridge-test PRIVATE -Wall -Wextra)
   add_test(NAME icall-bridge-test COMMAND icall-bridge-test)
+
+  # The intercepted host-callback il2cpp_* APIs (M3c): InternalCall signatures from fake metadata.
+  add_executable(il2cpp-intercept-test tests/host/il2cpp_intercept_test.cpp engine/il2cpp_intercept.cpp
+                 engine/icall_bridge.cpp engine/call_native_sysv.S win32/host_entry_x64.S)
+  target_link_libraries(il2cpp-intercept-test PRIVATE ub_win32)
+  target_include_directories(il2cpp-intercept-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(il2cpp-intercept-test PRIVATE -Wall -Wextra)
+  add_test(NAME il2cpp-intercept-test COMMAND il2cpp-intercept-test)
 endif()

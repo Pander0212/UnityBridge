@@ -18,6 +18,7 @@
 #include "core/fex/fex_guest_engine.h"
 #include "engine/icall_bridge.h"
 #include "engine/il2cpp_bridge.h"
+#include "engine/il2cpp_intercept.h"
 #include "engine/mach_fault.h"
 #include "loader/pe_image.h"
 #include "win32/hle.h"
@@ -621,6 +622,196 @@ int RunIcallBridgeTests(Report& report, GuestThread& guest) {
   return failures;
 }
 
+// M3c: InternalCalls registered the way libunity will register them -- through the intercepted
+// il2cpp_add_internal_call, whose replacement looks the method up in the metadata, derives the
+// thunk signature from its parameter and return types and hands GameAssembly a reverse thunk. The
+// native functions below stand in for libunity's engine functions; the managed methods are real
+// UnityEngine InternalCalls of the game (Mathf, GameObject), which nothing has registered because
+// libunity is not here. Each is then run as managed code through il2cpp_runtime_invoke: managed
+// wrapper -> il2cpp's icall lookup -> our stub -> Microsoft x64 -> AAPCS64 -> back here.
+std::atomic<int> g_icallHits {0};
+void* g_activeSelfThis = nullptr;
+int32_t ProbeClosestPowerOfTwo(int32_t v) { ++g_icallHits; return v * 1000 + 7; }
+bool ProbeIsPowerOfTwo(int32_t v) { ++g_icallHits; return v == 64; }
+float ProbeGammaToLinearSpace(float x) { ++g_icallHits; return x * 3.0f; }
+float ProbeHalfToFloat(uint16_t h) { ++g_icallHits; return static_cast<float>(h) + 0.25f; }
+uint16_t ProbeFloatToHalf(float x) { ++g_icallHits; return static_cast<uint16_t>(x * 2.0f); }
+float ProbePerlinNoise(float x, float y) { ++g_icallHits; return x + 10.0f * y; }
+bool ProbeActiveSelf(void* self) { ++g_icallHits; g_activeSelfThis = self; return self != nullptr; }
+
+std::atomic<int> g_walkCalls {0};
+void* g_walkArgs[3] = {};
+bool g_walkSawTarget = false;
+void* g_walkTarget = nullptr;
+void ProbeWalk(void* a, void* b, void* c) {
+  if (g_walkCalls++ == 0) { g_walkArgs[0] = a; g_walkArgs[1] = b; g_walkArgs[2] = c; }
+  if (a == g_walkTarget) g_walkSawTarget = true;
+}
+
+std::string SignatureText(const IcallBridge::Signature& s) {
+  static const char* const kNames[] = {"i", "f", "i8", "u8", "i16", "u16"};
+  std::string out = std::string(kNames[static_cast<int>(s.ret)]) + "(";
+  for (unsigned i = 0; i < s.argCount; ++i) out += std::string(i ? "," : "") + kNames[static_cast<int>(s.args[i])];
+  return out + ")";
+}
+
+int RunInterceptTests(Report& report) {
+  report.Line("--- InternalCalls from the metadata, through the intercepted il2cpp_add_internal_call ---");
+  int failures = 0;
+  auto check = [&](bool ok, const char* what) {
+    report.Line("%-52s %s", what, ok ? "ok" : "FAIL");
+    if (!ok) ++failures;
+  };
+  using P = void*;
+  // Everything through the bridge's function pointers, as libunity will hold them.
+  const auto add = reinterpret_cast<void (*)(const char*, P)>(Il2cppBridge::Symbol("il2cpp_add_internal_call"));
+  const auto domain_get = reinterpret_cast<P (*)()>(Il2cppBridge::Symbol("il2cpp_domain_get"));
+  const auto domain_get_assemblies = reinterpret_cast<P* (*)(P, size_t*)>(Il2cppBridge::Symbol("il2cpp_domain_get_assemblies"));
+  const auto assembly_get_image = reinterpret_cast<P (*)(P)>(Il2cppBridge::Symbol("il2cpp_assembly_get_image"));
+  const auto class_from_name = reinterpret_cast<P (*)(P, const char*, const char*)>(Il2cppBridge::Symbol("il2cpp_class_from_name"));
+  const auto class_get_method_from_name = reinterpret_cast<P (*)(P, const char*, int)>(Il2cppBridge::Symbol("il2cpp_class_get_method_from_name"));
+  const auto runtime_invoke = reinterpret_cast<P (*)(P, P, P*, P*)>(Il2cppBridge::Symbol("il2cpp_runtime_invoke"));
+  const auto object_unbox = reinterpret_cast<P (*)(P)>(Il2cppBridge::Symbol("il2cpp_object_unbox"));
+  const auto object_new = reinterpret_cast<P (*)(P)>(Il2cppBridge::Symbol("il2cpp_object_new"));
+  const auto gchandle_new = reinterpret_cast<uint64_t (*)(P, uint64_t)>(Il2cppBridge::Symbol("il2cpp_gchandle_new"));
+  const auto foreach_target = reinterpret_cast<void (*)(P, P)>(Il2cppBridge::Symbol("il2cpp_gchandle_foreach_get_target"));
+  const auto foreach_heap = reinterpret_cast<void (*)(P, P)>(Il2cppBridge::Symbol("il2cpp_gc_foreach_heap"));
+  if (!add || !domain_get || !domain_get_assemblies || !assembly_get_image || !class_from_name ||
+      !class_get_method_from_name || !runtime_invoke || !object_unbox || !object_new || !gchandle_new) {
+    report.Line("INTERCEPT: exports missing, tests skipped");
+    return 1;
+  }
+  check(add == Il2cppIntercept::Replacement("il2cpp_add_internal_call"), "il2cpp_add_internal_call is intercepted");
+
+  // The class in whichever image holds it (UnityEngine.CoreModule for these).
+  size_t count = 0;
+  P* assemblies = domain_get_assemblies(domain_get(), &count);
+  auto findClass = [&](const char* ns, const char* name) -> P {
+    for (size_t i = 0; i < count; ++i) {
+      if (P k = class_from_name(assembly_get_image(assemblies[i]), ns, name)) return k;
+    }
+    return nullptr;
+  };
+
+  // Registers `icall` with `fn`, logs the derived signature, and returns the managed method (or
+  // nullptr if the game's metadata does not have it: stripped, nothing to test).
+  int tested = 0;
+  auto prepare = [&](P klass, const char* icall, const char* method, int argc, P fn) -> P {
+    P m = klass ? class_get_method_from_name(klass, method, argc) : nullptr;
+    std::string error;
+    const auto sig = Il2cppIntercept::DeriveSignature(icall, &error);
+    if (m == nullptr || !sig) {
+      report.Line("  %s: %s, skipped", icall, m == nullptr ? "not in this game's metadata" : error.c_str());
+      return nullptr;
+    }
+    const auto before = Il2cppIntercept::GetStats().registered;
+    add(icall, fn);
+    report.Line("  %s: signature %s from the metadata", icall, SignatureText(*sig).c_str());
+    check(Il2cppIntercept::GetStats().registered == before + 1, "  registered through the intercept");
+    ++tested;
+    return m;
+  };
+  auto invoke = [&](P m, P self, std::initializer_list<P> argList, P* boxed) {
+    std::vector<P> args(argList);
+    P exc = nullptr;
+    const int hits = g_icallHits;
+    *boxed = runtime_invoke(m, self, args.empty() ? nullptr : args.data(), &exc);
+    if (exc) report.Line("  threw an exception");
+    return exc == nullptr && *boxed != nullptr && g_icallHits == hits + 1;
+  };
+
+  P mathf = findClass("UnityEngine", "Mathf");
+  report.Line("UnityEngine.Mathf: %s", mathf ? "found" : "not found");
+  P boxed = nullptr;
+  if (P m = prepare(mathf, "UnityEngine.Mathf::ClosestPowerOfTwo", "ClosestPowerOfTwo", 1,
+                    reinterpret_cast<P>(&ProbeClosestPowerOfTwo))) {
+    int32_t v = 37;
+    const bool ran = invoke(m, nullptr, {&v}, &boxed);
+    const int32_t r = ran ? *static_cast<int32_t*>(object_unbox(boxed)) : -1;
+    report.Line("  Mathf.ClosestPowerOfTwo(37) = %d (ours: 37007)", r);
+    check(ran && r == 37007, "int(int) InternalCall reaches our ARM64 function");
+  }
+  if (P m = prepare(mathf, "UnityEngine.Mathf::IsPowerOfTwo", "IsPowerOfTwo", 1, reinterpret_cast<P>(&ProbeIsPowerOfTwo))) {
+    int32_t yes = 64, no = 63;
+    const bool ranYes = invoke(m, nullptr, {&yes}, &boxed);
+    const bool rYes = ranYes && *static_cast<uint8_t*>(object_unbox(boxed)) != 0;
+    const bool ranNo = invoke(m, nullptr, {&no}, &boxed);
+    const bool rNo = ranNo && *static_cast<uint8_t*>(object_unbox(boxed)) != 0;
+    report.Line("  Mathf.IsPowerOfTwo(64) = %d, (63) = %d", rYes, rNo);
+    check(ranYes && ranNo && rYes && !rNo, "bool(int) InternalCall");
+  }
+  if (P m = prepare(mathf, "UnityEngine.Mathf::GammaToLinearSpace", "GammaToLinearSpace", 1,
+                    reinterpret_cast<P>(&ProbeGammaToLinearSpace))) {
+    float x = 1.5f;
+    const bool ran = invoke(m, nullptr, {&x}, &boxed);
+    const float r = ran ? *static_cast<float*>(object_unbox(boxed)) : -1;
+    report.Line("  Mathf.GammaToLinearSpace(1.5) = %g (ours: 4.5)", r);
+    check(ran && r == 4.5f, "float(float) InternalCall");
+  }
+  if (P m = prepare(mathf, "UnityEngine.Mathf::HalfToFloat", "HalfToFloat", 1, reinterpret_cast<P>(&ProbeHalfToFloat))) {
+    uint16_t h = 0x1234;
+    const bool ran = invoke(m, nullptr, {&h}, &boxed);
+    const float r = ran ? *static_cast<float*>(object_unbox(boxed)) : -1;
+    report.Line("  Mathf.HalfToFloat(0x1234) = %g (ours: 4660.25)", r);
+    check(ran && r == 4660.25f, "float(ushort) InternalCall");
+  }
+  if (P m = prepare(mathf, "UnityEngine.Mathf::FloatToHalf", "FloatToHalf", 1, reinterpret_cast<P>(&ProbeFloatToHalf))) {
+    float x = 21.0f;
+    const bool ran = invoke(m, nullptr, {&x}, &boxed);
+    const unsigned r = ran ? *static_cast<uint16_t*>(object_unbox(boxed)) : 0xffff;
+    report.Line("  Mathf.FloatToHalf(21) = %u (ours: 42)", r);
+    check(ran && r == 42, "ushort(float) InternalCall");
+  }
+  if (P m = prepare(mathf, "UnityEngine.Mathf::PerlinNoise", "PerlinNoise", 2, reinterpret_cast<P>(&ProbePerlinNoise))) {
+    float x = 1.5f, y = 2.0f;
+    const bool ran = invoke(m, nullptr, {&x, &y}, &boxed);
+    const float r = ran ? *static_cast<float*>(object_unbox(boxed)) : -1;
+    report.Line("  Mathf.PerlinNoise(1.5, 2) = %g (ours: 21.5)", r);
+    check(ran && r == 21.5f, "float(float,float) InternalCall");
+  }
+
+  // An instance InternalCall: `this` is the first argument. The object is created without its
+  // constructor (no native object behind it) and held by a strong GC handle for the process, so
+  // it is never collected or finalized.
+  P gameObject = findClass("UnityEngine", "GameObject");
+  P go = gameObject ? object_new(gameObject) : nullptr;
+  const uint64_t handle = go ? gchandle_new(go, 0) : 0;
+  if (P m = go ? prepare(gameObject, "UnityEngine.GameObject::get_activeSelf", "get_activeSelf", 0,
+                         reinterpret_cast<P>(&ProbeActiveSelf))
+               : nullptr) {
+    const bool ran = invoke(m, go, {}, &boxed);
+    const bool r = ran && *static_cast<uint8_t*>(object_unbox(boxed)) != 0;
+    report.Line("  GameObject.activeSelf on %p: %d, our function saw this=%p", go, r, g_activeSelfThis);
+    check(ran && r && g_activeSelfThis == go, "instance InternalCall gets the object as this");
+  }
+  check(tested > 0, "at least one InternalCall tested");
+
+  // Two of the GC callbacks the forward bridge used to refuse.
+  if (foreach_target && go && handle) {
+    g_walkCalls = 0;
+    g_walkTarget = go;
+    int marker = 0;
+    foreach_target(reinterpret_cast<P>(&ProbeWalk), &marker);
+    report.Line("  gchandle_foreach_get_target: %d calls, first (%p, %p), our object %s", g_walkCalls.load(), g_walkArgs[0],
+                g_walkArgs[1], g_walkSawTarget ? "seen" : "not seen");
+    check(g_walkCalls > 0 && g_walkSawTarget && g_walkArgs[1] == &marker, "GC handle walk calls back into ARM64");
+  }
+  if (foreach_heap) {
+    g_walkCalls = 0;
+    int marker = 0;
+    foreach_heap(reinterpret_cast<P>(&ProbeWalk), &marker);
+    report.Line("  gc_foreach_heap: %d calls, first (%p, %p, %p)", g_walkCalls.load(), g_walkArgs[0], g_walkArgs[1],
+                g_walkArgs[2]);
+    check(g_walkCalls > 0 && (g_walkArgs[0] == &marker || g_walkArgs[1] == &marker), "GC heap walk calls back into ARM64");
+  }
+
+  const auto stats = Il2cppIntercept::GetStats();
+  report.Line("intercept: %zu registered, %zu absent, %zu failed, %zu callbacks wrapped", stats.registered, stats.absent,
+              stats.failed, stats.callbacks);
+  report.Line("INTERCEPT: %s", failures ? "some checks failed (see above)" : "all checks passed");
+  return failures;
+}
+
 } // namespace
 
 extern "C" int ub_win32_device_has_run();
@@ -759,6 +950,11 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
       RunBridgeTests(report);
       IcallBridge::Init(&runtime);
       RunIcallBridgeTests(report, guest);
+      // From here on the host-callback APIs go through their replacements, as libunity will see them.
+      Il2cppIntercept::Init([](std::string_view n) { return Il2cppBridge::Symbol(n); },
+                            [](std::string_view n) { return Il2cppBridge::Forwarder(n); }, true);
+      for (const auto name : Il2cppIntercept::Intercepted()) Il2cppBridge::Override(name, Il2cppIntercept::Replacement(name));
+      RunInterceptTests(report);
     }
   } else {
     report.Line("il2cpp_init did not return (a fault, or the export is missing)");

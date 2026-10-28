@@ -373,7 +373,7 @@ Next steps, in order:
         on first use, TLS attach callbacks run) or nested, when the call comes from inside an HLE
         handler. The 10 functions that take a host callback (`il2cpp_add_internal_call`, the memory,
         log, plugin, unitytls, GC-heap and debugger-transport hooks) are bound but return 0 with a
-        log line until the reverse thunks exist.
+        log line unless overridden (M3c replaces 8 of them).
         Host test `il2cpp-bridge-test` (CI "Host tests", ASan/UBSan): drives native `ms_abi`
         functions through the thunks — all eight argument slots in order (four on the stack), short
         signatures, int32 results with junk above them, pointer results, stable pointers, missing
@@ -396,7 +396,7 @@ Next steps, in order:
         later; the app stays up indefinitely after that (user-confirmed). After a fresh launch the
         ubtest runner, now with `MachFault`, still passes every check.
       - [x] **M3b, the InternalCall reverse thunks x64 → ARM64** (`engine/icall_bridge.{h,cpp}`,
-        `engine/call_native_{arm64,sysv}.S`): host test green, **[i] on iPhone pending**. The game's
+        `engine/call_native_{arm64,sysv}.S`): host test green, **[i] confirmed on iPhone (2026-10-28, below)**. The game's
         x86-64 code calls engine functions that libunity provides as native ARM64 (AAPCS64);
         `IcallBridge::Make(fn, signature)` returns a guest x86 stub (through the new
         `Win32::Runtime::BindCallback`) that, called with the Microsoft x64 convention, re-lays the
@@ -406,9 +406,7 @@ Next steps, in order:
         floating register, then calls through a tiny trampoline (`ub_call_native`: loads the argument
         registers, returns the integer and floating results together). Up to 8 of each; the 16
         engine functions with more arguments (M1) and real stack arguments are not handled yet.
-        Signatures are supplied explicitly here; deriving them from the method metadata, and
-        intercepting `il2cpp_add_internal_call` to wrap libunity's pointers, is the next step (it also
-        unblocks the 10 host-callback `il2cpp_*` functions the forward bridge still refuses).
+        Signatures are supplied explicitly here; M3c (below) derives them from the metadata.
         Host test `icall-bridge-test` (CI "Host tests", ASan/UBSan) drives native System V functions
         through the thunks: integer, pointer, 32-bit float and double arguments, their interleaving
         (independent register counters), integer vs floating returns, and six integer arguments (two
@@ -425,6 +423,56 @@ Next steps, in order:
         supporting that: each runner refuses to start once the other has run in this process
         (`ub_il2cpp_probe_started`, `ub_win32_device_has_run`), and the app greys out the other button
         and says to reopen it.
+      - [x] **M3c, InternalCall signatures from the metadata; the host-callback APIs intercepted**
+        (`engine/il2cpp_intercept.{h,cpp}`, 2026-10-28): host test green (`il2cpp-intercept-test`,
+        CI "Host tests", ASan/UBSan; also clean under clang), **[i] on iPhone pending**.
+        - `Il2cppBridge::Override(name, native)` makes `Symbol(name)` hand out a native replacement;
+          `Il2cppBridge::Forwarder(name)` is an always-forwarding thunk to the real guest export (also
+          for the refused host-callback names), which the replacements call.
+        - **`il2cpp_add_internal_call`** is replaced: the registered name (`Ns.Class::Method`,
+          `Ns.Outer/Inner::Method`, optionally with a `(Type,Type)` list, commas inside `<>`/`[]` not
+          counted) is looked up through the metadata API (`il2cpp_domain_get_assemblies` → every image
+          → `il2cpp_class_from_name`, nested types via `il2cpp_class_get_nested_types`, then
+          `il2cpp_class_get_methods` filtered by name, the InternalCall impl flag `0x1000` and, if
+          given, the parameter count). `il2cpp_method_get_flags` (static or not: `this` first),
+          `_get_param`/`_get_return_type`, `il2cpp_type_get_type`/`_is_byref`,
+          `il2cpp_class_is_enum`/`_enum_basetype`/`_is_valuetype` classify each type: by-ref,
+          pointers, objects, strings, arrays, 32/64-bit integers → `Int`; `R4`/`R8` → `Float`;
+          `bool`/`u1` → `UInt8`, `i1` → `Int8`, `char`/`u2` → `UInt16`, `i2` → `Int16`; enums by
+          their underlying type; generic instances of classes → `Int`. Refused with a logged reason:
+          value types by value, generic value types, generic parameters, more than 8 integer or 8
+          floating arguments (AAPCS64 stack). Overloads with different ABIs are logged and the first
+          is used. The result goes to `IcallBridge::Make`, and the stub to the real
+          `il2cpp_add_internal_call`. Names not in the metadata (stripped) are counted, not logged.
+        - Registrations before `il2cpp_init` (metadata not loaded) are kept; `il2cpp_init` and
+          `il2cpp_init_utf16` are replaced too and register them once the real one returns success.
+        - `IcallBridge` gained the narrow kinds `Int8/UInt8/Int16/UInt16`, sign/zero-extended in both
+          directions (Microsoft x64 leaves the upper bits of a narrow argument or result undefined;
+          Apple arm64 callees assume arguments extended to 32 bits), up to 16 arguments (8 + 8), and
+          `FitsRegisters`, which `Make` checks.
+        - **Host callbacks** (all integer/pointer, each wrapped once per function): `il2cpp_set_memory_callbacks`
+          (the seven allocator functions, the wrapped table kept for the process),
+          `il2cpp_register_log_callback`, `il2cpp_set_find_plugin_callback`,
+          `il2cpp_gc_set_external_allocation_tracker`, `il2cpp_gc_set_external_wbarrier_tracker`,
+          `il2cpp_gc_foreach_heap` and `il2cpp_gchandle_foreach_get_target` (callbacks declared with
+          three integer slots, which covers both the public `(data, userData)` and Boehm's
+          `(userData, start, end)` shape). **Still refused:** `il2cpp_unity_install_unitytls_interface`
+          (a version-specific table of ~60 TLS functions, some with structs by value) and
+          `il2cpp_register_debugger_agent_transport` (left out since M1). So 8 of the 10, plus
+          `il2cpp_init*`. Open: the plugin path the find-plugin callback returns is an Android path.
+        - Host test: a fake metadata API (results with junk above bool/int, as from MSVC) and native
+          stand-ins; registration before/after `il2cpp_init`, int/float/bool/ushort/enum-in-nested-class,
+          an instance method, a second image, overload by parameter list, the refusals and counters,
+          the derivation alone, memory/log/heap-walk callbacks called back as Microsoft x64.
+        - Device test in the probe after the M3b test (only through the bridge's function pointers,
+          as libunity will hold them): registers native ARM64 functions as the real game's
+          `UnityEngine.Mathf::ClosestPowerOfTwo`, `IsPowerOfTwo`, `GammaToLinearSpace`, `HalfToFloat`,
+          `FloatToHalf`, `PerlinNoise` (each skipped if stripped from Fellworld's metadata) and the
+          instance `UnityEngine.GameObject::get_activeSelf` (object from `il2cpp_object_new`, kept
+          by a GC handle), runs each through `il2cpp_runtime_invoke` and checks our function was hit
+          with the right values; then `il2cpp_gchandle_foreach_get_target` (must see that object)
+          and `il2cpp_gc_foreach_heap` with an ARM64 callback. Expected: `INTERCEPT: all checks passed`.
+        - Also: CI "Host tests" now also runs on changes under `engine/` (it did not before).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace UnityBridge::Il2cppBridge {
 namespace {
@@ -21,11 +22,17 @@ using Thunk = Word (*)(Word, Word, Word, Word, Word, Word, Word, Word);
 struct Slot {
   std::string name;
   uintptr_t target = 0;  // guest address of the export
-  bool blocked = false;  // takes a host callback: not bridged yet
+  bool blocked = false;  // takes a host callback: refused (a Forwarder slot never is)
+  bool forwarder = false;
+};
+
+struct OverrideEntry {
+  std::string name;
+  void* native = nullptr;
 };
 
 // The il2cpp_* functions that hand the runtime a host function pointer (M1, plus the InternalCall
-// registration): the guest would execute ARM64 code as x86, so they wait for the reverse thunks.
+// registration): the guest would execute ARM64 code as x86, so they need an Override.
 constexpr std::string_view kHostCallbackApis[] = {
     "il2cpp_add_internal_call",
     "il2cpp_set_memory_callbacks",
@@ -44,13 +51,14 @@ ExportLookup g_lookup;
 GuestCall g_caller = nullptr;
 Slot g_slots[kMaxFunctions];
 size_t g_used = 0;
+std::vector<OverrideEntry> g_overrides;
 
 // A slot is complete before its thunk is handed out (under g_mutex), and never changes afterwards.
 Word Forward(size_t index, const Word (&args)[8]) {
   const Slot& slot = g_slots[index];
   if (slot.blocked || g_caller == nullptr) {
     std::fprintf(stderr, "UB_IL2CPP_BRIDGE %s: %s, returning 0\n", slot.name.c_str(),
-                 slot.blocked ? "takes a host callback, not bridged yet" : "no guest caller");
+                 slot.blocked ? "takes a host callback and has no override" : "no guest caller");
     return 0;
   }
   return g_caller(slot.target, args);
@@ -84,12 +92,15 @@ void Init(ExportLookup lookup, GuestCall caller) {
   g_caller = caller;
   for (size_t i = 0; i < g_used; ++i) g_slots[i] = {};
   g_used = 0;
+  g_overrides.clear();
 }
 
-void* Symbol(std::string_view name) {
-  std::scoped_lock lock {g_mutex};
+namespace {
+
+// The thunk for `name` of the given kind, binding a slot on first use. Caller holds g_mutex.
+void* ThunkFor(std::string_view name, bool forwarder) {
   for (size_t i = 0; i < g_used; ++i) {
-    if (g_slots[i].name == name) return reinterpret_cast<void*>(kThunks[i]);
+    if (g_slots[i].name == name && g_slots[i].forwarder == forwarder) return reinterpret_cast<void*>(kThunks[i]);
   }
   const auto target = g_lookup ? g_lookup(name) : std::nullopt;
   if (!target) return nullptr;
@@ -97,8 +108,34 @@ void* Symbol(std::string_view name) {
     std::fprintf(stderr, "UB_IL2CPP_BRIDGE no thunk left for %.*s\n", static_cast<int>(name.size()), name.data());
     return nullptr;
   }
-  g_slots[g_used] = {std::string(name), *target, TakesHostCallback(name)};
+  g_slots[g_used] = {std::string(name), *target, !forwarder && TakesHostCallback(name), forwarder};
   return reinterpret_cast<void*>(kThunks[g_used++]);
+}
+
+} // namespace
+
+void* Symbol(std::string_view name) {
+  std::scoped_lock lock {g_mutex};
+  for (const auto& o : g_overrides) {
+    if (o.name == name) return g_lookup && g_lookup(name) ? o.native : nullptr;
+  }
+  return ThunkFor(name, false);
+}
+
+void Override(std::string_view name, void* native) {
+  std::scoped_lock lock {g_mutex};
+  for (auto& o : g_overrides) {
+    if (o.name == name) {
+      o.native = native;
+      return;
+    }
+  }
+  g_overrides.push_back({std::string(name), native});
+}
+
+void* Forwarder(std::string_view name) {
+  std::scoped_lock lock {g_mutex};
+  return ThunkFor(name, true);
 }
 
 } // namespace UnityBridge::Il2cppBridge

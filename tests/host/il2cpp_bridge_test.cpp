@@ -3,7 +3,7 @@
 // functions with the Microsoft x64 convention, so arguments 5-8 really travel on the stack as they
 // do under FEXCore's CallWin64 -- and calls them through the bridge's function pointers the way
 // libunity will. Checks argument order for all eight slots, short signatures, stable pointers,
-// missing exports, the blocked host-callback APIs, and slot exhaustion.
+// missing exports, the blocked host-callback APIs, slot exhaustion, and overrides with forwarders.
 #include "engine/il2cpp_bridge.h"
 
 #include <cstdint>
@@ -31,6 +31,10 @@ MS uint64_t Weighted8(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e
 MS uint64_t MulAdd3(uint64_t a, uint64_t b, uint64_t c) { return a * b + c; }
 MS uint64_t HighGarbage() { return 0xdeadbeef00000005ull; }  // an int32 result with junk above it
 MS uint64_t Pointer() { return 0x0000123456789abcull; }
+MS uint64_t Echo(uint64_t a) { return a ^ 0x5a5a; }
+
+// A native replacement for a host-callback API (what engine/il2cpp_intercept installs).
+uint64_t ReplacementLog(void*) { return 77; }
 
 int g_guestCalls = 0;
 uint64_t NativeCall(uintptr_t target, const uint64_t (&a)[8]) {
@@ -43,7 +47,7 @@ std::map<std::string, uintptr_t> g_exports = {
     {"il2cpp_muladd3", reinterpret_cast<uintptr_t>(&MulAdd3)},
     {"il2cpp_high_garbage", reinterpret_cast<uintptr_t>(&HighGarbage)},
     {"il2cpp_pointer", reinterpret_cast<uintptr_t>(&Pointer)},
-    {"il2cpp_register_log_callback", reinterpret_cast<uintptr_t>(&Pointer)},  // exported, but blocked
+    {"il2cpp_register_log_callback", reinterpret_cast<uintptr_t>(&Echo)},  // exported, but blocked
 };
 
 std::optional<uintptr_t> Lookup(std::string_view name) {
@@ -97,6 +101,22 @@ int main() {
   Bridge::Init(&Lookup, &NativeCall);
   auto* again = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint64_t)>(Bridge::Symbol("il2cpp_muladd3"));
   Check(again != nullptr && again(2, 3, 4) == 10, "Init starts over");
+
+  // Overrides: the replacement is what Symbol hands out; Forwarder still reaches the guest export.
+  Bridge::Override("il2cpp_register_log_callback", reinterpret_cast<void*>(&ReplacementLog));
+  Check(Bridge::Symbol("il2cpp_register_log_callback") == reinterpret_cast<void*>(&ReplacementLog),
+        "override replaces the thunk");
+  auto* forward = reinterpret_cast<uint64_t (*)(uint64_t)>(Bridge::Forwarder("il2cpp_register_log_callback"));
+  const int calls = g_guestCalls;
+  Check(forward && forward(1) == (1 ^ 0x5a5a) && g_guestCalls == calls + 1, "forwarder calls the blocked export");
+  Check(Bridge::Forwarder("il2cpp_register_log_callback") == reinterpret_cast<void*>(forward), "forwarder is stable");
+  Check(reinterpret_cast<void*>(forward) != Bridge::Symbol("il2cpp_muladd3"), "forwarder has its own slot");
+  Bridge::Override("il2cpp_not_exported", reinterpret_cast<void*>(&ReplacementLog));
+  Check(Bridge::Symbol("il2cpp_not_exported") == nullptr && Bridge::Forwarder("il2cpp_not_exported") == nullptr,
+        "override of a missing export gives nullptr");
+  Bridge::Init(&Lookup, &NativeCall);
+  Check(Bridge::Symbol("il2cpp_register_log_callback") != reinterpret_cast<void*>(&ReplacementLog),
+        "Init clears overrides");
 
   if (g_failures) std::printf("RESULT: %d checks failed\n", g_failures);
   else std::printf("RESULT: all checks passed\n");

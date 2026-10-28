@@ -8,8 +8,9 @@
 // generic thunk shape serves them: the eight AAPCS64 argument registers x0-x7 become the Microsoft
 // x64 arguments rcx, rdx, r8, r9 and four stack slots; rax comes back in x0. Callers that pass fewer
 // arguments leave garbage in the remaining slots, which the callee never reads. Functions that take
-// a host callback cannot go through this shape (the guest would run ARM64 code as x86); until the
-// reverse thunks exist they log and return 0.
+// a host callback cannot go through this shape (the guest would run ARM64 code as x86): Override
+// installs a native replacement for such a name (engine/il2cpp_intercept wraps the callbacks in
+// reverse thunks and calls the real export through Forwarder); without one they log and return 0.
 #pragma once
 
 #include <cstddef>
@@ -31,10 +32,19 @@ using GuestCall = uint64_t (*)(uintptr_t target, const uint64_t (&args)[8]);
 void Init(ExportLookup lookup, GuestCall caller);
 
 // The ARM64 entry point for il2cpp export `name`, or nullptr if the module does not export it (or
-// every thunk slot is taken). Stable: the same name always yields the same pointer.
+// every thunk slot is taken). Stable: the same name always yields the same pointer. A name with an
+// Override yields the override (if the module exports the name).
 void* Symbol(std::string_view name);
 
-// True for the il2cpp_* functions that take a host callback and are not bridged yet.
+// From now on Symbol(name) returns `native` instead of the forwarding thunk. Must be set before
+// Symbol(name) is first handed out to take effect for every caller. Init clears all overrides.
+void Override(std::string_view name, void* native);
+
+// A thunk that always forwards to the guest export `name`, even for a host-callback API and past
+// an Override: what a replacement uses to call the real function. nullptr if not exported.
+void* Forwarder(std::string_view name);
+
+// True for the il2cpp_* functions that take a host callback (refused unless overridden).
 bool TakesHostCallback(std::string_view name);
 
 constexpr size_t kMaxFunctions = 512;  // GameAssembly exports 235 il2cpp_* functions (M0)

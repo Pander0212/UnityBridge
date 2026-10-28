@@ -22,10 +22,12 @@ enum ProbeLog {
         .appendingPathComponent("probe.log")
 
     /// FEXCore and the engine write diagnostics to stderr; keep them in a file the user can share.
+    /// Append (never truncate) so a crash's log survives the relaunch, and mark each launch so the
+    /// latest run is easy to find. Unbuffered, so every line is on disk even if the app then dies.
     static func redirectStderr() {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        freopen(url.path, "a", stderr)
+        freopen(url.path, "a", stderr)  // "a" creates the file if missing; it is never truncated
         setvbuf(stderr, nil, _IONBF, 0)
+        FileHandle.standardError.write(Data("\n==== UB Probe launch \(Date()) ====\n".utf8))
     }
 
     static func write(_ line: String) {

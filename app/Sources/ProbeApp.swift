@@ -92,6 +92,9 @@ struct ProbeView: View {
                         .buttonStyle(.bordered)
                         .disabled(running || jit != .ready)
                 }
+                Button("Run il2cpp_init (GameAssembly.dll)", action: runIl2cpp)
+                    .buttonStyle(.bordered)
+                    .disabled(running || jit != .ready)
                 ScrollView {
                     Text(report.isEmpty ? "No result yet." : report)
                         .font(.system(.footnote, design: .monospaced))
@@ -184,6 +187,53 @@ struct ProbeView: View {
         Thread.detachNewThread {
             var buffer = [CChar](repeating: 0, count: 16384)
             let status = ub_win32_device_run(dll.path, profile.path, &buffer, buffer.count)
+            let text = String(cString: buffer) + "\nexit status \(status)"
+            DispatchQueue.main.async {
+                report = text
+                running = false
+            }
+        }
+    }
+
+    /// First real IL2CPP probe: loads Fellworld's own GameAssembly.dll and calls il2cpp_init.
+    /// The user places GameAssembly.dll and the game's *_Data folder in
+    /// Files › On My iPhone › UB Probe › Game. No game file ships in the app.
+    private func runIl2cpp() {
+        jit = JITState.current
+        guard jit == .ready else { return }
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let gameDir = docs.appendingPathComponent("Game", isDirectory: true)
+        try? FileManager.default.createDirectory(at: gameDir, withIntermediateDirectories: true)
+        let dll = gameDir.appendingPathComponent("GameAssembly.dll")
+        guard FileManager.default.fileExists(atPath: dll.path) else {
+            report = """
+            GameAssembly.dll not found.
+
+            In the Files app: On My iPhone › UB Probe › Game
+            Put there:
+              • GameAssembly.dll
+              • the game's *_Data folder (e.g. Fellworld_Data), with
+                il2cpp_data/Metadata/global-metadata.dat inside
+
+            Then tap this button again.
+            Folder: \(gameDir.path)
+            """
+            return
+        }
+        // Data dir: the first *_Data subfolder next to the DLL, else the Game folder itself.
+        var dataDir = gameDir
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: gameDir, includingPropertiesForKeys: [.isDirectoryKey]),
+           let data = entries.first(where: { $0.lastPathComponent.hasSuffix("_Data") }) {
+            dataDir = data
+        }
+        let profile = docs.appendingPathComponent("Profile", isDirectory: true)
+        try? FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        running = true
+        report = ""
+        Thread.detachNewThread {
+            var buffer = [CChar](repeating: 0, count: 65536)
+            let status = ub_il2cpp_probe_run(dll.path, dataDir.path, profile.path, &buffer, buffer.count)
             let text = String(cString: buffer) + "\nexit status \(status)"
             DispatchQueue.main.async {
                 report = text

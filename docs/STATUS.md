@@ -184,6 +184,17 @@ Building blocks chosen (2026-10-26) [R]:
       - Still open: the full `__CxxFrameHandler4` C++ flow (catch-type matching, the consolidate
         callback running the catch funclet) is GameAssembly's own guest code; this step makes the
         engine able to host it, to be confirmed against real `GameAssembly.dll`.
+- [ ] M2f, first real IL2CPP probe (`engine/il2cpp_probe.cpp`, app button "Run il2cpp_init"):
+      **built, [i] on iPhone pending — the first run against a real `GameAssembly.dll`**. Loads
+      Fellworld's own `GameAssembly.dll` with the PE loader, binds its 206 imports to the mini Win32,
+      runs the module's TLS callbacks + `DllMain(DLL_PROCESS_ATTACH)`, calls `il2cpp_set_data_dir`
+      (pointing at the game's `<Game>_Data` folder through the `C:\` host-path mapping) and then
+      `il2cpp_init("IL2CPP Root Domain")`, and reports the result, `il2cpp_get_corlib`/`il2cpp_domain_get`,
+      and every unimplemented import hit. The FEXCore+mini-Win32 glue mirrors `win32_device.cpp`
+      (duplicated, to keep the device-confirmed ubtest runner untouched). The game's files never enter
+      the repo, CI or the build machine: the user copies `GameAssembly.dll` and `<Game>_Data` into
+      `Files › On My iPhone › UB Probe › Game` and runs the probe, which logs line-by-line to
+      `probe.log` (so even a fault mid-init shows how far it got).
 - [ ] PE loader: sections, relocations, imports, TLS callbacks, `.pdata` registration.
 - [ ] Mini Win32 for the imports and P/Invokes above; `baselib.dll` implemented natively.
 - [ ] ARM64 → x64 thunks for the 228 `il2cpp_*`; x64 → ARM64 for callbacks.

@@ -16,6 +16,7 @@
 #include <FEXCore/Core/X86Enums.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -255,6 +256,70 @@ std::optional<uint64_t> CallExport(GuestThread& guest, Report& report, const Pe:
   return r.rax;
 }
 
+// ---- crash catcher -----------------------------------------------------------------------------
+// The harness installs no SIGSEGV/SIGBUS handler of its own, so a fault in il2cpp's code (or ours)
+// is a silent default crash. This handler first lets FEXCore recover genuine JIT faults (which also
+// wires up FEX's dual-map alias-fault recovery that nothing called before), and on a real fault
+// writes the guest RIP, registers and fault address through the engine's crash-path diagnostics,
+// then re-raises so the process still dies honestly. Output goes to stderr (probe.log), unbuffered.
+volatile sig_atomic_t g_inCrash = 0;
+struct sigaction g_oldSegv, g_oldBus;
+uint8_t g_altStack[64 * 1024];
+
+void WriteStr(const char* s) { if (s) { ssize_t n = write(2, s, std::strlen(s)); (void)n; } }
+
+void CrashHandler(int sig, siginfo_t* info, void* ctx) {
+#ifndef _WIN32
+  if (sig == SIGBUS || sig == SIGSEGV) {
+    if (AetherPS4::Fex::HandleGuestSignal(sig, info, ctx)) return;      // recoverable JIT fault
+    if (AetherPS4::Fex::TryRecoverJitAliasFault(sig, info, ctx)) return;
+  }
+#endif
+  if (g_inCrash) { signal(sig, SIG_DFL); raise(sig); return; }
+  g_inCrash = 1;
+  char buf[4096];
+  WriteStr("\nUB_IL2CPP ==== FATAL SIGNAL ");
+  std::snprintf(buf, sizeof(buf), "%d (addr=%p) ====\n", sig, info ? info->si_addr : nullptr);
+  WriteStr(buf);
+#ifndef _WIN32
+  uint64_t rip = 0, syscallNo = 0;
+  if (AetherPS4::Fex::BachataQueryGuestRipSyscall(&rip, &syscallNo)) {
+    std::snprintf(buf, sizeof(buf), "UB_IL2CPP guest rip=%#llx rax(syscall)=%#llx\n",
+                  static_cast<unsigned long long>(rip), static_cast<unsigned long long>(syscallNo));
+    WriteStr(buf);
+  } else {
+    WriteStr("UB_IL2CPP no active FEX guest thread at the fault\n");
+  }
+  uint64_t rsp = 0;
+  if (AetherPS4::Fex::BachataDumpGuestRegisters(buf, sizeof(buf), &rsp)) { WriteStr(buf); WriteStr("\n"); }
+  if (info && AetherPS4::Fex::BachataDescribeHostFaultAddress(info->si_addr, buf, sizeof(buf))) {
+    WriteStr(buf);
+    WriteStr("\n");
+  }
+#endif
+  struct sigaction* old = (sig == SIGSEGV) ? &g_oldSegv : &g_oldBus;
+  if ((old->sa_flags & SA_SIGINFO) && old->sa_sigaction) old->sa_sigaction(sig, info, ctx);
+  else { signal(sig, SIG_DFL); raise(sig); }
+}
+
+void InstallCrashHandler() {
+  stack_t ss {};
+  ss.ss_sp = g_altStack;
+  ss.ss_size = sizeof(g_altStack);
+  sigaltstack(&ss, nullptr);
+  struct sigaction a {};
+  a.sa_sigaction = &CrashHandler;
+  sigemptyset(&a.sa_mask);
+  a.sa_flags = SA_SIGINFO | SA_ONSTACK;
+  sigaction(SIGSEGV, &a, &g_oldSegv);
+  sigaction(SIGBUS, &a, &g_oldBus);
+}
+
+void RestoreCrashHandler() {
+  sigaction(SIGSEGV, &g_oldSegv, nullptr);
+  sigaction(SIGBUS, &g_oldBus, nullptr);
+}
+
 } // namespace
 
 // Loads GameAssembly.dll from `dllPath`, points il2cpp at `dataDir` (the host path of the game's
@@ -333,6 +398,9 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
     return finish(1);
   }
 
+  // Catch a fault inside il2cpp (or our handlers) and log the guest RIP before the process dies.
+  InstallCrashHandler();
+
   // The loader runs the module's TLS callbacks and then DllMain with DLL_PROCESS_ATTACH.
   RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_ATTACH);
   if (image.entryPoint) {
@@ -371,6 +439,7 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   const bool ok = initResult && *initResult != 0;
   report.Line("RESULT: %s", ok ? "il2cpp_init succeeded" : "il2cpp_init did not succeed (see above)");
 
+  RestoreCrashHandler();
   Win32::FreeThreadTls(guest.tls);
   engine->DestroyThread(guest.thread);
   Win32::SetGuestCaller(nullptr);

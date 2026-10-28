@@ -658,6 +658,20 @@ Next steps, in order:
         input stamp got a format number so existing APKs are rewritten.
       - Open for the stack-argument InternalCalls (18): `ub_call_native` and `Signature` need
         AAPCS64 stack slots (as the 16 seen in M1).
+      - **Eighth device run: the engine accepted the game's data.** 7 serialized files rewritten
+        to build target 13; `globalgamemanagers` loaded (`Company Name: FellworldDev`, `Product
+        Name: Fellworld`), il2cpp started by the engine and the 1,341 InternalCalls registered as
+        before. Then `E/Unity: Unable to retrieve the default EGL display!` and the engine ended
+        the process itself (no fault, no report): **the expected stop, M3e's goal reached** — the
+        engine runs the game's start-up up to graphics initialisation.
+- [ ] **M3f, graphics: EGL/GLES for the engine.** Husk gives the engine EGL and GLES through
+      **ANGLE** (GLES over Metal), passed to `tl_unity_start` as `angle_egl`/`angle_gles` with a
+      `CAMetalLayer`. Husk builds it from WebKit's ANGLE tree with its Xcode project
+      (`scripts/build_angle_ios.sh` in Husk: sparse checkout of `Source/ThirdParty/ANGLE`,
+      `Configurations`, `Tools/Scripts`, `Tools/ccache`, ~260 MB; `xcodebuild archive`, two passes
+      for the entry-point names), no depot_tools/gn. Plan: build it the same way in CI "Probe IPA"
+      (cached), embed `libANGLE-shared.dylib` in the probe app, give the run a Metal layer view,
+      and see the first `nativeRender`. Then the D3D11-only shaders (M4) decide what is drawn.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

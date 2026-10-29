@@ -351,16 +351,68 @@ ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
     t.multisampled = ms;
     r.textures.push_back(t);
   };
-  for (const auto& b : params.bindings)
+  for (const auto& b : params.bindings) {
     if (b.kind == 0) texture(b.name, b.index, b.sampler, b.extra >> 1, (b.extra & 1) != 0);
-  if (const Value* common = program.Field("m_CommonParameters"))
-    if (const Value* textures = common->Field("m_TextureParams"))
-      for (const auto& t : textures->items) {
-        const int64_t nameIndex = t.Field("m_NameIndex")->Int();
-        const auto it = names.find(nameIndex);
-        texture(it != names.end() ? it->second : "tex" + std::to_string(nameIndex), t.Field("m_Index")->Int(),
-                t.Field("m_SamplerIndex")->Int(), t.Field("m_Dim")->Int(), t.Field("m_MultiSampled")->bits != 0);
-      }
+    if (b.kind == 4) r.samplers.push_back({b.name, b.index});
+  }
+  const Value* common = program.Field("m_CommonParameters");
+  if (!common) return r;
+  const auto nameOf = [&](const Value& v, const char* prefix) {
+    const int64_t index = v.Field("m_NameIndex")->Int();
+    const auto it = names.find(index);
+    return it != names.end() ? it->second : prefix + std::to_string(index);
+  };
+  if (const Value* textures = common->Field("m_TextureParams"))
+    for (const auto& t : textures->items)
+      texture(nameOf(t, "tex"), t.Field("m_Index")->Int(), t.Field("m_SamplerIndex")->Int(), t.Field("m_Dim")->Int(),
+              t.Field("m_MultiSampled")->bits != 0);
+  if (const Value* samplers = common->Field("m_Samplers"))
+    for (const auto& s : samplers->items) {
+      const int64_t bind = s.Field("bindPoint")->Int();
+      r.samplers.push_back({"UnityBridge_s" + std::to_string(bind), int(bind)});
+    }
+  // Constant buffers shared by all variants of the program, bound by name.
+  const Value* buffers = common->Field("m_ConstantBuffers");
+  const Value* bindings = common->Field("m_ConstantBufferBindings");
+  if (buffers && bindings)
+    for (const auto& b : buffers->items) {
+      ShaderXlat::ConstantBuffer c;
+      c.name = nameOf(b, "cb");
+      bool same = false;
+      for (const auto& x : r.constantBuffers) same = same || x.name == c.name;
+      if (same) continue;
+      bool bound = false;
+      for (const auto& x : bindings->items)
+        if (x.Field("m_NameIndex")->Int() == b.Field("m_NameIndex")->Int()) {
+          c.bindPoint = int(x.Field("m_Index")->Int());
+          bound = true;
+        }
+      if (!bound) continue;
+      c.size = int(b.Field("m_Size")->Int());
+      if (const Value* vectors = b.Field("m_VectorParams"))
+        for (const auto& v : vectors->items) {
+          ShaderXlat::Variable x;
+          x.name = nameOf(v, "v");
+          x.type = static_cast<ShaderXlat::ParamType>(v.Field("m_Type")->Int());
+          x.columns = int(v.Field("m_Dim")->Int());
+          x.arraySize = int(v.Field("m_ArraySize")->Int());
+          x.offset = int(v.Field("m_Index")->Int());
+          c.variables.push_back(x);
+        }
+      if (const Value* matrices = b.Field("m_MatrixParams"))
+        for (const auto& v : matrices->items) {
+          ShaderXlat::Variable x;
+          x.name = nameOf(v, "m");
+          x.type = static_cast<ShaderXlat::ParamType>(v.Field("m_Type")->Int());
+          x.rows = int(v.Field("m_RowCount")->Int());
+          x.columns = 4;
+          x.isMatrix = true;
+          x.arraySize = int(v.Field("m_ArraySize")->Int());
+          x.offset = int(v.Field("m_Index")->Int());
+          c.variables.push_back(x);
+        }
+      r.constantBuffers.push_back(c);
+    }
   return r;
 }
 
@@ -377,9 +429,10 @@ struct Pair {
 
 std::optional<Pair> TranslatePair(const std::vector<uint8_t>& dx, uint64_t vsCode, uint64_t vsParams,
                                   uint64_t psCode, uint64_t psParams, const Value& vsProg, const Value& psProg,
-                                  const std::map<int64_t, std::string>& names, std::string* error) {
+                                  const std::map<int64_t, std::string>& names, std::string* error,
+                                  std::string* notes) {
   std::vector<uint8_t> dxbc[2];
-  Params tables[2];
+  ShaderXlat::Reflection tables[2];  // Unity's, before CompleteReflection's stand-ins
   std::optional<CodeRecord> vsRecord;
   const uint64_t codes[2] = {vsCode, psCode}, paramIdx[2] = {vsParams, psParams};
   const Value* progs[2] = {&vsProg, &psProg};
@@ -392,12 +445,17 @@ std::optional<Pair> TranslatePair(const std::vector<uint8_t>& dx, uint64_t vsCod
     if (s == 0) vsRecord = code;
     const auto params = ReadParams(*paramRec, error);
     if (!params) return std::nullopt;
-    tables[s] = *params;
+    tables[s] = ReflectionOf(*params, *progs[s], names);
     const auto raw = StripUnityHeader(code->code);
     const auto model = ShaderXlat::ShaderModel(raw);
     if (!model) { *error = "no DXBC shader model"; return std::nullopt; }
-    dxbc[s] = ShaderXlat::WithRdef(raw, ShaderXlat::BuildRdef(ReflectionOf(*params, *progs[s], names),
-                                                              model->first, model->second));
+    ShaderXlat::Reflection complete = tables[s];
+    std::string why;
+    if (!ShaderXlat::CompleteReflection(complete, raw, &why, notes)) {
+      *error = std::string(s ? "pixel" : "vertex") + " program: " + why;
+      return std::nullopt;
+    }
+    dxbc[s] = ShaderXlat::WithRdef(raw, ShaderXlat::BuildRdef(complete, model->first, model->second));
     if (dxbc[s].empty()) { *error = "not a DXBC container"; return std::nullopt; }
   }
   const auto program = ShaderXlat::Translate(dxbc[0], dxbc[1], ShaderXlat::DefaultFlags(), error);
@@ -410,14 +468,14 @@ std::optional<Pair> TranslatePair(const std::vector<uint8_t>& dx, uint64_t vsCod
   };
   std::map<std::string, Merged> dxBuffers;
   for (const auto& t : tables)
-    for (const auto& cb : t.cbuffers) {
-      if (cb.name.empty()) continue;
+    for (const auto& cb : t.constantBuffers) {
       auto& m = dxBuffers[cb.name];
       m.size = std::max(m.size, cb.size);
-      for (const auto& v : cb.vars) {
-        auto it = std::find_if(m.vars.begin(), m.vars.end(), [&](const Var& x) { return x.name == v.name; });
-        if (it == m.vars.end()) m.vars.push_back(v);
-        else *it = v;
+      for (const auto& v : cb.variables) {
+        const Var x {v.name, static_cast<int32_t>(v.type), v.rows, v.columns, v.isMatrix ? 1 : 0, v.arraySize, v.offset};
+        auto it = std::find_if(m.vars.begin(), m.vars.end(), [&](const Var& y) { return y.name == v.name; });
+        if (it == m.vars.end()) m.vars.push_back(x);
+        else *it = x;
       }
     }
   std::vector<Var> globals;
@@ -533,9 +591,14 @@ bool AddGles3(Value& shader, bool replace, Stats* stats) {
           if (PlatformOf(group[k].Field("m_GpuProgramType")->Int()) != kD3D11) continue;
           const auto ps = psByKeywords.find(Keywords(group[k]));
           if (ps == psByKeywords.end()) continue;
-          std::string error;
+          std::string error, notes;
           const auto pair = TranslatePair(*dx, group[k].Field("m_BlobIndex")->bits, groupParams[k].bits,
-                                          ps->second.first, ps->second.second, *vsp, *psp, names, &error);
+                                          ps->second.first, ps->second.second, *vsp, *psp, names, &error, &notes);
+          for (auto& c : notes) if (c == '\n') c = ' ';
+          if (!notes.empty()) {
+            ++stats->standIns;
+            if (stats->progress && stats->standIns <= 5) stats->progress(name + ": stand-ins: " + notes);
+          }
           if (!pair) {
             ++failed;
             stats->log += name + ": not translated: " + error + "\n";

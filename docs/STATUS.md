@@ -1075,3 +1075,20 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   Fix: `ub_shader_import` runs the conversion on a thread of its own with a 64 MiB stack, and logs a
   line per Shader object (`reading`) and per shader (`translating`) before the work, so a crash
   can be placed from the log.
+- **iPhone, run 58**: the 64 MiB stack did not help: the log ends at `TextMeshPro/Sprite: translating`,
+  a small shader (5,568 bytes), so not the stack. HLSLcc dereferences a binding it does not find in
+  the RDEF (`GetShaderVarFromOffset` on a missing cbuffer, a missing sampler at `sample` with a
+  separate sampler register, ...), and our tables only took the per-variant blob's cbuffers and
+  textures plus the common textures. Host-thread faults left no report because only guest threads
+  were registered with the Mach fault handler (StikDebug gets the rest).
+- Fix (converter version 2):
+  - `ReflectionOf` also takes separate samplers (binding kind 4, `m_CommonParameters.m_Samplers`) and
+    the common constant buffers (`m_ConstantBuffers` with `m_ConstantBufferBindings`).
+  - `ShaderXlat::CompleteReflection` reads the program's declarations (dcl_constantbuffer,
+    dcl_sampler, dcl_resource) and adds stand-ins for what the tables lack: a cbuffer as one float4
+    array `UnityBridge_cb<n>_data`, a sampler `UnityBridge_s<n>`. A texture the tables lack, UAVs,
+    buffer resources and SM 5.1 fail that variant cleanly ("not translated: ...") instead of
+    crashing. `ub-shader-xlat` runs it too.
+  - The conversion thread registers with `MachFault`, so a fault there gets a report with symbols.
+  - Host: the corpus result unchanged (0 stand-ins needed); a case with UnityPerDraw and the sampler
+    removed from the tables translates with stand-ins; one with the texture removed fails cleanly.

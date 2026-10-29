@@ -47,13 +47,28 @@ struct Texture {
   bool multisampled = false;
 };
 
+struct Sampler {  // a sampler not tied to a texture (Unity's inline sampler states, separate samplers)
+  std::string name;
+  int bindPoint = 0;  // register s<n>
+};
+
 struct Reflection {
   std::vector<ConstantBuffer> constantBuffers;
   std::vector<Texture> textures;
+  std::vector<Sampler> samplers;
 };
 
 // The RDEF chunk body for `reflection`, for shader model `major`.`minor` (from the program's SHDR/SHEX).
 std::vector<uint8_t> BuildRdef(const Reflection& reflection, int major, int minor);
+
+// Adds to `reflection` what the program `dxbc` declares and it lacks, because HLSLcc dereferences a
+// binding it does not find: constant buffers (placeholders named UnityBridge_cb<n>, one float4 array
+// over the whole buffer) and samplers. False (and `error`) for what cannot be stood in for: a texture
+// the tables do not describe, UAVs and buffer resources, shader model 5.1 declarations. `notes` (may
+// be null) gets a
+// line per placeholder added.
+bool CompleteReflection(Reflection& reflection, const std::vector<uint8_t>& dxbc, std::string* error,
+                        std::string* notes);
 
 // The shader model of a DXBC container's SHDR/SHEX chunk, or nullopt if it has none.
 std::optional<std::pair<int, int>> ShaderModel(const std::vector<uint8_t>& dxbc);

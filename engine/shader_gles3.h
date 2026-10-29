@@ -19,6 +19,7 @@ struct Stats {
   int shaders = 0;     // Shader objects given a GLES3x platform
   int programs = 0;    // vertex + fragment pairs translated
   int failed = 0;      // pairs that could not be translated
+  int standIns = 0;    // pairs translated with stand-ins for bindings Unity's tables lack
   std::string log;     // a line per shader, and the reasons for failures
   // Called before each shader is translated (and with each failure), so a crash inside HLSLcc can be
   // placed from the log.

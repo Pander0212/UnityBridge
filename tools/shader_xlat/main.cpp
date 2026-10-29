@@ -55,7 +55,14 @@ static std::vector<uint8_t> Prepare(const std::string& dir, const char* stage) {
   const auto dxbc = ReadFile(dir + "/" + stage + ".dxbc");
   const auto model = ShaderModel(dxbc);
   if (!model) return {};
-  return WithRdef(dxbc, BuildRdef(ReadReflection(dir + "/" + stage + ".refl"), model->first, model->second));
+  auto reflection = ReadReflection(dir + "/" + stage + ".refl");
+  std::string error, notes;
+  if (!CompleteReflection(reflection, dxbc, &error, &notes)) {
+    std::fprintf(stderr, "%s %s: %s\n", dir.c_str(), stage, error.c_str());
+    return {};
+  }
+  if (!notes.empty()) std::fprintf(stderr, "%s %s: stand-ins: %s", dir.c_str(), stage, notes.c_str());
+  return WithRdef(dxbc, BuildRdef(reflection, model->first, model->second));
 }
 
 int main(int argc, char** argv) {

@@ -8,6 +8,7 @@
 
 #include "hlslcc.h"
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 
@@ -118,6 +119,11 @@ std::vector<uint8_t> BuildRdef(const Reflection& r, int major, int minor) {
             0xc /* four components */);
     if (t.samplerBindPoint >= 0) binding("sampler" + t.name, kSitSampler, 0, 0, 0, t.samplerBindPoint, 0);
   }
+  for (const auto& s : r.samplers) {
+    bool taken = false;
+    for (const auto& t : r.textures) taken = taken || t.samplerBindPoint == s.bindPoint;
+    if (!taken) binding(s.name, kSitSampler, 0, 0, 0, s.bindPoint, 0);
+  }
   w.Set(bindCount, bindings);
 
   // Constant buffer descriptors, their variables and each variable's type.
@@ -157,6 +163,96 @@ std::vector<uint8_t> BuildRdef(const Reflection& r, int major, int minor) {
     }
   }
   return w.Finish();
+}
+
+namespace {
+
+// The resources a program declares, from its SHDR/SHEX token stream.
+struct Declared {
+  std::map<int, int> cbuffers;  // register -> size in 16-byte registers
+  std::vector<int> samplers, textures;
+  bool unsupported = false;     // UAVs, raw/structured buffers, shader model 5.1 layouts
+  bool ok = false;
+};
+
+Declared Declarations(const std::vector<uint8_t>& dxbc) {
+  Declared d;
+  if (dxbc.size() < 32 || Load32(dxbc, 0) != Fourcc("DXBC")) return d;
+  const uint32_t n = Load32(dxbc, 28);
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t at = Load32(dxbc, 32 + 4 * i);
+    const uint32_t cc = Load32(dxbc, at);
+    if (cc != Fourcc("SHDR") && cc != Fourcc("SHEX")) continue;
+    const size_t start = size_t(at) + 8, chunkEnd = start + Load32(dxbc, at + 4);
+    const uint32_t version = Load32(dxbc, start);
+    const size_t end = std::min(chunkEnd, start + size_t(Load32(dxbc, start + 4)) * 4);
+    if (end > dxbc.size()) return d;
+    const bool sm51 = ((version >> 4) & 0xf) == 5 && (version & 0xf) >= 1;
+    size_t pos = start + 8;
+    while (pos + 4 <= end) {
+      const uint32_t token = Load32(dxbc, pos);
+      const uint32_t opcode = token & 0x7ff;
+      size_t length = (token >> 24) & 0x7f;
+      if (opcode == 0x35) length = Load32(dxbc, pos + 4);  // custom data: its length follows
+      if (length == 0) return d;
+      // The operand follows the opcode token and its extended tokens.
+      size_t operand = pos + 4;
+      for (uint32_t ext = token; (ext & 0x80000000u) && operand < end; operand += 4) ext = Load32(dxbc, operand);
+      const uint32_t op = Load32(dxbc, operand);
+      size_t index = operand + 4;
+      if (op & 0x80000000u) index += 4;  // extended operand
+      const int reg = static_cast<int>(Load32(dxbc, index));
+      switch (opcode) {
+      case 0x59: d.cbuffers[reg] = static_cast<int>(Load32(dxbc, index + 4)); break;  // dcl_constantbuffer
+      case 0x5a: d.samplers.push_back(reg); break;                                   // dcl_sampler
+      case 0x58: d.textures.push_back(reg); break;                                   // dcl_resource
+      case 0x9c: case 0x9d: case 0x9e: case 0xa1: case 0xa2: d.unsupported = true; break;
+      default: break;
+      }
+      if ((opcode == 0x58 || opcode == 0x59 || opcode == 0x5a) && sm51) d.unsupported = true;
+      pos += length * 4;
+    }
+    d.ok = true;
+    return d;
+  }
+  return d;
+}
+
+} // namespace
+
+bool CompleteReflection(Reflection& r, const std::vector<uint8_t>& dxbc, std::string* error, std::string* notes) {
+  const Declared d = Declarations(dxbc);
+  const auto fail = [&](const std::string& why) {
+    if (error) *error = why;
+    return false;
+  };
+  if (!d.ok) return fail("no SHDR/SHEX token stream");
+  if (d.unsupported) return fail("UAVs, buffer resources or shader model 5.1 declarations");
+  for (const int t : d.textures) {
+    bool found = false;
+    for (const auto& x : r.textures) found = found || x.bindPoint == t;
+    if (!found) return fail("texture t" + std::to_string(t) + " is not in Unity's tables");
+  }
+  for (const int s : d.samplers) {
+    bool found = false;
+    for (const auto& x : r.textures) found = found || x.samplerBindPoint == s;
+    for (const auto& x : r.samplers) found = found || x.bindPoint == s;
+    if (!found) {
+      r.samplers.push_back({"UnityBridge_s" + std::to_string(s), s});
+      if (notes) *notes += "sampler s" + std::to_string(s) + " added\n";
+    }
+  }
+  for (const auto& [reg, size] : d.cbuffers) {
+    bool found = false;
+    for (auto& x : r.constantBuffers) found = found || x.bindPoint == reg;
+    if (found) continue;  // Unity's table lists the variables the program uses
+    Variable all;  // the whole buffer as one float4 array, so every offset has a variable
+    all.name = "UnityBridge_cb" + std::to_string(reg) + "_data";
+    all.arraySize = size > 1 ? size : 0;
+    r.constantBuffers.push_back({"UnityBridge_cb" + std::to_string(reg), reg, size * 16, {all}});
+    if (notes) *notes += "constant buffer cb" + std::to_string(reg) + " added\n";
+  }
+  return true;
 }
 
 std::optional<std::pair<int, int>> ShaderModel(const std::vector<uint8_t>& dxbc) {

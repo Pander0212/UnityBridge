@@ -15,6 +15,14 @@
 #include "engine/shader_gles3.h"
 #include "engine/unity_file.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#include "engine/mach_fault.h"
+#define UB_FAULT_REPORTS 1
+#endif
+
 using namespace UnityBridge;
 
 namespace {
@@ -92,7 +100,8 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
     return -1;
   }
   Put(log, logcap, std::to_string(stats.shaders) + " shaders, " + std::to_string(stats.programs) +
-                       " GLES3 programs, " + std::to_string(stats.failed) + " not translated" + failures);
+                       " GLES3 programs (" + std::to_string(stats.standIns) + " with stand-ins), " +
+                       std::to_string(stats.failed) + " not translated" + failures);
   return 1;
 }
 
@@ -106,13 +115,19 @@ struct Job {
 
 void* Run(void* p) {
   auto* job = static_cast<Job*>(p);
+#ifdef UB_FAULT_REPORTS
+  MachFault::RegisterThisThread();  // a fault here gets a report (pc, symbols, frames) in probe.log
+#endif
   job->result = Import(job->src, job->dst, job->log, job->logcap, job->note);
+#ifdef UB_FAULT_REPORTS
+  MachFault::UnregisterThisThread();
+#endif
   return nullptr;
 }
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 1; }
+extern "C" int ub_shader_import_version(void) { return 2; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

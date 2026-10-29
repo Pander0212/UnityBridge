@@ -376,16 +376,17 @@ ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
       const int64_t bind = s.Field("bindPoint")->Int();
       r.samplers.push_back({"UnityBridge_s" + std::to_string(bind), int(bind)});
     }
-  // Constant buffers shared by all variants of the program, bound by name.
+  // Constant buffers shared by all variants of the program, bound by name. A variant's own buffer of
+  // the same name (the game's builds list it there without its variables) gets the shared variables
+  // it lacks.
   if (const Value* buffers = common->Field("m_ConstantBuffers"))
     for (const auto& b : buffers->items) {
       ShaderXlat::ConstantBuffer c;
       c.name = nameOf(b, "cb");
-      bool same = false;
-      for (const auto& x : r.constantBuffers) same = same || x.name == c.name;
-      if (same) continue;
-      if (!registers.count(c.name)) continue;
-      c.bindPoint = registers[c.name];
+      ShaderXlat::ConstantBuffer* own = nullptr;
+      for (auto& x : r.constantBuffers) if (x.name == c.name) own = &x;
+      if (!own && !registers.count(c.name)) continue;
+      c.bindPoint = own ? own->bindPoint : registers[c.name];
       c.size = int(b.Field("m_Size")->Int());
       if (const Value* vectors = b.Field("m_VectorParams"))
         for (const auto& v : vectors->items) {
@@ -409,7 +410,16 @@ ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
           x.offset = int(v.Field("m_Index")->Int());
           c.variables.push_back(x);
         }
-      r.constantBuffers.push_back(c);
+      if (!own) {
+        r.constantBuffers.push_back(c);
+        continue;
+      }
+      own->size = std::max(own->size, c.size);
+      for (const auto& v : c.variables) {
+        bool have = false;
+        for (const auto& x : own->variables) have = have || x.name == v.name;
+        if (!have) own->variables.push_back(v);
+      }
     }
   return r;
 }

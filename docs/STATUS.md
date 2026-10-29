@@ -1126,3 +1126,17 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
      IOException went unhandled across the bridge and the process faulted. Fix: GetProcAddress /
      Baselib_DynamicLibrary_GetFunction on a built-in DLL return NULL for functions we do not
      implement, as Windows does, so il2cpp falls back to `BCryptGenRandom`.
+- **iPhone, run 62**: `BuildSettings: graphics APIs [2] -> [OpenGLES3]`, and no more "platform 5"
+  errors or the hardware-requirements dialog: the engine now takes the GLES3 path. BCrypt works
+  (`no function BCryptGenRandomW`, then the real one). The game reached `mainMenu` again, then
+  P/Invoked into ntdll and died on a managed NullReferenceException thrown across the bridge.
+  - Likely cause: .NET's file enumeration calls `ntdll!RtlNtStatusToDosError` for any status other
+    than success / no-more-files; we had none, and since run 62 GetFunction returns NULL for it (il2cpp
+    turns the call through 0 into a NullReferenceException). Added `RtlNtStatusToDosError`, a trace of
+    the first 24 `NtQueryDirectoryFile` calls (path, class, status, bytes) and a line per function
+    Baselib resolves.
+  - Stand-ins were still needed everywhere (`UnityPerDraw: 16 components without a variable` = one
+    float4x4): the game lists each cbuffer in the variant's table by name only, the variables are in
+    `m_CommonParameters.m_ConstantBuffers`, which were skipped when a same-named buffer existed. Now
+    merged into it. Converter version 6. The corpus has no common cbuffers (checked), so this is
+    for the device to show.

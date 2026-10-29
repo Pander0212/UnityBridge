@@ -4,6 +4,7 @@
 // without FILE_FLAG_OVERLAPPED.
 #include "common.h"
 
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -497,6 +498,11 @@ uint64_t NtQueryDirectoryFile(CallContext& c) {
       Store<uint64_t>(ioStatus, status);
       Store<uint64_t>(ioStatus + 8, written);
     }
+    static std::atomic<int> logged {0};
+    if (logged.fetch_add(1) < 24)
+      std::fprintf(stderr, "UB_WIN32 NtQueryDirectoryFile(%s, class %u%s) -> %#llx, %llu bytes\n",
+                   file ? file->path.c_str() : "(not a file handle)", infoClass, restart ? ", restart" : "",
+                   static_cast<unsigned long long>(status), static_cast<unsigned long long>(written));
     return status;
   };
   if (!file || !file->directory) return finish(kStatusInvalidHandle, 0);
@@ -571,6 +577,29 @@ uint64_t NtQueryDirectoryFile(CallContext& c) {
   }
   if (!any) return finish(kStatusNoMoreFiles, 0);
   return finish(kStatusSuccess, end);
+}
+
+// RtlNtStatusToDosError(status): the Win32 error for an NTSTATUS, which .NET's file enumeration asks
+// for whenever NtQueryDirectoryFile does not return success or no-more-files. The statuses our
+// ntdll returns and the common file ones; anything else ERROR_MR_MID_NOT_FOUND, as Windows does.
+uint64_t RtlNtStatusToDosError(CallContext& c) {
+  switch (static_cast<uint32_t>(c.Arg(0))) {
+  case 0x00000000: return 0;                       // STATUS_SUCCESS
+  case 0x80000005: return 234;                     // STATUS_BUFFER_OVERFLOW -> ERROR_MORE_DATA
+  case 0x80000006: return 18;                      // STATUS_NO_MORE_FILES
+  case 0xc0000003: return 87;                      // STATUS_INVALID_INFO_CLASS -> ERROR_INVALID_PARAMETER
+  case 0xc0000008: return 6;                       // STATUS_INVALID_HANDLE
+  case 0xc000000d: return 87;                      // STATUS_INVALID_PARAMETER
+  case 0xc000000f: return 2;                       // STATUS_NO_SUCH_FILE -> ERROR_FILE_NOT_FOUND
+  case 0xc0000022: return 5;                       // STATUS_ACCESS_DENIED
+  case 0xc0000023: return 122;                     // STATUS_BUFFER_TOO_SMALL -> ERROR_INSUFFICIENT_BUFFER
+  case 0xc0000034: return 2;                       // STATUS_OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND
+  case 0xc000003a: return 3;                       // STATUS_OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND
+  case 0xc0000035: return 183;                     // STATUS_OBJECT_NAME_COLLISION -> ERROR_ALREADY_EXISTS
+  case 0xc0000043: return 32;                      // STATUS_SHARING_VIOLATION
+  case 0xc0000103: return 267;                     // STATUS_NOT_A_DIRECTORY -> ERROR_DIRECTORY
+  default: return 317;                             // ERROR_MR_MID_NOT_FOUND
+  }
 }
 
 // ---- path queries ------------------------------------------------------------------------
@@ -720,6 +749,7 @@ void RegisterKernel32Files(std::vector<Function>& out) {
   UB_FN(CreateFileMappingW); UB_FN(OpenFileMappingW); UB_FN(MapViewOfFile); UB_FN(UnmapViewOfFile);
 #undef UB_FN
   out.push_back({"ntdll.dll", "NtQueryDirectoryFile", &NtQueryDirectoryFile});
+  out.push_back({"ntdll.dll", "RtlNtStatusToDosError", &RtlNtStatusToDosError});
 }
 
 } // namespace UnityBridge::Win32

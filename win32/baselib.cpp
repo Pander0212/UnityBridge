@@ -206,6 +206,8 @@ uint64_t Baselib_DynamicLibrary_GetFunction(CallContext& c) {
   if (!address)
     std::fprintf(stderr, "UB_WIN32 baselib: no function %s in %s\n", name ? name : "(null)",
                  module ? module->name.c_str() : "(unknown module)");
+  else if (module && name)
+    std::fprintf(stderr, "UB_WIN32 baselib: %s!%s\n", module->name.c_str(), name);  // P/Invokes resolve once each
   SetErrorState(c.Arg(2), address ? 0 : kErrorFailed);
   return address.value_or(0);
 }

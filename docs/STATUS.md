@@ -810,6 +810,12 @@ Next steps, in order:
         frames the search walked (module offset, unwind info or not, handler, frame, why it
         stopped) and, for il2cpp's C++ exceptions, the managed exception's class and message; the
         failed library open logs the name's first bytes (to rule out a UTF-8/UTF-16 mix-up).
+      - **First frame (user-confirmed, same run):** `Documents/Frames` held a frame: a plain pink
+        image, Unity's error shader, which is what every material without a GLES3 program draws
+        (the game's shaders are D3D11 only; M4). **The engine renders through ANGLE on Metal.**
+      - The game's `Plugins/x86_64/` holds `lib_burst_generated.dll` (Burst-compiled x86-64 code,
+        Windows, like GameAssembly.dll): likely the library il2cpp failed to open. Being x86-64 PE
+        code, it can run under FEXCore like GameAssembly once the PE loader loads it as a module.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

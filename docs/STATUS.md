@@ -1152,3 +1152,15 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   reported unhandled in every run. The host tests only exercise our own `__C_specific_handler`, not
   GameAssembly's statically linked MSVC handlers. Added a trace (`UB_SEH`) of the first 4 C++
   exceptions: every handler called with its disposition, and every RtlUnwindEx.
+- **iPhone, run 64 (UB_SEH trace)**: GameAssembly's `__CxxFrameHandler` does find the catch: frame 5's
+  handler calls `RtlUnwindEx(frame, +0xd59b9c, consolidate)` at once. But it then returns 1
+  (ContinueSearch) with no resume pending, and the same repeats on frames 6..15: the resume was
+  *applied* inside the language-handler callback instead of escaping to the RaiseException call
+  (the guest then ran the managed code after the catch on the handler's callback and came back
+  with a stray "1"). The resume root is `t_dispatchRootDepth` only while `t_dispatchActive`; the
+  bridge's TakePendingResume/TakeResumeInto cleared that flag on every applied resume, so anything
+  resumed while the catch funclet ran (RtlUnwindEx's consolidate callback) left the outer dispatch
+  "inactive", and its resume rooted at the RtlUnwindEx call itself. Fix: the flag is only
+  DispatchScope's (no more clearing on apply), and UnwindEx fixes its resume root on entry, before
+  the consolidate callback runs guest code. The trace now also logs each resume request and the
+  bridge's apply/escape decision.

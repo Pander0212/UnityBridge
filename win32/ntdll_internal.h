@@ -55,7 +55,9 @@ void CaptureContextFromCall(Context* out, const CallContext& call);
 // Requests a non-local resume of the current guest thread with `ctx` (NtContinue / RtlRestoreContext
 // minus the consolidate/longjmp fix-ups). Every SEH function returns early once this is set; the
 // RaiseException HLE handler applies it to the guest when it unwinds back out.
-void RequestResume(const Context* ctx);
+// Records a resume to `ctx`, realized at the HLE call of depth `rootDepth` (-1: the active dispatch's
+// root, or the current call outside a dispatch).
+void RequestResume(const Context* ctx, int rootDepth = -1);
 bool ResumePending();
 void ClearResume();
 // Copies the pending resume into the CallContext resume fields the bridge applies. Clears pending.

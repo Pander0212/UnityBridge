@@ -28,6 +28,7 @@ thread_local Context t_exceptionContext;
 // stderr: GameAssembly's own handlers (statically linked __CxxFrameHandler / __C_specific_handler)
 // have never caught one on the device, and only the device runs them.
 thread_local bool t_trace = false;
+thread_local int t_traceResumes = 0;  // resume requests and decisions still to log
 int g_traced = 0;
 // The pending non-local resume (NtContinue). Every SEH function returns early once it is set.
 thread_local Context t_resumeContext;
@@ -63,12 +64,22 @@ std::optional<uint64_t> DecodeJumpTarget(uint64_t addr) {
 
 } // namespace
 
+static uint64_t ModuleOffset(uint64_t pc) {
+  const uint64_t base = PcToFileHeader(pc);
+  return base ? pc - base : pc;
+}
+
 void SetExceptionContext(const Context& ctx) { t_exceptionContext = ctx; }
 
-void RequestResume(const Context* ctx) {
+void RequestResume(const Context* ctx, int rootDepth) {
   t_resumeContext = *ctx;
-  t_resumeRootDepth = t_dispatchActive ? t_dispatchRootDepth : t_invokeDepth;
+  t_resumeRootDepth = rootDepth >= 0 ? rootDepth : t_dispatchActive ? t_dispatchRootDepth : t_invokeDepth;
   t_resumePending = true;
+  if (t_traceResumes > 0) {
+    --t_traceResumes;
+    std::fprintf(stderr, "UB_SEH  resume requested: rip +%#llx, root depth %d (now %d)\n",
+                 static_cast<unsigned long long>(ModuleOffset(ctx->Rip)), t_resumeRootDepth, t_invokeDepth);
+  }
 }
 bool ResumePending() { return t_resumePending; }
 void ClearResume() { t_resumePending = false; }
@@ -79,8 +90,7 @@ void TakeResumeInto(CallContext& call) {
   for (int i = 0; i < 16; ++i) std::memcpy(call.resumeXmm[i], &t_resumeContext.FltSave.XmmRegisters[i], 16);
   call.resumeRip = t_resumeContext.Rip;
   call.resume = true;
-  t_resumePending = false;
-  t_dispatchActive = false;
+  t_resumePending = false;  // the dispatch state is DispatchScope's to restore
 }
 
 // Marks the extent of a dispatch, so a resume triggered from a nested RtlUnwindEx knows which HLE
@@ -107,11 +117,6 @@ void CaptureContextFromCall(Context* out, const CallContext& call) {
   for (int i = 0; i < 16; ++i) std::memcpy(&out->FltSave.XmmRegisters[i], call.xmmFull[i], 16);
 }
 
-uint64_t ModuleOffset(uint64_t pc) {
-  const uint64_t base = PcToFileHeader(pc);
-  return base ? pc - base : pc;
-}
-
 bool IsValidFrame(uint64_t frame) { return frame != 0 && (frame & (sizeof(void*) - 1)) == 0; }
 
 bool IsOurCSpecificHandler(uint64_t guestAddr) {
@@ -136,7 +141,7 @@ ExceptionDisposition CallLanguageHandler(void* handler, ExceptionRecord* rec, ui
 
 // RtlRestoreContext (minus the TEB-frame hack): handles the consolidate and longjmp pseudo-records,
 // then records the resume. Adapted from Wine's signal_x86_64.c.
-void RestoreContext(Context* context, ExceptionRecord* rec) {
+void RestoreContext(Context* context, ExceptionRecord* rec, int rootDepth) {
   if (rec && rec->ExceptionCode == STATUS_UNWIND_CONSOLIDATE && rec->NumberParameters >= 1) {
     // The consolidate callback (a guest function) returns the address to resume at. MSVC's C++
     // exception handling uses this to run the catch funclet on a clean frame.
@@ -144,13 +149,16 @@ void RestoreContext(Context* context, ExceptionRecord* rec) {
                                       {reinterpret_cast<uint64_t>(rec)});
     context->Rip = newRip;
   }
-  RequestResume(context);
+  RequestResume(context, rootDepth);
 }
 
 // RtlUnwindEx: unwinds from the exception point to `endFrame`, running termination handlers, then
 // records a resume to `targetIp` with `retval` in Rax. Adapted from Wine's RtlUnwindEx.
 void UnwindEx(void* endFrame, void* targetIp, ExceptionRecord* rec, void* retval,
               UnwindHistoryTable* /*table*/) {  // starts from t_exceptionContext
+  // Where the resume lands, fixed now: the consolidate callback below runs a catch funclet, which
+  // may dispatch exceptions of its own.
+  const int rootDepth = t_dispatchActive ? t_dispatchRootDepth : t_invokeDepth;
   Context context = t_exceptionContext;
   Context new_context = context;
   if (t_trace)
@@ -214,7 +222,7 @@ void UnwindEx(void* endFrame, void* targetIp, ExceptionRecord* rec, void* retval
 
   context.Rax = reinterpret_cast<uint64_t>(retval);
   if (rec->ExceptionCode != STATUS_UNWIND_CONSOLIDATE) context.Rip = reinterpret_cast<uint64_t>(targetIp);
-  RestoreContext(&context, rec);
+  RestoreContext(&context, rec, rootDepth);
 }
 
 // RtlDispatchException: the EHANDLER search over the frame chain. Adapted from Wine's
@@ -225,6 +233,7 @@ bool DispatchException(ExceptionRecord* rec, Context* orig_context) {
   t_trace = rec->ExceptionCode == 0xe06d7363 && g_traced < 4;
   if (t_trace) {
     ++g_traced;
+    t_traceResumes = 64;
     std::fprintf(stderr, "UB_SEH dispatch %#x at +%#llx, %u parameters, magic %#llx\n", rec->ExceptionCode,
                  static_cast<unsigned long long>(ModuleOffset(orig_context->Rip)), rec->NumberParameters,
                  static_cast<unsigned long long>(rec->NumberParameters ? rec->ExceptionInformation[0] : 0));
@@ -455,7 +464,7 @@ uint64_t NtContinue(CallContext& c) {
 }
 
 uint64_t RtlRestoreContext(CallContext& c) {
-  Ntdll::RestoreContext(c.Ptr<Context>(0), c.Ptr<ExceptionRecord>(1));
+  Ntdll::RestoreContext(c.Ptr<Context>(0), c.Ptr<ExceptionRecord>(1), -1);
   if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
   return 0;
 }
@@ -513,12 +522,24 @@ ResumeAction TakePendingResume(uint64_t gpr[16], uint64_t xmm[16][2], uint64_t& 
   if (!Ntdll::t_resumePending) return ResumeAction::None;
   // A nested language-handler sub-call (its HLE depth is deeper than the dispatch that owns the
   // resume): let the callback return first; the resume is realized at that outer level.
-  if (Ntdll::t_invokeDepth > Ntdll::t_resumeRootDepth) return ResumeAction::Escape;
+  if (Ntdll::t_invokeDepth > Ntdll::t_resumeRootDepth) {
+    if (Ntdll::t_traceResumes > 0) {
+      --Ntdll::t_traceResumes;
+      std::fprintf(stderr, "UB_SEH  escape from depth %d to %d\n", Ntdll::t_invokeDepth, Ntdll::t_resumeRootDepth);
+    }
+    return ResumeAction::Escape;
+  }
+  if (Ntdll::t_traceResumes > 0) {
+    --Ntdll::t_traceResumes;
+    std::fprintf(stderr, "UB_SEH  resume applied at depth %d\n", Ntdll::t_invokeDepth);
+  }
   for (int i = 0; i < 16; ++i) gpr[i] = (&Ntdll::t_resumeContext.Rax)[i];
   for (int i = 0; i < 16; ++i) std::memcpy(xmm[i], &Ntdll::t_resumeContext.FltSave.XmmRegisters[i], 16);
   rip = Ntdll::t_resumeContext.Rip;
+  // Not t_dispatchActive: a dispatch nested in a catch funclet (run by an outer RtlUnwindEx's
+  // consolidate callback) ends here, and clearing the flag made the outer unwind's resume root the
+  // nested call instead of its own dispatch: it was applied inside the language handler (run 64).
   Ntdll::t_resumePending = false;
-  Ntdll::t_dispatchActive = false;
   return ResumeAction::Apply;
 }
 

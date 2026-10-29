@@ -1227,3 +1227,15 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
 - Also in the log: `MethodAccessException: ... ICollection<IEventSystemHandler>.Clear on
   List<TMPEffects.Modifiers.Rotation>` and "Could not load TMPEffectsSettings" (TMPEffects, a text
   effects package); to look at.
+- **iPhone, run 70**: the user played: character creation, the lab, a fight ("Tragmaw has been
+  incapacitated!"), 60 s+ at ~28 fps. A managed exception during the fight was caught (`UB_SEH`:
+  resume at depth 2, Unity logged the MethodAccessException of TMPEffects and went on). The census
+  did not show the game's files: they came from the import cache, and the census was only logged
+  when a file was converted. Now each file's import summary (census included) is kept as the cache
+  stamp's second line and logged on every start; converter version 10 rewrites the stamps once.
+- The crash, ~2 min in, at "Loading area: Malith": three bridge calls into GameAssembly+0x16ade0
+  failed in CallWin64 with stage Mapping / EFAULT, then libunity read through a null pointer
+  (0x20). CallWin64 returns that for three different reasons (target not in guest code, guest stack
+  too low, stack-argument slots not writable); each now logs which (`UB_FEX CallWin64(...)`), and
+  the bridge's failure line names the GameAssembly offset, the thread, the HLE depth and whether the
+  call nested on a running guest thread.

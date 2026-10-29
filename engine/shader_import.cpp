@@ -89,8 +89,9 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
     failures += "; " + stats.log.substr(at, end - at);
     from = end;
   }
+  const std::string census = textures.empty() ? "" : "; " + textures;
   if (!out) {
-    Put(log, logcap, error + failures);
+    Put(log, logcap, error + failures + census);
     return 0;
   }
   const std::string tmp = std::string(dst) + ".tmp";
@@ -109,7 +110,7 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   Put(log, logcap, std::string(stats.graphicsApis ? "graphics APIs -> OpenGLES3; " : "") +
                        std::to_string(stats.shaders) + " shaders, " + std::to_string(stats.programs) +
                        " GLES3 programs (" + std::to_string(stats.standIns) + " with stand-ins), " +
-                       std::to_string(stats.failed) + " not translated" + failures);
+                       std::to_string(stats.failed) + " not translated" + failures + census);
   return 1;
 }
 
@@ -135,7 +136,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 9; }
+extern "C" int ub_shader_import_version(void) { return 10; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

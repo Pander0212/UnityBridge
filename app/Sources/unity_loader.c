@@ -239,13 +239,20 @@ static void convert_shaders(const char *unity_dir, int first)
         snprintf(stamp, sizeof(stamp), "%s.src", dst);
         snprintf(want, sizeof(want), "v%d\t%s\t%llu\t%ld\t", ub_shader_import_version(), e->path,
                  (unsigned long long)e->size, e->mtime);
+        char said[600] = "";  // the import's summary of this file, kept in the stamp's second line
         FILE *sf = fopen(stamp, "rb");
-        if (sf) { if (!fgets(have, sizeof(have), sf)) have[0] = 0; fclose(sf); }
+        if (sf) {
+            if (!fgets(have, sizeof(have), sf)) have[0] = 0;
+            if (!fgets(said, sizeof(said), sf)) said[0] = 0;
+            fclose(sf);
+        }
+        said[strcspn(said, "\n")] = 0;
         struct stat sd;
         int result;
         if (!strncmp(have, want, strlen(want))) {
             result = have[strlen(want)] == '1' && stat(dst, &sd) == 0 ? 1 : 0;
             if (result) ++cached;
+            if (said[0]) line("  shaders: %s (cached): %s", e->name, said);
         } else {
             char log[600] = "";
             line("  shaders: converting %s (%llu MiB) ...", e->name, (unsigned long long)(e->size >> 20));
@@ -253,7 +260,7 @@ static void convert_shaders(const char *unity_dir, int first)
             line("  shaders: %s: %s", e->name, log);
             if (result < 0) continue;  // no stamp: tried again next time
             sf = fopen(stamp, "wb");
-            if (sf) { fprintf(sf, "%s%d\n", want, result); fclose(sf); }
+            if (sf) { fprintf(sf, "%s%d\n%s\n", want, result, log); fclose(sf); }
             if (result) ++converted;
         }
         if (result != 1 || stat(dst, &sd) != 0) continue;

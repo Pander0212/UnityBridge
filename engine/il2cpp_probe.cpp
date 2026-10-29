@@ -340,8 +340,12 @@ uint64_t BridgeCall(uintptr_t target, const uint64_t (&args)[8]) {
   auto run = g_engine->CallWin64(thread, call);
   Win32::GuestExited();
   if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
-    std::fprintf(stderr, "UB_IL2CPP bridge call %#lx failed: stage=%d error=%d\n", static_cast<unsigned long>(target),
-                 static_cast<int>(failure->Stage), failure->Error);
+    char name[64];
+    if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0 || !name[0]) std::snprintf(name, sizeof(name), "?");
+    std::fprintf(stderr, "UB_IL2CPP bridge call GameAssembly+%#lx failed: stage=%d error=%d (thread %s, HLE depth %d, %s)\n",
+                 static_cast<unsigned long>(target - g_imageBase),
+                 static_cast<int>(failure->Stage), failure->Error, name, t_hleDepth,
+                 thread ? "own guest thread" : "nested");
     return 0;
   }
   return std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];

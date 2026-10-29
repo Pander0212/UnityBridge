@@ -2472,6 +2472,8 @@ EngineResult<Core::GuestExecutionState> GuestEngine::CallWin64(Thread* idle, con
     native = idle->Native;
   }
   if (ImplState->Syscalls->QueryGuestExecutableRange(native, call.Rip).Size == 0) {
+    std::fprintf(stderr, "UB_FEX CallWin64(%#llx): not in guest code (%s)\n",
+                 static_cast<unsigned long long>(call.Rip), nested ? "nested" : "outermost");
     return Failure(EngineStage::Mapping, EFAULT);
   }
 
@@ -2481,11 +2483,20 @@ EngineResult<Core::GuestExecutionState> GuestEngine::CallWin64(Thread* idle, con
   // arguments follow at entry + 8 and entry + 0x28.
   const std::uint64_t below = nested ? frame.gregs[FEXCore::X86State::REG_RSP] : idle->Request.Rsp;
   const std::uint64_t needed = 0x18 + 8 * call.Stack.size() + 0x80;
-  if (below < needed) return Failure(EngineStage::Mapping, EFAULT);
+  if (below < needed) {
+    std::fprintf(stderr, "UB_FEX CallWin64(%#llx): guest stack at %#llx too low (%s)\n",
+                 static_cast<unsigned long long>(call.Rip), static_cast<unsigned long long>(below),
+                 nested ? "nested" : "outermost");
+    return Failure(EngineStage::Mapping, EFAULT);
+  }
   const std::uint64_t rsp = ((below - needed) & ~std::uint64_t {15}) + 8;
   const std::uint64_t args = rsp - 16 + 0x28;
   if (!call.Stack.empty()) {
     if (!ImplState->Syscalls->IsWritableRange(native, args, 8 * call.Stack.size())) {
+      // UnityBridge: say which check failed (run 70: three bridge calls failed here before a crash).
+      std::fprintf(stderr, "UB_FEX CallWin64(%#llx): stack arguments at %#llx not writable (%s, rsp %#llx)\n",
+                   static_cast<unsigned long long>(call.Rip), static_cast<unsigned long long>(args),
+                   nested ? "nested" : "outermost", static_cast<unsigned long long>(below));
       return Failure(EngineStage::Mapping, EFAULT);
     }
     std::memcpy(reinterpret_cast<void*>(args), call.Stack.data(), 8 * call.Stack.size());

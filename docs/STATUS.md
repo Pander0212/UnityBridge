@@ -1212,3 +1212,18 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   10 fingers, phase 0 down / 1 move / 2 up).
 - One view (and layer) for the session, retained for good: a small × closes the game screen (the
   engine keeps running), "Show game" in the toolbar brings it back.
+- **iPhone, run 69: the game is playable [i].** The game view shows the game in landscape, touches
+  work: the user got from the main menu into character creation (the lab room, its text, the
+  action buttons and the log panel). Some images are missing: the portrait panel, the bars under it
+  and the map show as near-black shapes.
+- Likely cause: textures in desktop formats. ANGLE over Metal on the iPhone offers ETC1/ETC2, ASTC and
+  PVRTC, no S3TC/DXT nor BPTC/BC7 (the extension list in the log), and a Windows build compresses
+  its textures as DXT1/DXT5/BC7 (Unity's own `unity default resources`: DXT1/DXT5 in the Windows
+  copy where the Android copy has ETC_RGB4/ETC2_RGBA8). First step: a census of every file's
+  Texture2D objects by format at import (`engine/unity_textures.{h,cpp}`, class 28's 2021.3 type tree
+  generated like the others), logged as `shaders:   N textures: DXT5 .., BC7 ..`. Converter version 9
+  (so every file is looked at again once). Next: decode the formats the census shows to RGBA32 (or
+  re-encode) in the converted copies, including the data in `.resS` files.
+- Also in the log: `MethodAccessException: ... ICollection<IEventSystemHandler>.Clear on
+  List<TMPEffects.Modifiers.Rotation>` and "Could not load TMPEffectsSettings" (TMPEffects, a text
+  effects package); to look at.

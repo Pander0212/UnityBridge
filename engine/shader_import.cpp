@@ -14,6 +14,7 @@
 
 #include "engine/shader_gles3.h"
 #include "engine/unity_file.h"
+#include "engine/unity_textures.h"
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -68,8 +69,11 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   const auto has = [&](int classId) {
     return std::find(file->typeClassIds.begin(), file->typeClassIds.end(), classId) != file->typeClassIds.end();
   };
+  // M5: which texture formats the game uses (desktop ones do not sample on the iPhone's GPU).
+  const std::string textures = UnityTextures::CensusLine(UnityTextures::Census(*file, in.data, in.size));
+  if (note && !textures.empty()) note(textures.c_str());
   if (!has(48) && !has(141)) {  // Shader, BuildSettings
-    Put(log, logcap, "no shaders");
+    Put(log, logcap, textures.empty() ? "no shaders" : "no shaders; " + textures);
     return 0;
   }
   ShaderGles3::Stats stats;
@@ -131,7 +135,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 8; }
+extern "C" int ub_shader_import_version(void) { return 9; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

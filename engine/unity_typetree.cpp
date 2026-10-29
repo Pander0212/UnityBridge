@@ -206,6 +206,14 @@ const Node& BuildSettings2021_3() {
   return *tree;
 }
 
+const Node& Texture2D2021_3() {
+  static const Row rows[] = {
+#include "engine/typetree_texture2d_2021_3.inc"
+  };
+  static const auto tree = Build(rows, sizeof(rows) / sizeof(rows[0]));
+  return *tree;
+}
+
 Value* Value::Field(const std::string& name) {
   if (kind != Kind::Object) return nullptr;
   for (auto& item : items) if (item.node && item.node->name == name) return &item;

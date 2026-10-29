@@ -107,7 +107,7 @@ PY
 bash "$ROOT/scripts/fetch-hlslcc.sh"
 
 AP="$ROOT/third_party/aetherps4/src"
-ENGINE_SOURCES="$AP/core/fex/fex_guest_engine.cpp;$AP/core/guest_cpu/guest_cpu.cpp;$AP/core/guest_cpu/hle_call_adapter.cpp;$AP/core/ios/ios_jit_allocator.cpp;$ROOT/engine/probe_runner.cpp;$ROOT/engine/win32_device.cpp;$ROOT/engine/il2cpp_probe.cpp;$ROOT/engine/mach_fault.cpp;$ROOT/engine/il2cpp_bridge.cpp;$ROOT/engine/icall_bridge.cpp;$ROOT/engine/il2cpp_intercept.cpp;$ROOT/engine/unity_host.cpp;$ROOT/engine/shader_xlat.cpp;$ROOT/engine/shader_gles3.cpp;$ROOT/engine/unity_file.cpp;$ROOT/engine/unity_typetree.cpp;$ROOT/engine/shader_import.cpp;$ROOT/engine/call_native_arm64.S"
+ENGINE_SOURCES="$AP/core/fex/fex_guest_engine.cpp;$AP/core/guest_cpu/guest_cpu.cpp;$AP/core/guest_cpu/hle_call_adapter.cpp;$AP/core/ios/ios_jit_allocator.cpp;$ROOT/engine/probe_runner.cpp;$ROOT/engine/win32_device.cpp;$ROOT/engine/il2cpp_probe.cpp;$ROOT/engine/mach_fault.cpp;$ROOT/engine/il2cpp_bridge.cpp;$ROOT/engine/icall_bridge.cpp;$ROOT/engine/il2cpp_intercept.cpp;$ROOT/engine/unity_host.cpp;$ROOT/engine/shader_xlat.cpp;$ROOT/engine/shader_gles3.cpp;$ROOT/engine/unity_file.cpp;$ROOT/engine/unity_typetree.cpp;$ROOT/engine/shader_import.cpp;$ROOT/engine/unity_textures.cpp;$ROOT/engine/call_native_arm64.S"
 # The PE loader and the mini Win32, the same sources the host tests build.
 for f in loader/pe_image.cpp win32/hle.cpp win32/support.cpp win32/kernel32.cpp win32/other_dlls.cpp \
          win32/baselib.cpp win32/kernel32_sync.cpp win32/kernel32_files.cpp win32/kernel32_misc.cpp \

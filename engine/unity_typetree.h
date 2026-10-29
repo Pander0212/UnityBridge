@@ -37,6 +37,8 @@ std::unique_ptr<Node> Build(const Row* rows, size_t count);
 const Node& Shader2021_3();
 // Class 141 (BuildSettings, in globalgamemanagers), Unity 2021.3.
 const Node& BuildSettings2021_3();
+// Class 28 (Texture2D), Unity 2021.3.
+const Node& Texture2D2021_3();
 
 struct Value {
   enum class Kind { Primitive, Bytes, String, Vector, Object, Pair };

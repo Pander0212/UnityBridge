@@ -12,6 +12,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 | M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | **reached [i] (2026-10-28):** Fellworld's real `GameAssembly.dll` runs `il2cpp_init` to success on iPhone (returns 1, corlib + domain non-null, 0 unimplemented imports) |
 | M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | research done [R]: Husk's translation layer (GPL-2.0+) already runs Android Unity games; bridge measured |
 | M4 | D3D11 shaders converted; first frame | **reached [i] (2026-10-29):** Fellworld's main menu rendered on the iPhone with the GLES3 shaders converted on the device; 60 s, ~32 fps, no crash |
+| M5 | Playable on the iPhone: on-screen game view, touch, textures | **reached [i] (2026-10-29):** Fellworld played through several areas with touch, saving works, all images shown (DXT decoded at import) |
 
 ## M0: GameAssembly.dll (Fellworld) [R]
 
@@ -1254,3 +1255,8 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   Host checks: a DXT1 and a DXT5 block decode to the expected texels; Unity's Windows
   `unity default resources` converted: its two DXT textures (the splash cube, 2048x1024 with 12
   mips, and a 32x32 DXT1) match UnityPy's own decoding within 1 per channel. Converter version 11.
+- **iPhone, run 72: M5 reached [i] (2026-10-29).** All images show (147 DXT5 textures decoded to
+  RGBA32, 2 streamed `.ub.resS` files in the APK); the user played through several areas (Lab,
+  Malith, TheSpire, RisingSun, back and forth) without a crash, and saving works. The 64 MiB bridge
+  stack carried the area loads that ended run 70 and 71. Left in the log: TMPEffects'
+  MethodAccessException (caught, logged by Unity, harmless so far) and its missing settings asset.

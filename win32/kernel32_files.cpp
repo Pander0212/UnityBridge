@@ -137,7 +137,16 @@ void StoreAttributeData(uint64_t out, const struct stat& st) {
 struct File {
   int fd = -1;
   bool directory = false;
-  ~File() { if (fd >= 0) ::close(fd); }
+  // A directory's enumeration through NtQueryDirectoryFile: its host path, the open listing, the
+  // pattern given on the first call, and an entry read but not yet returned (it did not fit).
+  std::string path;
+  DIR* listing = nullptr;
+  std::string pattern = "*";
+  std::string pending;
+  ~File() {
+    if (listing) closedir(listing);
+    if (fd >= 0) ::close(fd);
+  }
 };
 
 struct Find {
@@ -192,6 +201,7 @@ uint64_t CreateFileW(CallContext& c) {
     auto file = std::make_shared<File>();
     file->fd = ::open(path.c_str(), O_RDONLY);
     file->directory = true;
+    file->path = path;
     if (file->fd < 0) return SetError(ErrorFromErrno(errno), kInvalidHandle);
     std::scoped_lock lock {g_mutex};
     const auto h = NewHandle();
@@ -465,6 +475,104 @@ uint64_t FindClose(CallContext& c) {
   return g_finds.erase(c.Arg(0)) ? kTrue : SetError(ERROR_INVALID_HANDLE, kFalse);
 }
 
+// NtQueryDirectoryFile(handle, event, apcRoutine, apcContext, ioStatus, buffer, length, class,
+// returnSingleEntry, fileName, restartScan) on a directory opened with CreateFileW: .NET's
+// Directory/FileSystemEnumerator uses it on Windows. Synchronous only; the information classes
+// FileDirectoryInformation (1), FileFullDirectoryInformation (2), FileBothDirectoryInformation (3)
+// and FileNamesInformation (12). Entries are 8-byte aligned and chained by NextEntryOffset; "." and
+// ".." are listed, as Windows does.
+constexpr uint64_t kStatusSuccess = 0, kStatusBufferOverflow = 0x80000005, kStatusNoMoreFiles = 0x80000006,
+                   kStatusInvalidInfoClass = 0xc0000003, kStatusInvalidHandle = 0xc0000008;
+
+uint64_t NtQueryDirectoryFile(CallContext& c) {
+  const auto file = FindFile(c.Arg(0));
+  const uint64_t ioStatus = c.Arg(4), buffer = c.Arg(5);
+  const auto length = static_cast<uint32_t>(c.Arg(6));
+  const auto infoClass = static_cast<uint32_t>(c.Arg(7));
+  const bool single = static_cast<uint8_t>(c.Arg(8)) != 0;
+  const uint64_t fileName = c.Arg(9);  // UNICODE_STRING*: Length (bytes), MaximumLength, Buffer at +8
+  const bool restart = static_cast<uint8_t>(c.Arg(10)) != 0;
+  auto finish = [&](uint64_t status, uint64_t written) {
+    if (ioStatus) {
+      Store<uint64_t>(ioStatus, status);
+      Store<uint64_t>(ioStatus + 8, written);
+    }
+    return status;
+  };
+  if (!file || !file->directory) return finish(kStatusInvalidHandle, 0);
+  uint32_t nameOffset;
+  switch (infoClass) {
+  case 1: nameOffset = 64; break;
+  case 2: nameOffset = 68; break;
+  case 3: nameOffset = 94; break;
+  case 12: nameOffset = 12; break;
+  default:
+    std::fprintf(stderr, "UB_WIN32 NtQueryDirectoryFile: information class %u not supported\n", infoClass);
+    return finish(kStatusInvalidInfoClass, 0);
+  }
+
+  std::scoped_lock lock {g_mutex};  // one enumeration at a time per process is plenty
+  if (restart || file->listing == nullptr) {
+    if (file->listing) closedir(file->listing);
+    file->listing = opendir(file->path.c_str());
+    file->pending.clear();
+    if (fileName && Load<uint16_t>(fileName) > 0) {
+      const auto* text = reinterpret_cast<const char16_t*>(Load<uint64_t>(fileName + 8));
+      file->pattern = Lower(ToUtf8(std::u16string_view(text, Load<uint16_t>(fileName) / 2)));
+    } else {
+      file->pattern = "*";
+    }
+    if (file->listing == nullptr) return finish(kStatusInvalidHandle, 0);
+  }
+
+  uint32_t offset = 0, previous = 0, end = 0;
+  bool any = false;
+  for (;;) {
+    std::string name;
+    if (!file->pending.empty()) {
+      name = std::move(file->pending);
+      file->pending.clear();
+    } else {
+      dirent* entry = readdir(file->listing);
+      if (entry == nullptr) break;
+      name = entry->d_name;
+    }
+    if (!Matches(file->pattern.c_str(), Lower(name).c_str())) continue;
+    struct stat st {};
+    if (::stat((file->path + "/" + name).c_str(), &st) != 0) continue;
+    const auto wide = ToUtf16(name);
+    const uint32_t nameBytes = static_cast<uint32_t>(wide.size() * 2);
+    const uint32_t size = nameOffset + nameBytes;
+    if (offset + size > length) {
+      file->pending = name;  // returned by the next call
+      if (!any) return finish(kStatusBufferOverflow, 0);
+      break;
+    }
+    const uint64_t e = buffer + offset;
+    std::memset(reinterpret_cast<void*>(e), 0, size);
+    if (infoClass == 12) {
+      Store<uint32_t>(e + 8, nameBytes);
+    } else {
+      const uint64_t time = FileTime(ModifiedTime(st));
+      const uint64_t bytes = S_ISDIR(st.st_mode) ? 0 : static_cast<uint64_t>(st.st_size);
+      for (int i = 0; i < 4; ++i) Store<uint64_t>(e + 8 + 8 * i, time);  // creation, access, write, change
+      Store<uint64_t>(e + 40, bytes);                                    // EndOfFile
+      Store<uint64_t>(e + 48, (bytes + 4095) & ~uint64_t {4095});        // AllocationSize
+      Store<uint32_t>(e + 56, Attributes(st));
+      Store<uint32_t>(e + 60, nameBytes);
+    }
+    std::memcpy(reinterpret_cast<void*>(e + nameOffset), wide.data(), nameBytes);
+    if (any) Store<uint32_t>(buffer + previous, offset - previous);  // the previous entry's NextEntryOffset
+    any = true;
+    previous = offset;
+    end = offset + size;
+    offset = (end + 7) & ~uint32_t {7};
+    if (single) break;
+  }
+  if (!any) return finish(kStatusNoMoreFiles, 0);
+  return finish(kStatusSuccess, end);
+}
+
 // ---- path queries ------------------------------------------------------------------------
 
 uint64_t GetFullPathNameW(CallContext& c) {
@@ -611,6 +719,7 @@ void RegisterKernel32Files(std::vector<Function>& out) {
   UB_FN(GetFullPathNameW); UB_FN(GetLongPathNameW); UB_FN(GetCurrentDirectoryW); UB_FN(GetTempPathW);
   UB_FN(CreateFileMappingW); UB_FN(OpenFileMappingW); UB_FN(MapViewOfFile); UB_FN(UnmapViewOfFile);
 #undef UB_FN
+  out.push_back({"ntdll.dll", "NtQueryDirectoryFile", &NtQueryDirectoryFile});
 }
 
 } // namespace UnityBridge::Win32

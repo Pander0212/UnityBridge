@@ -871,6 +871,17 @@ Next steps, in order:
         registers of its last exit (integer and control), or its stack base when no guest frames
         are live. `DuplicateHandle(GetCurrentThread())`, how the GC registers a thread, now gives
         a real handle per thread (it returned the pseudo handle). `ubtest.dll` checks it (bit 29).
+      - **Device run (run 50):** the GC's stop-the-world goes through (no unimplemented
+        `SuspendThread`, no "Fatal error in GC"). Next: another P/Invoke, `ntdll.dll!
+        NtQueryDirectoryFile` (.NET's `Directory`/`FileSystemEnumerator` on Windows), not there:
+        `EntryPointNotFoundException`, uncaught up to the bridge, the same fault after it. (The
+        failed opens show what reaches `OpenUtf16`: a buffer whose first character is right and
+        the rest is not a string: still open, the by-name fallback covers it.)
+      - **Fix, [i] pending:** `NtQueryDirectoryFile` on a directory opened with `CreateFileW`
+        (`FILE_FLAG_BACKUP_SEMANTICS`): classes 1, 2, 3 and 12, entries 8-byte aligned and
+        chained, `ReturnSingleEntry`, `RestartScan`, a search pattern, an entry that does not fit
+        kept for the next call, NT status codes. `ubtest.dll` imports it from its own `ntdll.def`
+        and checks listing, end, restart with pattern and a wrong class.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

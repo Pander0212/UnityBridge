@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 92, "92 imports");
+  Check(image.imports.size() == 93, "93 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";

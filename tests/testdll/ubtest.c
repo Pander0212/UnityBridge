@@ -63,6 +63,8 @@ IMPORT BOOL UnmapViewOfFile(void*);
 IMPORT BOOL DeleteFileW(const WCHAR*);
 IMPORT BOOL CreateDirectoryW(const WCHAR*, void*);
 IMPORT BOOL RemoveDirectoryW(const WCHAR*);
+IMPORT long NtQueryDirectoryFile(HANDLE, HANDLE, void*, void*, void*, void*, DWORD, int, unsigned char, void*,
+                                 unsigned char);
 
 IMPORT int LCMapStringW(DWORD, DWORD, const WCHAR*, int, WCHAR*, int);
 IMPORT int CompareStringW(DWORD, DWORD, const WCHAR*, int, const WCHAR*, int);
@@ -470,6 +472,32 @@ __declspec(dllexport) int ub_test_all(void) {
     UnmapViewOfFile((void*)view);
     CloseHandle(mapping);
     CloseHandle(h);
+
+    // NtQueryDirectoryFile over the folder: FileFullDirectoryInformation lists ".", ".." and data.bin
+    // (size 10), then no more files; a restart with a pattern and a single entry finds data.bin alone.
+    {
+      HANDLE d = CreateFileW(dir, 0x1 /* FILE_LIST_DIRECTORY */, 7, 0, 3, 0x02000000 /* BACKUP_SEMANTICS */, 0);
+      static unsigned long long info[512];
+      unsigned long long iosb[2] = {0, 0};
+      good &= d != (HANDLE)-1;
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 2, 0, 0, 0) == 0 && iosb[1] > 0;
+      int entries = 0, sawData = 0;
+      for (unsigned char* e = (unsigned char*)info;; e += *(DWORD*)e) {
+        const WCHAR* name = (const WCHAR*)(e + 68);
+        const DWORD bytes = *(DWORD*)(e + 60);
+        if (bytes == 16 && name[0] == 'd' && name[7] == 'n' && *(unsigned long long*)(e + 40) == 10) sawData = 1;
+        ++entries;
+        if (*(DWORD*)e == 0) break;
+      }
+      good &= entries == 3 && sawData;
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 2, 0, 0, 0) == (long)0x80000006;
+      static WCHAR bin[] = {'*', '.', 'B', 'I', 'N', 0};
+      struct { unsigned short length, maximum; unsigned pad; WCHAR* buffer; } pat = {10, 12, 0, bin};
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 1, 1, &pat, 1) == 0 && *(DWORD*)info == 0 &&
+              ((const WCHAR*)((unsigned char*)info + 64))[0] == 'd';
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 99, 0, 0, 0) == (long)0xc0000003;
+      CloseHandle(d);
+    }
 
     good &= CreateFileW(file, 0x80000000u, 0, 0, 1 /* CREATE_NEW */, 0x80, 0) == (HANDLE)-1 && GetLastError() == 80;
     good &= DeleteFileW(file) && !DeleteFileW(file) && GetLastError() == 2;

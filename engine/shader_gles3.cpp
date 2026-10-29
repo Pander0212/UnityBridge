@@ -247,33 +247,52 @@ int PlatformIndex(const Value& shader, uint32_t platform) {
   return -1;
 }
 
-// The decompressed blob of `platform` (one segment: Unity 2021.3 players have one).
-std::optional<std::vector<uint8_t>> PlatformBlob(Value& shader, uint32_t platform) {
+// A platform's blob as its decompressed segments. A large shader's blob (URP's UberPost) is split
+// into several LZ4 segments (offsets, compressedLengths and decompressedLengths hold one entry per
+// segment); the record table is at the start of segment 0, and each entry names the segment its
+// record is in.
+using Segments = std::vector<std::vector<uint8_t>>;
+
+std::optional<Segments> PlatformBlob(Value& shader, uint32_t platform) {
   const int i = PlatformIndex(shader, platform);
   Value* offsets = shader.Field("offsets");
   Value* compressed = shader.Field("compressedLengths");
   Value* decompressed = shader.Field("decompressedLengths");
   Value* blob = shader.Field("compressedBlob");
   if (i < 0 || !offsets || !compressed || !decompressed || !blob) return std::nullopt;
-  const auto first = [&](Value* v) -> std::optional<uint64_t> {
-    if (size_t(i) >= v->items.size() || v->items[size_t(i)].items.empty()) return std::nullopt;
-    return v->items[size_t(i)].items[0].bits;
-  };
-  const auto off = first(offsets), cl = first(compressed), dl = first(decompressed);
-  if (!off || !cl || !dl || *off + *cl > blob->bytes.size()) return std::nullopt;
-  return Lz4Decompress(reinterpret_cast<const uint8_t*>(blob->bytes.data()) + *off, size_t(*cl), size_t(*dl));
+  const size_t p = size_t(i);
+  if (p >= offsets->items.size() || p >= compressed->items.size() || p >= decompressed->items.size())
+    return std::nullopt;
+  const auto& off = offsets->items[p].items;
+  const auto& cl = compressed->items[p].items;
+  const auto& dl = decompressed->items[p].items;
+  if (off.empty() || off.size() != cl.size() || off.size() != dl.size()) return std::nullopt;
+  Segments segments;
+  for (size_t s = 0; s < off.size(); ++s) {
+    if (off[s].bits + cl[s].bits > blob->bytes.size()) return std::nullopt;
+    auto data = Lz4Decompress(reinterpret_cast<const uint8_t*>(blob->bytes.data()) + off[s].bits, size_t(cl[s].bits),
+                              size_t(dl[s].bits));
+    if (!data) return std::nullopt;
+    segments.push_back(std::move(*data));
+  }
+  return segments;
 }
 
-std::optional<std::string> Record(const std::vector<uint8_t>& blob, uint64_t index) {
+std::optional<std::string> Record(const Segments& segments, uint64_t index) {
+  if (segments.empty()) return std::nullopt;
+  const auto& table = segments[0];
   int32_t count = 0;
-  if (blob.size() < 4) return std::nullopt;
-  std::memcpy(&count, blob.data(), 4);
-  if (count < 0 || index >= uint64_t(count) || 4 + 12 * (index + 1) > blob.size()) return std::nullopt;
-  int32_t off = 0, len = 0;
-  std::memcpy(&off, blob.data() + 4 + 12 * index, 4);
-  std::memcpy(&len, blob.data() + 8 + 12 * index, 4);
-  if (off < 0 || len < 0 || size_t(off) + size_t(len) > blob.size()) return std::nullopt;
-  return std::string(reinterpret_cast<const char*>(blob.data()) + off, size_t(len));
+  if (table.size() < 4) return std::nullopt;
+  std::memcpy(&count, table.data(), 4);
+  if (count < 0 || index >= uint64_t(count) || 4 + 12 * (index + 1) > table.size()) return std::nullopt;
+  int32_t off = 0, len = 0, segment = 0;
+  std::memcpy(&off, table.data() + 4 + 12 * index, 4);
+  std::memcpy(&len, table.data() + 8 + 12 * index, 4);
+  std::memcpy(&segment, table.data() + 12 + 12 * index, 4);
+  if (segment < 0 || size_t(segment) >= segments.size()) return std::nullopt;
+  const auto& data = segments[size_t(segment)];
+  if (off < 0 || len < 0 || size_t(off) + size_t(len) > data.size()) return std::nullopt;
+  return std::string(reinterpret_cast<const char*>(data.data()) + off, size_t(len));
 }
 
 void DropPlatform(Value& shader, uint32_t platform) {
@@ -435,7 +454,7 @@ struct Pair {
   std::string code, params;  // the GLES3 records
 };
 
-std::optional<Pair> TranslatePair(const std::vector<uint8_t>& dx, uint64_t vsCode, uint64_t vsParams,
+std::optional<Pair> TranslatePair(const Segments& dx, uint64_t vsCode, uint64_t vsParams,
                                   uint64_t psCode, uint64_t psParams, const Value& vsProg, const Value& psProg,
                                   const std::map<int64_t, std::string>& names, std::string* error,
                                   std::string* notes) {

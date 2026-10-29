@@ -608,6 +608,16 @@ static int foreign_of(uintptr_t a)  // caller holds g_regions_lock
     return -1;
 }
 
+// Address space we just reserved was free, so no recorded foreign mapping can still be there: one
+// that was only partly unmapped keeps its entry, and once a window took its place, region_of took
+// the window's own pages for foreign ones (run 66: a commit past a window's head went to the kernel
+// unextended and failed). Caller holds g_regions_lock.
+static void forget_foreign(uintptr_t a, uintptr_t e)
+{
+    for (int i = 0; i < UB_MAX_FOREIGN; i++)
+        if (g_foreign[i].start && g_foreign[i].start < e && g_foreign[i].end > a) g_foreign[i].start = g_foreign[i].end = 0;
+}
+
 // The region whose claimed range overlaps [a, e) and that [a, e) belongs to, or -1. Caller holds
 // g_regions_lock.
 static int region_of(uintptr_t a, uintptr_t e)
@@ -627,6 +637,7 @@ static void *ub_mmap(void *addr, size_t len, int prot, int flags, int fd, long o
         pthread_mutex_lock(&g_regions_lock);
         int slot = -1;
         for (int i = 0; a && i < UB_MAX_REGIONS && slot < 0; i++) if (!g_regions[i].base) slot = i;
+        if (a) forget_foreign(a, a + head);
         if (slot >= 0) {
             g_regions[slot].base = a;
             g_regions[slot].window = r;
@@ -699,9 +710,13 @@ static int ub_mprotect(void *addr, size_t len, int prot)
         if (want > limit) want = limit;
         const uintptr_t from = g_regions[i].mapped_end;
         const bool ok = e <= limit && reserve(from, want - from, 0) == from;
-        if (ok) { g_regions[i].mapped_end = want; ++g_extended; }
+        if (ok) { g_regions[i].mapped_end = want; ++g_extended; forget_foreign(from, want); }
         else ++g_extend_failed;
+        const int grown = g_extended;
         pthread_mutex_unlock(&g_regions_lock);
+        if (ok && grown <= 8)
+            line("region at %#lx: grown to %lu MiB", (unsigned long)g_regions[i].base,
+                 (unsigned long)((want - g_regions[i].base) >> 20));
         if (!ok) {
             line("region at %#lx: no room to commit up to +%lu MiB (something else is mapped there)",
                  (unsigned long)g_regions[i].base, (unsigned long)((e - g_regions[i].base) >> 20));
@@ -712,8 +727,13 @@ static int ub_mprotect(void *addr, size_t len, int prot)
     }
     if (i >= 0 && a >= g_regions[i].mapped_end) { pthread_mutex_unlock(&g_regions_lock); return 0; }  // decommit of nothing
     if (i >= 0 && e > g_regions[i].mapped_end) len = g_regions[i].mapped_end - a;
+    const int f = foreign_of(a);
     pthread_mutex_unlock(&g_regions_lock);
-    return g_bionic_mprotect(addr, len, prot);
+    const int r = g_bionic_mprotect(addr, len, prot);
+    static int said;
+    if (r != 0 && prot != 0 && said++ < 8)  // a commit the kernel refused: whose memory we took it for
+        line("mprotect(%#lx, %#zx, %d) failed: region %d, foreign %d", (unsigned long)a, len, prot, i, f);
+    return r;
 }
 
 // MADV_DONTNEED inside a region: the pages read as zero afterwards (Husk does this for the mappings it

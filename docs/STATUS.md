@@ -1171,3 +1171,20 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   (UnityMain calling il2cpp through the bridge) took the host-test path, where RtlUnwindEx moves
   the resume into CallContext fields the device bridge never reads, and clears it. Now a process
   flag. (Run 64's fix of the resume root stays: it is right, but it was not what lost the catch.)
+- **iPhone, run 66: managed exceptions are caught now.** `UB_SEH` shows 24 resumes requested at
+  root 1, escaped from depth 2 and applied at depth 1; Unity logs each exception with its managed
+  stack trace and carries on (frames 421 at 5 s, 541 at 10 s). Two problems left:
+  1. Every frame: `NullReferenceException at UnityEngine.Rendering.Universal.Internal.PostProcessPass.Render`
+     (233 times). Likely the 2 UberPost variants that did not translate ("malformed code record"):
+     a large shader's platform blob is split into several LZ4 segments (one offsets /
+     compressedLengths / decompressedLengths entry each), and a record table entry
+     `(offset, length, segment)` points into its segment; we decompressed segment 0 only (as
+     UnityPy and USCSandbox do). Now all segments are decompressed and records read from theirs.
+     Converter version 7.
+  2. After ~20 s: a write fault in libunity at `0x323e04038`. Unity's allocator committed 2 MiB at
+     `0x323e04000`, crossing the 64 MiB head of the window at `0x320000000`; the commit reached the
+     kernel unextended and failed (ENOMEM), with no "grown" and no "no room" line, so `region_of`
+     did not take it for the window's. Suspected: a stale foreign-mapping entry (one only partly
+     unmapped keeps its entry) over address space a window took later. Now entries overlapping
+     newly reserved space are dropped, each growth is logged, and a refused commit logs which
+     region / foreign entry it was taken for.

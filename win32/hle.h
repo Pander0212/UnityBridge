@@ -87,6 +87,8 @@ public:
   void Dispatch(CallContext& ctx);
 
   const Function* Lookup(std::string_view dll, std::string_view name) const;
+  // The implemented function named `name` in any built-in DLL, or nullptr.
+  const Function* LookupAnyDll(std::string_view name) const;
   std::vector<std::string> UnimplementedCalls() const;  // "dll!name" seen at run time
 
   // The function a stub address belongs to, or nullptr if `address` is not a bound stub. Lets the

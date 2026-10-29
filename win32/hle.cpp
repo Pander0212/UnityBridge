@@ -130,6 +130,13 @@ const Function* Runtime::Lookup(std::string_view dll, std::string_view name) con
   return nullptr;
 }
 
+const Function* Runtime::LookupAnyDll(std::string_view name) const {
+  for (const auto& f : Functions()) {
+    if (f.name == name && f.handler) return &f;
+  }
+  return nullptr;
+}
+
 uintptr_t Runtime::EmitStub(uint32_t id) {
   uint8_t* p = stubs_.data() + size_t {id} * kStubSize;
   const uint32_t op = Operation(id);

@@ -96,11 +96,10 @@ Semaphore* FindSemaphore(uint64_t handle) {
 // GameAssembly behaved like the second (M3f: the "library name" read as plain arguments was "B", and
 // the error state went unseen), the ABI's rule says the first; the call tells: a return slot is a local
 // of the caller, just above its stack pointer, which a semaphore's memory or a library name is not.
-bool HiddenReturnSlot(const CallContext& c, const char* function) {
+bool HiddenReturnSlot(const CallContext& c, const char* function, std::atomic<int>& said) {
   const uint64_t a0 = c.Arg(0);
   const bool hidden = a0 >= c.rsp && a0 < c.rsp + (64u << 10);
-  static std::atomic<int> said {0};
-  if (said.fetch_add(1) < 4)
+  if (said.fetch_add(1) < 2)
     std::fprintf(stderr, "UB_WIN32 baselib: %s returns its handle %s\n", function,
                  hidden ? "through a hidden return slot (RCX)" : "in RAX");
   return hidden;
@@ -113,7 +112,8 @@ uint64_t ReturnHandle(CallContext& c, bool hidden, uint64_t handle) {
 }
 
 uint64_t Baselib_SystemSemaphore_CreateInplace(CallContext& c) {  // ([return slot,] memory)
-  const bool hidden = HiddenReturnSlot(c, "Baselib_SystemSemaphore_CreateInplace");
+  static std::atomic<int> said {0};
+  const bool hidden = HiddenReturnSlot(c, "Baselib_SystemSemaphore_CreateInplace", said);
   const uint64_t memory = c.Arg(hidden ? 1 : 0);
   {
     std::scoped_lock lock {g_semaphoresMutex};
@@ -152,13 +152,27 @@ uint64_t Baselib_SystemSemaphore_Release(CallContext& c) {
 // The module registry decides what can be opened: loaded PE images and UnityBridge's built-in DLLs.
 
 uint64_t Baselib_DynamicLibrary_OpenUtf16(CallContext& c) {  // ([return slot,] pathnameUtf16, errorState)
-  const bool hidden = HiddenReturnSlot(c, "Baselib_DynamicLibrary_OpenUtf16");
+  static std::atomic<int> said {0};
+  const bool hidden = HiddenReturnSlot(c, "Baselib_DynamicLibrary_OpenUtf16", said);
   const int a = hidden ? 1 : 0;
   const auto name = c.Arg(a) ? ToUtf8(ReadWide(c.Ptr<const char16_t>(a))) : std::string();
   // A built-in DLL (bcrypt.dll, ...) gets its handle on first use, as LoadLibrary does.
   const uint64_t handle = ModuleHandle(name);
   if (handle == 0) {
-    std::fprintf(stderr, "UB_WIN32 baselib: cannot open %s\n", name.c_str());
+    // What the caller passed, raw: the three argument registers, the call site, the bytes behind each.
+    const auto* main = MainModule();
+    std::fprintf(stderr, "UB_WIN32 baselib: cannot open %s (rcx=%#llx rdx=%#llx r8=%#llx rsp=%#llx, called from +%#llx)\n",
+                 name.c_str(), static_cast<unsigned long long>(c.Arg(0)), static_cast<unsigned long long>(c.Arg(1)),
+                 static_cast<unsigned long long>(c.Arg(2)), static_cast<unsigned long long>(c.rsp),
+                 static_cast<unsigned long long>(main && c.rip > main->base ? c.rip - main->base : c.rip));
+    for (int i = 0; i < 2; ++i) {  // RCX and RDX: pointers under either convention
+      const uint64_t p = c.Arg(i);
+      if (p < 0x100000000ull || p >= 0x800000000000ull) continue;
+      const auto* b = reinterpret_cast<const uint8_t*>(p);
+      char hex[3 * 32 + 1];
+      for (int k = 0; k < 32; ++k) std::snprintf(hex + 3 * k, 4, "%02x ", b[k]);
+      std::fprintf(stderr, "UB_WIN32   arg%d -> %s\n", i, hex);
+    }
     SetErrorState(c.Arg(a + 1), kErrorFailed);
     return ReturnHandle(c, hidden, 0);
   }
@@ -167,7 +181,8 @@ uint64_t Baselib_DynamicLibrary_OpenUtf16(CallContext& c) {  // ([return slot,] 
 }
 
 uint64_t Baselib_DynamicLibrary_FromNativeHandle(CallContext& c) {  // ([return slot,] handle, type, errorState)
-  const bool hidden = HiddenReturnSlot(c, "Baselib_DynamicLibrary_FromNativeHandle");
+  static std::atomic<int> said {0};
+  const bool hidden = HiddenReturnSlot(c, "Baselib_DynamicLibrary_FromNativeHandle", said);
   const int a = hidden ? 1 : 0;
   SetErrorState(c.Arg(a + 2), 0);
   return ReturnHandle(c, hidden, c.Arg(a));
@@ -176,7 +191,18 @@ uint64_t Baselib_DynamicLibrary_FromNativeHandle(CallContext& c) {  // ([return 
 uint64_t Baselib_DynamicLibrary_GetFunction(CallContext& c) {
   const auto* module = FindModuleByHandle(c.Arg(0));
   const char* name = c.Ptr<const char>(1);
-  const auto address = module && module->lookup && name ? module->lookup(name) : std::nullopt;
+  auto address = module && module->lookup && name ? module->lookup(name) : std::nullopt;
+  // A handle we never gave out (il2cpp carries on after a failed open, M3f): a function by that name
+  // in any built-in DLL, if one implements it.
+  if (!module && name) {
+    if (auto* runtime = Runtime::Current()) {
+      if (const Function* f = runtime->LookupAnyDll(name)) {
+        address = runtime->Resolve(f->dll, name);
+        std::fprintf(stderr, "UB_WIN32 baselib: %s from an unknown handle %#llx: %s's\n", name,
+                     static_cast<unsigned long long>(c.Arg(0)), f->dll.c_str());
+      }
+    }
+  }
   if (!address)
     std::fprintf(stderr, "UB_WIN32 baselib: no function %s in %s\n", name ? name : "(null)",
                  module ? module->name.c_str() : "(unknown module)");

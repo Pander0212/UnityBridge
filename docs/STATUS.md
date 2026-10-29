@@ -847,6 +847,15 @@ Next steps, in order:
         memory or a name is not), log which one they saw (first four calls), and handle both:
         the handle into the slot and its address in RAX, or the handle in RAX. `OpenUtf16` also
         opens built-in DLLs not yet used (`bcrypt.dll`). `ubtest.dll` checks both conventions.
+      - **Device run (run 48):** the semaphores return their handle **in RAX** (so they were
+        right before; the hidden-slot guess was wrong for them), and `OpenUtf16` still gets the
+        name "B" (its convention line was not logged: the four lines were shared and the
+        semaphores used them up). So il2cpp really passes "B" and ignores the error state; where
+        the "B" comes from is open (our `MultiByteToWideChar`/`LCMapString` check out).
+      - **Next, [i] pending:** a failed `OpenUtf16` logs RCX/RDX/R8, the call site in GameAssembly
+        and the 32 bytes behind RCX and RDX; each function logs its convention on its own. And a
+        robust way past it: `GetFunction` on a handle we never gave out looks the name up among
+        the functions the built-in DLLs implement (`BCryptGenRandom` is unique) and logs that.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

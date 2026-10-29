@@ -1065,5 +1065,6 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
 - Host check: `ub-shader-convert --import` on the Windows `unity default resources` with Unity's
   GLES3 removed: 6 shaders, 51 programs, none failed, same content as the reference; Unity's
   Android copy and the original Windows copy: nothing to convert; a non-Unity file: skipped.
-- Next: CI build, then on the iPhone: the first run converts (log lines `shaders:`), frames should
+- CI run 57 (`3a08365`) green: `libhlslcc.a` and the shader sources built for iOS and linked into the app.
+- Next: on the iPhone: the first run converts (log lines `shaders:`), frames should
   show the game instead of pink.

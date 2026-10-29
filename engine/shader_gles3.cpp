@@ -724,8 +724,9 @@ std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size
                                                 std::string* error, UnityTextures::TextureIO* textures) {
   const auto file = UnityFile::Parse(data, size, error);
   if (!file) return std::nullopt;
-  if (file->unityVersion.rfind("2021.3.", 0) != 0) {
-    *error = "Unity " + file->unityVersion + ": only 2021.3 shaders are known";
+  const TypeTree::Trees* trees = TypeTree::TreesFor(file->unityVersion);
+  if (!trees) {
+    *error = "Unity " + file->unityVersion + ": only 2021.3 and 6000.3 files are known";
     return std::nullopt;
   }
   std::vector<UnityFile::Replacement> replacements;
@@ -734,9 +735,9 @@ std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size
     if (o.classId == kBuildSettingsClass) {
       const uint8_t* bytes = data + file->dataOffset + o.byteStart;
       std::string why;
-      auto settings = TypeTree::Read(TypeTree::BuildSettings2021_3(), bytes, o.byteSize, &why);
+      auto settings = TypeTree::Read(trees->buildSettings, bytes, o.byteSize, &why);
       if (settings && TypeTree::Write(*settings) != std::vector<uint8_t>(bytes, bytes + o.byteSize))
-        settings.reset(), why = "does not match the 2021.3 type tree";
+        settings.reset(), why = std::string("does not match the ") + trees->version + " type tree";
       if (!settings) {
         stats->log += "BuildSettings: " + why + "\n";
         if (stats->progress) stats->progress("BuildSettings: " + why);
@@ -748,9 +749,9 @@ std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size
     if (o.classId == kTexture2DClass && textures) {
       const uint8_t* bytes = data + file->dataOffset + o.byteStart;
       std::string why;
-      auto texture = TypeTree::Read(TypeTree::Texture2D2021_3(), bytes, o.byteSize, &why);
+      auto texture = TypeTree::Read(trees->texture2d, bytes, o.byteSize, &why);
       if (texture && TypeTree::Write(*texture) != std::vector<uint8_t>(bytes, bytes + o.byteSize))
-        texture.reset(), why = "does not match the 2021.3 type tree";
+        texture.reset(), why = std::string("does not match the ") + trees->version + " type tree";
       if (texture && UnityTextures::ToRgba32(*texture, *textures, &why)) {
         replacements.push_back({i, TypeTree::Write(*texture)});
         ++stats->textures;
@@ -764,11 +765,11 @@ std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size
     std::string why;
     if (stats->progress)
       stats->progress("object " + std::to_string(o.pathId) + ": reading " + std::to_string(o.byteSize) + " bytes");
-    auto shader = TypeTree::Read(TypeTree::Shader2021_3(), data + file->dataOffset + o.byteStart, o.byteSize, &why);
+    auto shader = TypeTree::Read(trees->shader, data + file->dataOffset + o.byteStart, o.byteSize, &why);
     // Only a shader that writes back to its own bytes is one the built-in type tree describes.
     const uint8_t* original = data + file->dataOffset + o.byteStart;
     if (shader && TypeTree::Write(*shader) != std::vector<uint8_t>(original, original + o.byteSize))
-      shader.reset(), why = "does not match the 2021.3 type tree";
+      shader.reset(), why = std::string("does not match the ") + trees->version + " type tree";
     if (!shader) {
       stats->log += "shader object " + std::to_string(o.pathId) + ": " + why + "\n";
       continue;

@@ -40,6 +40,16 @@ const Node& BuildSettings2021_3();
 // Class 28 (Texture2D), Unity 2021.3.
 const Node& Texture2D2021_3();
 
+// The built-in trees of one Unity version (M6: 2021.3 and 6000.3).
+struct Trees {
+  const char* version;  // "2021.3", "6000.3"
+  const Node& shader;
+  const Node& texture2d;
+  const Node& buildSettings;
+};
+// The trees for a file of Unity `unityVersion` ("2021.3.18f1", "6000.3.15f1", ...), or nullptr.
+const Trees* TreesFor(const std::string& unityVersion);
+
 struct Value {
   enum class Kind { Primitive, Bytes, String, Vector, Object, Pair };
   const Node* node = nullptr;

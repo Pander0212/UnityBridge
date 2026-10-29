@@ -167,6 +167,28 @@ uint64_t SafeArrayGetVartype(CallContext& c) {
 thread_local int t_comInits = 0;
 uint64_t CoInitializeEx(CallContext&) { return t_comInits++ == 0 ? S_OK : S_FALSE; }
 uint64_t CoUninitialize(CallContext&) { if (t_comInits > 0) --t_comInits; return 0; }
+// ETW (Event Tracing for Windows) and user info, for Unity 6's il2cpp (M6): tracing is off.
+uint64_t EventRegister(CallContext& c) {  // (provider GUID*, callback, context, REGHANDLE*)
+  if (c.Arg(3)) Store<uint64_t>(c.Arg(3), 1);
+  return 0;
+}
+uint64_t EventSuccess(CallContext&) { return 0; }
+uint64_t EnumerateTraceGuidsEx(CallContext&) { return 50; }        // ERROR_NOT_SUPPORTED
+uint64_t GetDynamicTimeZoneInformationEffectiveYears(CallContext&) { return 2; }  // ERROR_FILE_NOT_FOUND
+uint64_t EnumDynamicTimeZoneInformation(CallContext&) { return 259; }  // ERROR_NO_MORE_ITEMS
+uint64_t GetUserNameW(CallContext& c) {  // (buffer, DWORD* size including the terminator)
+  static const std::u16string name = u"Player";
+  auto* size = c.Ptr<DWORD>(1);
+  if (!size) return SetError(87, kFalse);
+  if (*size < name.size() + 1) {
+    *size = static_cast<DWORD>(name.size() + 1);
+    return SetError(122, kFalse);  // ERROR_INSUFFICIENT_BUFFER
+  }
+  std::memcpy(c.Ptr<char16_t>(0), name.c_str(), (name.size() + 1) * sizeof(char16_t));
+  *size = static_cast<DWORD>(name.size() + 1);
+  return kTrue;
+}
+
 uint64_t CoTaskMemAlloc(CallContext& c) { return reinterpret_cast<uint64_t>(std::malloc(c.Arg(0) ? c.Arg(0) : 1)); }
 uint64_t CoTaskMemFree(CallContext& c) { std::free(c.Ptr<void>(0)); return 0; }
 uint64_t CoGetContextToken(CallContext&) { return E_NOTIMPL; }
@@ -344,6 +366,14 @@ void RegisterOtherDlls(std::vector<Function>& out) {
   out.push_back({adv, "CryptAcquireContextW", &CryptAcquireContextW});
   out.push_back({adv, "CryptReleaseContext", &CryptReleaseContext});
   out.push_back({adv, "CryptGenRandom", &CryptGenRandom});
+  out.push_back({adv, "EventRegister", &EventRegister});
+  for (const char* name : {"EventUnregister", "EventSetInformation", "EventWrite", "EventWriteTransfer", "EventWriteEx",
+                           "EventWriteString", "EventActivityIdControl"})
+    out.push_back({adv, name, &EventSuccess});
+  out.push_back({adv, "EnumerateTraceGuidsEx", &EnumerateTraceGuidsEx});
+  out.push_back({adv, "GetDynamicTimeZoneInformationEffectiveYears", &GetDynamicTimeZoneInformationEffectiveYears});
+  out.push_back({adv, "EnumDynamicTimeZoneInformation", &EnumDynamicTimeZoneInformation});
+  out.push_back({adv, "GetUserNameW", &GetUserNameW});
 
   const std::string bc = "bcrypt.dll";
   out.push_back({bc, "BCryptOpenAlgorithmProvider", &BCryptOpenAlgorithmProvider});

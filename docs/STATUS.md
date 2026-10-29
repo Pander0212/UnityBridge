@@ -1260,3 +1260,44 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   Malith, TheSpire, RisingSun, back and forth) without a crash, and saving works. The 64 MiB bridge
   stack carried the area loads that ended run 70 and 71. Left in the log: TMPEffects'
   MethodAccessException (caught, logged by Unity, harmless so far) and its missing settings asset.
+
+## M6: Unity 6 (2026-10-29, in progress)
+
+Target: "Milf Idle Life" v0.10 (the user's pick), **Unity 6000.3.15f1**, IL2CPP x64, Direct3D 12/11.
+Of the other games the user offered, five were Mono builds (`Managed/Assembly-CSharp.dll`, no
+GameAssembly.dll; out of reach of this approach) and one also 32-bit. Game files stay in the
+scratchpad; none in the repository.
+
+### M6a: what changes [R]
+
+- **il2cpp metadata v39** (2021.3: v29). We never parse the metadata ourselves (InternalCall
+  signatures come through il2cpp's own API), so the version itself does not matter.
+- **il2cpp API**: libunity 6000.3 asks for 234 `il2cpp_*` functions; GameAssembly exports all of them.
+  Every one we use exists. Three new ones take callbacks (`il2cpp_debug_foreach_method`,
+  `il2cpp_thread_walk_frame_stack`, `il2cpp_current_thread_walk_frame_stack`): added to the bridge's
+  host-callback list (answered with 0 and a log line instead of a host pointer run as guest code).
+- **Win32 imports**: 246, of which 68 were missing; now all of kernel32 (153), advapi32 (ETW
+  `Event*` as no-ops, `GetUserNameW`, time zone enumerations), baselib (12) are implemented; ws2_32
+  and WinRT stay stubs. New: `SleepConditionVariableCS`, `InitializeConditionVariable`, `Local*`,
+  `Get/SetThreadDescription`, `CopyFile2`, `GetTimeZoneInformationForYear`, `GetComputerNameW`,
+  `RtlUnwind` (RtlUnwindEx's handler), Baselib timer and futex.
+- **Data exports**: baselib.dll exports two variables (`Baselib_Timer_TickToNanosecondsConversionFactor`,
+  a double, and `Detail_Baselib_Cpu_FeatureData_CpuIdArray`). Imports used to bind to code stubs
+  only; `RegisterDataExport` / `DataExport` now bind such an import (and GetProcAddress) to the
+  variable. The CPUID table is left empty (no SSE4/AVX bits): il2cpp keeps to baseline paths.
+- **Files**: serialized format 22 as before. Type trees for 6000.3 from UnityPy's database
+  (`engine/typetree_{shader,texture2d,buildsettings}_6000_3.inc`), chosen per file version by
+  `TypeTree::TreesFor`. Shader: `m_SerializedKeywordStateMask` per program is new, editor fields
+  gone; the parts we change are the same. All 48 of the game's shaders round-trip byte-exactly.
+- **Conversion on the host** (the game's files): globalgamemanagers `[18, 2] -> [OpenGLES3]`;
+  globalgamemanagers.assets 39 shaders, 1185 GLES3 programs (2 URP debug shaders with UAVs not
+  translated); resources.assets 4; sharedassets0 26. Textures are mostly RGBA32 already (the 475 MB
+  .resS); 1 DXT1, 1 DXT5, 4 BC7.
+- **BC7 decoder** (`Bc7Block`, all 8 modes, partition and anchor tables): 100,000 random blocks
+  match texture2ddecoder (UnityPy's) bit for bit, and the game's four BC7 textures (up to
+  3872x3492, streamed into `.ub.resS`) decode identical to UnityPy's images. A vector per mode is in
+  the host test.
+- **Unity's Android player 6000.3.15f1**: from Unity's own download (the macOS Android Support
+  package; the Windows NSIS installer did not open with 7-Zip): `libunity.so`, `libmain.so`,
+  `unity default resources`; `classes.dex` made from the package's `classes.jar` with Google's D8
+  (r8 8.5.35, `--min-api 23`, DEX 035). Handed to the user privately, not in the repository.

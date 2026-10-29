@@ -3,6 +3,7 @@
 #include "engine/unity_typetree.h"
 
 #include <cstring>
+#include <iterator>
 #include <map>
 
 namespace UnityBridge::TypeTree {
@@ -212,6 +213,32 @@ const Node& Texture2D2021_3() {
   };
   static const auto tree = Build(rows, sizeof(rows) / sizeof(rows[0]));
   return *tree;
+}
+
+namespace {
+const Node& Table(const Row* rows, size_t count, std::unique_ptr<Node>& slot) {
+  if (!slot) slot = Build(rows, count);
+  return *slot;
+}
+} // namespace
+
+const Trees* TreesFor(const std::string& unityVersion) {
+  static const Trees v2021_3 {"2021.3", Shader2021_3(), Texture2D2021_3(), BuildSettings2021_3()};
+  static const Row shader6[] = {
+#include "engine/typetree_shader_6000_3.inc"
+  };
+  static const Row texture6[] = {
+#include "engine/typetree_texture2d_6000_3.inc"
+  };
+  static const Row build6[] = {
+#include "engine/typetree_buildsettings_6000_3.inc"
+  };
+  static std::unique_ptr<Node> s6, t6, b6;
+  static const Trees v6000_3 {"6000.3", Table(shader6, std::size(shader6), s6), Table(texture6, std::size(texture6), t6),
+                              Table(build6, std::size(build6), b6)};
+  if (unityVersion.rfind("2021.3.", 0) == 0) return &v2021_3;
+  if (unityVersion.rfind("6000.3.", 0) == 0) return &v6000_3;
+  return nullptr;
 }
 
 Value* Value::Field(const std::string& name) {

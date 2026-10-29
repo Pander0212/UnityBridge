@@ -502,6 +502,7 @@ void RegisterNtdllSeh(std::vector<Function>& out) {
   both("RtlLookupFunctionEntry", &RtlLookupFunctionEntry);
   both("RtlVirtualUnwind", &RtlVirtualUnwind);
   both("RtlUnwindEx", &RtlUnwindEx);
+  both("RtlUnwind", &RtlUnwindEx);  // (frame, ip, record, retval): RtlUnwindEx's first four (Unity 6)
   both("RtlPcToFileHeader", &RtlPcToFileHeader);
   both("RtlCaptureStackBackTrace", &RtlCaptureStackBackTrace);
   both("RtlRaiseException", &RtlRaiseException);

@@ -33,7 +33,8 @@ static int RoundTrip(const char* path) {
     if (o.classId != 48) continue;
     ++shaders;
     const uint8_t* bytes = data.data() + file->dataOffset + o.byteStart;
-    const auto v = TypeTree::Read(TypeTree::Shader2021_3(), bytes, o.byteSize, &error);
+    const auto* trees = TypeTree::TreesFor(file->unityVersion);
+    const auto v = trees ? TypeTree::Read(trees->shader, bytes, o.byteSize, &error) : std::nullopt;
     if (!v || TypeTree::Write(*v) != std::vector<uint8_t>(bytes, bytes + o.byteSize)) {
       ++bad;
       std::fprintf(stderr, "shader %lld: %s\n", static_cast<long long>(o.pathId),

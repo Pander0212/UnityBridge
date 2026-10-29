@@ -48,6 +48,10 @@ constexpr std::string_view kHostCallbackApis[] = {
     "il2cpp_class_for_each",
     "il2cpp_unity_liveness_allocate_struct",
     "il2cpp_unity_set_android_network_up_state_func",
+    // Unity 6 (M6): walkers that call back per frame or method.
+    "il2cpp_debug_foreach_method",
+    "il2cpp_thread_walk_frame_stack",
+    "il2cpp_current_thread_walk_frame_stack",
 };
 
 std::mutex g_mutex;

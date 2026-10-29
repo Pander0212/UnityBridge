@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 
 namespace UnityBridge::Win32 {
@@ -158,7 +159,26 @@ uintptr_t Runtime::EmitStub(uint32_t id) {
   return reinterpret_cast<uintptr_t>(p);
 }
 
+namespace {
+std::mutex g_dataMutex;
+std::map<std::string, uintptr_t> g_dataExports;  // "dll!name" (dll lower case)
+} // namespace
+
+void RegisterDataExport(std::string_view dll, std::string_view name, uintptr_t address) {
+  std::scoped_lock lock {g_dataMutex};
+  g_dataExports[Lower(dll) + "!" + std::string(name)] = address;
+}
+
+std::optional<uintptr_t> DataExport(std::string_view dll, std::string_view name) {
+  (void)Functions();  // the Register* functions add their data exports when the table is built
+  std::scoped_lock lock {g_dataMutex};
+  const auto it = g_dataExports.find(Lower(dll) + "!" + std::string(name));
+  if (it == g_dataExports.end()) return std::nullopt;
+  return it->second;
+}
+
 std::optional<uintptr_t> Runtime::Resolve(std::string_view dll, std::string_view name) {
+  if (const auto data = DataExport(dll, name)) return data;
   std::scoped_lock lock {g_mutex};
   const auto lowerDll = Lower(dll);
   for (const auto& stub : bound_) {

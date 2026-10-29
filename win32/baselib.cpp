@@ -148,6 +148,41 @@ uint64_t Baselib_SystemSemaphore_Release(CallContext& c) {
   return 0;
 }
 
+// ---- Unity 6 (M6): timer, futex, CPU features -----------------------------------------------
+// Ticks are nanoseconds of the steady clock, so the conversion factor (a data export) is 1.
+
+uint64_t Baselib_Timer_GetHighPrecisionTimerTicks(CallContext&) {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// One wait queue for all addresses: Notify wakes every waiter, each rechecks its own word. Futex
+// semantics allow spurious wake-ups.
+std::mutex g_futexMutex;
+std::condition_variable g_futex;
+
+uint64_t Baselib_SystemFutex_Wait(CallContext& c) {  // (int32_t* address, int32_t expected, uint32_t timeoutMs)
+  auto* word = c.Ptr<std::atomic<int32_t>>(0);
+  const auto expected = static_cast<int32_t>(c.Arg(1));
+  const auto ms = static_cast<uint32_t>(c.Arg(2));
+  std::unique_lock lock {g_futexMutex};
+  if (!word || word->load() != expected) return 0;
+  if (ms == 0xffffffffu) g_futex.wait(lock);
+  else g_futex.wait_for(lock, std::chrono::milliseconds(ms));
+  return 0;
+}
+
+uint64_t Baselib_SystemFutex_Notify(CallContext&) {  // (int32_t* address, uint32_t count, strategy)
+  std::scoped_lock lock {g_futexMutex};
+  g_futex.notify_all();
+  return 0;
+}
+
+// Data exports: the conversion factor, and the CPUID table baselib reads features from, left
+// empty (no SSE4/AVX bits): il2cpp then keeps to its baseline code paths, which FEXCore runs.
+alignas(16) const double g_tickToNanoseconds = 1.0;
+alignas(16) const uint8_t g_cpuIdArray[4096] = {};
+
 // ---- dynamic libraries -------------------------------------------------------------------
 // The module registry decides what can be opened: loaded PE images and UnityBridge's built-in DLLs.
 
@@ -256,6 +291,15 @@ void RegisterBaselib(std::vector<Function>& out) {
                  &Baselib_DynamicLibrary_Close});
   out.push_back({b, "?Baselib_ErrorState_Explain@il2cpp_baselib@@YAIPEBUBaselib_ErrorState@1@QEADIW4Baselib_ErrorState_ExplainVerbosity@1@@Z",
                  &Baselib_ErrorState_Explain});
+  // Unity 6
+  out.push_back({b, "?Baselib_Timer_GetHighPrecisionTimerTicks@il2cpp_baselib@@YA_KXZ", &Baselib_Timer_GetHighPrecisionTimerTicks});
+  out.push_back({b, "?Baselib_SystemFutex_Wait@il2cpp_baselib@@YAXPEAHHI@Z", &Baselib_SystemFutex_Wait});
+  out.push_back({b, "?Baselib_SystemFutex_Notify@il2cpp_baselib@@YAXPEAHIW4Baselib_WakeupFallbackStrategy@1@@Z",
+                 &Baselib_SystemFutex_Notify});
+  RegisterDataExport(b, "?Baselib_Timer_TickToNanosecondsConversionFactor@il2cpp_baselib@@3NB",
+                     reinterpret_cast<uintptr_t>(&g_tickToNanoseconds));
+  RegisterDataExport(b, "?Detail_Baselib_Cpu_FeatureData_CpuIdArray@il2cpp_baselib@@3QBUDetail_Baselib_Cpu_FeatureData_CpuId@1@B",
+                     reinterpret_cast<uintptr_t>(g_cpuIdArray));
 }
 
 } // namespace UnityBridge::Win32

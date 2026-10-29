@@ -360,6 +360,21 @@ uint64_t SleepConditionVariableSRW(CallContext& c) {
   }
   return signalled ? kTrue : SetError(ERROR_TIMEOUT, kFalse);
 }
+// (cv, CRITICAL_SECTION*, ms): the section is held once by the caller (a recursive hold would stay
+// held while waiting, which Windows does not do either for a single level).
+uint64_t SleepConditionVariableCS(CallContext& c) {
+  constexpr DWORD INFINITE = 0xffffffffu, ERROR_TIMEOUT = 1460;
+  auto& cv = g_conditions.Get(c.Arg(0));
+  auto& section = g_criticalSections.Get(c.Arg(1));
+  const auto ms = static_cast<DWORD>(c.Arg(2));
+  std::unique_lock guard {section, std::adopt_lock};
+  bool signalled = true;
+  if (ms == INFINITE) cv.wait(guard);
+  else signalled = cv.wait_for(guard, std::chrono::milliseconds(ms)) == std::cv_status::no_timeout;
+  guard.release();
+  return signalled ? kTrue : SetError(ERROR_TIMEOUT, kFalse);
+}
+uint64_t InitializeConditionVariable(CallContext& c) { Store<uint64_t>(c.Arg(0), 0); g_conditions.Get(c.Arg(0)); return 0; }
 uint64_t WakeAllConditionVariable(CallContext& c) { g_conditions.Get(c.Arg(0)).notify_all(); return 0; }
 uint64_t WakeConditionVariable(CallContext& c) { g_conditions.Get(c.Arg(0)).notify_one(); return 0; }
 
@@ -505,6 +520,7 @@ uintptr_t BuiltinHandle(std::string_view name) {
     auto* runtime = Runtime::Current();
     if (runtime == nullptr) return std::nullopt;
     const std::string file = dll.find('.') == std::string::npos ? dll + ".dll" : dll;
+    if (const auto data = DataExport(file, symbol)) return data;
     const Function* f = runtime->Lookup(file, symbol);
     if (f == nullptr || f->handler == nullptr) return std::nullopt;
     return runtime->Resolve(file, symbol);
@@ -659,6 +675,7 @@ void RegisterKernel32(std::vector<Function>& out) {
   UB_FN(InitializeSRWLock); UB_FN(AcquireSRWLockExclusive); UB_FN(ReleaseSRWLockExclusive);
   UB_FN(AcquireSRWLockShared); UB_FN(ReleaseSRWLockShared);
   UB_FN(SleepConditionVariableSRW); UB_FN(WakeAllConditionVariable); UB_FN(WakeConditionVariable);
+  UB_FN(SleepConditionVariableCS); UB_FN(InitializeConditionVariable);
   UB_FN(InitializeSListHead);
   UB_FN(GetCurrentProcess); UB_FN(GetCurrentThread); UB_FN(GetCurrentProcessId); UB_FN(GetCurrentThreadId);
   UB_FN(IsDebuggerPresent);

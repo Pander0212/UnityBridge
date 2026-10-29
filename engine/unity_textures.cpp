@@ -26,6 +26,7 @@ std::string FormatName(int format) {
 
 std::map<int, int> Census(const UnityFile::File& file, const uint8_t* data, size_t size) {
   std::map<int, int> census;
+  const TypeTree::Trees* trees = TypeTree::TreesFor(file.unityVersion);
   for (const auto& o : file.objects) {
     if (o.classId != 28) continue;
     if (file.dataOffset + o.byteStart + o.byteSize > size) {
@@ -33,7 +34,11 @@ std::map<int, int> Census(const UnityFile::File& file, const uint8_t* data, size
       continue;
     }
     std::string error;
-    const auto v = TypeTree::Read(TypeTree::Texture2D2021_3(), data + file.dataOffset + o.byteStart, o.byteSize, &error);
+    if (!trees) {
+      ++census[-1];
+      continue;
+    }
+    const auto v = TypeTree::Read(trees->texture2d, data + file.dataOffset + o.byteStart, o.byteSize, &error);
     const TypeTree::Value* format = v ? v->Field("m_TextureFormat") : nullptr;
     ++census[format ? static_cast<int>(format->Int()) : -1];
   }
@@ -102,7 +107,155 @@ void AlphaBlock(const uint8_t* b, uint8_t out[16]) {
   for (int i = 0; i < 16; ++i, bits >>= 3) out[i] = a[bits & 7];
 }
 
-int BlockBytes(int format) { return format == 10 ? 8 : format == 12 ? 16 : 0; }
+// ---- BC7 (format 25): eight modes, after the D3D11 BC7 format description ----------------------
+
+struct Bc7Mode {
+  int subsets, partitionBits, rotationBits, indexSelectionBits, colorBits, alphaBits, endpointPBits, sharedPBits,
+      indexBits, index2Bits;
+};
+const Bc7Mode kBc7Modes[8] = {
+    {3, 4, 0, 0, 4, 0, 1, 0, 3, 0}, {2, 6, 0, 0, 6, 0, 0, 1, 3, 0}, {3, 6, 0, 0, 5, 0, 0, 0, 2, 0},
+    {2, 6, 0, 0, 7, 0, 1, 0, 2, 0}, {1, 0, 2, 1, 5, 6, 0, 0, 2, 3}, {1, 0, 2, 0, 7, 8, 0, 0, 2, 2},
+    {1, 0, 0, 0, 7, 7, 1, 0, 4, 0}, {2, 6, 0, 0, 5, 5, 1, 0, 2, 0},
+};
+
+const uint8_t kBc7Partition2[64][16] = {
+    {0,0,1,1,0,0,1,1,0,0,1,1,0,0,1,1}, {0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1}, {0,1,1,1,0,1,1,1,0,1,1,1,0,1,1,1}, {0,0,0,1,0,0,1,1,0,0,1,1,0,1,1,1},
+    {0,0,0,0,0,0,0,1,0,0,0,1,0,0,1,1}, {0,0,1,1,0,1,1,1,0,1,1,1,1,1,1,1}, {0,0,0,1,0,0,1,1,0,1,1,1,1,1,1,1}, {0,0,0,0,0,0,0,1,0,0,1,1,0,1,1,1},
+    {0,0,0,0,0,0,0,0,0,0,0,1,0,0,1,1}, {0,0,1,1,0,1,1,1,1,1,1,1,1,1,1,1}, {0,0,0,0,0,0,0,1,0,1,1,1,1,1,1,1}, {0,0,0,0,0,0,0,0,0,0,0,1,0,1,1,1},
+    {0,0,0,1,0,1,1,1,1,1,1,1,1,1,1,1}, {0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1}, {0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1}, {0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1},
+    {0,0,0,0,1,0,0,0,1,1,1,0,1,1,1,1}, {0,1,1,1,0,0,0,1,0,0,0,0,0,0,0,0}, {0,0,0,0,0,0,0,0,1,0,0,0,1,1,1,0}, {0,1,1,1,0,0,1,1,0,0,0,1,0,0,0,0},
+    {0,0,1,1,0,0,0,1,0,0,0,0,0,0,0,0}, {0,0,0,0,1,0,0,0,1,1,0,0,1,1,1,0}, {0,0,0,0,0,0,0,0,1,0,0,0,1,1,0,0}, {0,1,1,1,0,0,1,1,0,0,1,1,0,0,0,1},
+    {0,0,1,1,0,0,0,1,0,0,0,1,0,0,0,0}, {0,0,0,0,1,0,0,0,1,0,0,0,1,1,0,0}, {0,1,1,0,0,1,1,0,0,1,1,0,0,1,1,0}, {0,0,1,1,0,1,1,0,0,1,1,0,1,1,0,0},
+    {0,0,0,1,0,1,1,1,1,1,1,0,1,0,0,0}, {0,0,0,0,1,1,1,1,1,1,1,1,0,0,0,0}, {0,1,1,1,0,0,0,1,1,0,0,0,1,1,1,0}, {0,0,1,1,1,0,0,1,1,0,0,1,1,1,0,0},
+    {0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1}, {0,0,0,0,1,1,1,1,0,0,0,0,1,1,1,1}, {0,1,0,1,1,0,1,0,0,1,0,1,1,0,1,0}, {0,0,1,1,0,0,1,1,1,1,0,0,1,1,0,0},
+    {0,0,1,1,1,1,0,0,0,0,1,1,1,1,0,0}, {0,1,0,1,0,1,0,1,1,0,1,0,1,0,1,0}, {0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1}, {0,1,0,1,1,0,1,0,1,0,1,0,0,1,0,1},
+    {0,1,1,1,0,0,1,1,1,1,0,0,1,1,1,0}, {0,0,0,1,0,0,1,1,1,1,0,0,1,0,0,0}, {0,0,1,1,0,0,1,0,0,1,0,0,1,1,0,0}, {0,0,1,1,1,0,1,1,1,1,0,1,1,1,0,0},
+    {0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0}, {0,0,1,1,1,1,0,0,1,1,0,0,0,0,1,1}, {0,1,1,0,0,1,1,0,1,0,0,1,1,0,0,1}, {0,0,0,0,0,1,1,0,0,1,1,0,0,0,0,0},
+    {0,1,0,0,1,1,1,0,0,1,0,0,0,0,0,0}, {0,0,1,0,0,1,1,1,0,0,1,0,0,0,0,0}, {0,0,0,0,0,0,1,0,0,1,1,1,0,0,1,0}, {0,0,0,0,0,1,0,0,1,1,1,0,0,1,0,0},
+    {0,1,1,0,1,1,0,0,1,0,0,1,0,0,1,1}, {0,0,1,1,0,1,1,0,1,1,0,0,1,0,0,1}, {0,1,1,0,0,0,1,1,1,0,0,1,1,1,0,0}, {0,0,1,1,1,0,0,1,1,1,0,0,0,1,1,0},
+    {0,1,1,0,1,1,0,0,1,1,0,0,1,0,0,1}, {0,1,1,0,0,0,1,1,0,0,1,1,1,0,0,1}, {0,1,1,1,1,1,1,0,1,0,0,0,0,0,0,1}, {0,0,0,1,1,0,0,0,1,1,1,0,0,1,1,1},
+    {0,0,0,0,1,1,1,1,0,0,1,1,0,0,1,1}, {0,0,1,1,0,0,1,1,1,1,1,1,0,0,0,0}, {0,0,1,0,0,0,1,0,1,1,1,0,1,1,1,0}, {0,1,0,0,0,1,0,0,0,1,1,1,0,1,1,1},
+};
+
+const uint8_t kBc7Partition3[64][16] = {
+    {0,0,1,1,0,0,1,1,0,2,2,1,2,2,2,2}, {0,0,0,1,0,0,1,1,2,2,1,1,2,2,2,1}, {0,0,0,0,2,0,0,1,2,2,1,1,2,2,1,1}, {0,2,2,2,0,0,2,2,0,0,1,1,0,1,1,1},
+    {0,0,0,0,0,0,0,0,1,1,2,2,1,1,2,2}, {0,0,1,1,0,0,1,1,0,0,2,2,0,0,2,2}, {0,0,2,2,0,0,2,2,1,1,1,1,1,1,1,1}, {0,0,1,1,0,0,1,1,2,2,1,1,2,2,1,1},
+    {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2}, {0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2}, {0,0,0,0,1,1,1,1,2,2,2,2,2,2,2,2}, {0,0,1,2,0,0,1,2,0,0,1,2,0,0,1,2},
+    {0,1,1,2,0,1,1,2,0,1,1,2,0,1,1,2}, {0,1,2,2,0,1,2,2,0,1,2,2,0,1,2,2}, {0,0,1,1,0,1,1,2,1,1,2,2,1,2,2,2}, {0,0,1,1,2,0,0,1,2,2,0,0,2,2,2,0},
+    {0,0,0,1,0,0,1,1,0,1,1,2,1,1,2,2}, {0,1,1,1,0,0,1,1,2,0,0,1,2,2,0,0}, {0,0,0,0,1,1,2,2,1,1,2,2,1,1,2,2}, {0,0,2,2,0,0,2,2,0,0,2,2,1,1,1,1},
+    {0,1,1,1,0,1,1,1,0,2,2,2,0,2,2,2}, {0,0,0,1,0,0,0,1,2,2,2,1,2,2,2,1}, {0,0,0,0,0,0,1,1,0,1,2,2,0,1,2,2}, {0,0,0,0,1,1,0,0,2,2,1,0,2,2,1,0},
+    {0,1,2,2,0,1,2,2,0,0,1,1,0,0,0,0}, {0,0,1,2,0,0,1,2,1,1,2,2,2,2,2,2}, {0,1,1,0,1,2,2,1,1,2,2,1,0,1,1,0}, {0,0,0,0,0,1,1,0,1,2,2,1,1,2,2,1},
+    {0,0,2,2,1,1,0,2,1,1,0,2,0,0,2,2}, {0,1,1,0,0,1,1,0,2,0,0,2,2,2,2,2}, {0,0,1,1,0,1,2,2,0,1,2,2,0,0,1,1}, {0,0,0,0,2,0,0,0,2,2,1,1,2,2,2,1},
+    {0,0,0,0,0,0,0,2,1,1,2,2,1,2,2,2}, {0,2,2,2,0,0,2,2,0,0,1,2,0,0,1,1}, {0,0,1,1,0,0,1,2,0,0,2,2,0,2,2,2}, {0,1,2,0,0,1,2,0,0,1,2,0,0,1,2,0},
+    {0,0,0,0,1,1,1,1,2,2,2,2,0,0,0,0}, {0,1,2,0,1,2,0,1,2,0,1,2,0,1,2,0}, {0,1,2,0,2,0,1,2,1,2,0,1,0,1,2,0}, {0,0,1,1,2,2,0,0,1,1,2,2,0,0,1,1},
+    {0,0,1,1,1,1,2,2,2,2,0,0,0,0,1,1}, {0,1,0,1,0,1,0,1,2,2,2,2,2,2,2,2}, {0,0,0,0,0,0,0,0,2,1,2,1,2,1,2,1}, {0,0,2,2,1,1,2,2,0,0,2,2,1,1,2,2},
+    {0,0,2,2,0,0,1,1,0,0,2,2,0,0,1,1}, {0,2,2,0,1,2,2,1,0,2,2,0,1,2,2,1}, {0,1,0,1,2,2,2,2,2,2,2,2,0,1,0,1}, {0,0,0,0,2,1,2,1,2,1,2,1,2,1,2,1},
+    {0,1,0,1,0,1,0,1,0,1,0,1,2,2,2,2}, {0,2,2,2,0,1,1,1,0,2,2,2,0,1,1,1}, {0,0,0,2,1,1,1,2,0,0,0,2,1,1,1,2}, {0,0,0,0,2,1,1,2,2,1,1,2,2,1,1,2},
+    {0,2,2,2,0,1,1,1,0,1,1,1,0,2,2,2}, {0,0,0,2,1,1,1,2,1,1,1,2,0,0,0,2}, {0,1,1,0,0,1,1,0,0,1,1,0,2,2,2,2}, {0,0,0,0,0,0,0,0,2,1,1,2,2,1,1,2},
+    {0,1,1,0,0,1,1,0,2,2,2,2,2,2,2,2}, {0,0,2,2,0,0,1,1,0,0,1,1,0,0,2,2}, {0,0,2,2,1,1,2,2,1,1,2,2,0,0,2,2}, {0,0,0,0,0,0,0,0,0,0,0,0,2,1,1,2},
+    {0,0,0,2,0,0,0,1,0,0,0,2,0,0,0,1}, {0,2,2,2,1,2,2,2,0,2,2,2,1,2,2,2}, {0,1,0,1,2,2,2,2,2,2,2,2,2,2,2,2}, {0,1,1,1,2,0,1,1,2,2,0,1,2,2,2,0},
+};
+
+const uint8_t kBc7Anchor2[64] = {15,15,15,15,15,15,15,15, 15,15,15,15,15,15,15,15, 15, 2, 8, 2, 2, 8, 8,15, 2, 8, 2, 2, 8, 8, 2, 2,
+                                 15,15, 6, 8, 2, 8,15,15, 2, 8, 2, 2, 2,15,15, 6, 6, 2, 6, 8,15,15, 2, 2, 15,15,15,15,15, 2, 2,15};
+const uint8_t kBc7Anchor3a[64] = {3, 3,15,15, 8, 3,15,15, 8, 8, 6, 6, 6, 5, 3, 3, 3, 3, 8,15, 3, 3, 6,10, 5, 8, 8, 6, 8, 5,15,15,
+                                  8,15, 3, 5, 6,10, 8,15, 15, 3,15, 5,15,15,15,15, 3,15, 5, 5, 5, 8, 5,10, 5,10, 8,13,15,12, 3, 3};
+const uint8_t kBc7Anchor3b[64] = {15, 8, 8, 3,15,15, 3, 8, 15,15,15,15,15,15,15, 8, 15, 8,15, 3,15, 8,15, 8, 3,15, 6,10,15,15,10, 8,
+                                  15, 3,15,10,10, 8, 9,10, 6,15, 8,15, 3, 6, 6, 8, 15, 3,15,15,15,15,15,15, 15,15,15,15, 3,15,15, 8};
+
+const uint8_t kBc7Weights2[4] = {0, 21, 43, 64};
+const uint8_t kBc7Weights3[8] = {0, 9, 18, 27, 37, 46, 55, 64};
+const uint8_t kBc7Weights4[16] = {0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64};
+
+class Bits128 {
+public:
+  explicit Bits128(const uint8_t* b) : b_(b) {}
+  uint32_t Read(int n) {
+    uint32_t v = 0;
+    for (int i = 0; i < n; ++i, ++pos_) v |= uint32_t((b_[pos_ >> 3] >> (pos_ & 7)) & 1) << i;
+    return v;
+  }
+private:
+  const uint8_t* b_;
+  int pos_ = 0;
+};
+
+uint8_t Bc7Interpolate(uint8_t e0, uint8_t e1, uint32_t index, int bits) {
+  const uint8_t w = bits == 2 ? kBc7Weights2[index] : bits == 3 ? kBc7Weights3[index] : kBc7Weights4[index];
+  return uint8_t(((64 - w) * e0 + w * e1 + 32) >> 6);
+}
+
+void Bc7Block(const uint8_t* block, uint8_t out[16][4]) {
+  int mode = 0;
+  while (mode < 8 && !((block[0] >> mode) & 1)) ++mode;
+  if (mode == 8) {  // reserved: transparent black, as the format description asks
+    std::memset(out, 0, 16 * 4);
+    return;
+  }
+  const Bc7Mode& m = kBc7Modes[mode];
+  Bits128 bits(block);
+  bits.Read(mode + 1);
+  const uint32_t partition = bits.Read(m.partitionBits);
+  const uint32_t rotation = bits.Read(m.rotationBits);
+  const uint32_t indexSelection = bits.Read(m.indexSelectionBits);
+  const int endpoints = m.subsets * 2;
+  uint32_t color[6][4] = {};
+  for (int c = 0; c < 3; ++c)
+    for (int e = 0; e < endpoints; ++e) color[e][c] = bits.Read(m.colorBits);
+  for (int e = 0; e < endpoints; ++e) color[e][3] = m.alphaBits ? bits.Read(m.alphaBits) : 255;
+  uint32_t pbit[6] = {};
+  bool havePBits = false;
+  if (m.endpointPBits) {
+    for (int e = 0; e < endpoints; ++e) pbit[e] = bits.Read(1);
+    havePBits = true;
+  } else if (m.sharedPBits) {
+    for (int s = 0; s < m.subsets; ++s) pbit[2 * s] = pbit[2 * s + 1] = bits.Read(1);
+    havePBits = true;
+  }
+  uint8_t ends[6][4];
+  for (int e = 0; e < endpoints; ++e)
+    for (int c = 0; c < 4; ++c) {
+      const int n = (c < 3 ? m.colorBits : m.alphaBits) + (havePBits ? 1 : 0);
+      if (c == 3 && !m.alphaBits) {
+        ends[e][c] = 255;
+        continue;
+      }
+      uint32_t v = havePBits ? (color[e][c] << 1 | pbit[e]) : color[e][c];
+      v <<= 8 - n;
+      ends[e][c] = uint8_t(v | (v >> n));
+    }
+  const uint8_t* subsetOf = m.subsets == 2 ? kBc7Partition2[partition] : m.subsets == 3 ? kBc7Partition3[partition] : nullptr;
+  const auto isAnchor = [&](int i) {
+    if (i == 0) return true;
+    if (m.subsets == 2) return i == kBc7Anchor2[partition];
+    if (m.subsets == 3) return i == kBc7Anchor3a[partition] || i == kBc7Anchor3b[partition];
+    return false;
+  };
+  uint32_t index1[16], index2[16] = {};
+  for (int i = 0; i < 16; ++i) index1[i] = bits.Read(isAnchor(i) ? m.indexBits - 1 : m.indexBits);
+  if (m.index2Bits)
+    for (int i = 0; i < 16; ++i) index2[i] = bits.Read(i == 0 ? m.index2Bits - 1 : m.index2Bits);
+  for (int i = 0; i < 16; ++i) {
+    const int s = subsetOf ? subsetOf[i] : 0;
+    const uint8_t* e0 = ends[2 * s];
+    const uint8_t* e1 = ends[2 * s + 1];
+    uint8_t px[4];
+    if (m.index2Bits) {
+      const bool swap = indexSelection != 0;
+      const uint32_t ci = swap ? index2[i] : index1[i], ai = swap ? index1[i] : index2[i];
+      const int cb = swap ? m.index2Bits : m.indexBits, ab = swap ? m.indexBits : m.index2Bits;
+      for (int c = 0; c < 3; ++c) px[c] = Bc7Interpolate(e0[c], e1[c], ci, cb);
+      px[3] = Bc7Interpolate(e0[3], e1[3], ai, ab);
+    } else {
+      for (int c = 0; c < 4; ++c) px[c] = Bc7Interpolate(e0[c], e1[c], index1[i], m.indexBits);
+    }
+    if (rotation) std::swap(px[3], px[rotation - 1]);
+    std::memcpy(out[i], px, 4);
+  }
+}
+
+int BlockBytes(int format) { return format == 10 ? 8 : (format == 12 || format == 25) ? 16 : 0; }
 
 size_t BlockSize(int format, int width, int height) {
   return size_t((width + 3) / 4) * size_t((height + 3) / 4) * size_t(BlockBytes(format));
@@ -120,6 +273,8 @@ bool DecodeBlocks(int format, const uint8_t* src, size_t size, int width, int he
       uint8_t texel[16][4];
       if (format == 10) {
         ColorBlock(block, true, texel);
+      } else if (format == 25) {
+        Bc7Block(block, texel);
       } else {
         uint8_t alpha[16];
         AlphaBlock(block, alpha);

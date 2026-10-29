@@ -156,6 +156,11 @@ std::u16string ToUtf16(std::string_view text);
 std::span<const Function> Functions();
 
 // Per-module registration, called by Functions() once.
+// Data a built-in DLL exports (a variable, not a function): an import of it binds to `address`,
+// not to a stub. Unity 6's baselib.dll exports two (M6).
+void RegisterDataExport(std::string_view dll, std::string_view name, uintptr_t address);
+std::optional<uintptr_t> DataExport(std::string_view dll, std::string_view name);
+
 void RegisterKernel32(std::vector<Function>& out);
 void RegisterOtherDlls(std::vector<Function>& out);
 void RegisterBaselib(std::vector<Function>& out);

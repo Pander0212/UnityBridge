@@ -73,7 +73,7 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   const auto census = UnityTextures::Census(*file, in.data, in.size);
   const std::string textures = UnityTextures::CensusLine(census);
   if (note && !textures.empty()) note(textures.c_str());
-  const bool dxt = census.count(10) || census.count(12);
+  const bool dxt = census.count(10) || census.count(12) || census.count(25);  // DXT1, DXT5, BC7
   if (!has(48) && !has(141) && !dxt) {  // Shader, BuildSettings, DXT1/DXT5 textures
     Put(log, logcap, textures.empty() ? "no shaders" : "no shaders; " + textures);
     return 0;

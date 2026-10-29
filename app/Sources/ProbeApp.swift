@@ -22,10 +22,16 @@ enum ProbeLog {
         .appendingPathComponent("probe.log")
 
     /// FEXCore and the engine write diagnostics to stderr; keep them in a file the user can share.
+    /// Append (never truncate) so a crash's log survives the relaunch, and mark each launch so the
+    /// latest run is easy to find. Unbuffered, so every line is on disk even if the app then dies.
     static func redirectStderr() {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        freopen(url.path, "a", stderr)
+        freopen(url.path, "a", stderr)  // "a" creates the file if missing; it is never truncated
         setvbuf(stderr, nil, _IONBF, 0)
+        // Which build is running: commit and CI run, written into the bundle by CI "Probe IPA".
+        let build = Bundle.main.url(forResource: "build-info", withExtension: "txt")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown build"
+        FileHandle.standardError.write(Data("\n==== UB Probe launch \(Date()) (\(build)) ====\n".utf8))
     }
 
     static func write(_ line: String) {
@@ -71,6 +77,9 @@ struct ProbeView: View {
     @State private var jit = JITState.current
     @State private var waiting = false
     @State private var message = ""
+    // M5: the engine run waits for the game view's layer; the view is shown while the engine runs.
+    @State private var showGame = false
+    @State private var pendingLaunch: ((CAMetalLayer, Int32, Int32) -> Void)?
 
     var body: some View {
         NavigationStack {
@@ -90,7 +99,23 @@ struct ProbeView: View {
                         .disabled(running || jit != .ready)
                     Button("Run Windows DLL test", action: runWindowsDLL)
                         .buttonStyle(.bordered)
-                        .disabled(running || jit != .ready)
+                        .disabled(running || jit != .ready || il2cppStarted)
+                }
+                Button("Run il2cpp_init (GameAssembly.dll)", action: { runIl2cpp(engine: false) })
+                    .buttonStyle(.bordered)
+                    .disabled(running || jit != .ready || il2cppStarted || windowsDLLRan)
+                // M3e: the Unity engine (under Husk) starts il2cpp itself, with the game's data.
+                Button("Run Unity engine (libunity starts il2cpp)", action: { runIl2cpp(engine: true) })
+                    .buttonStyle(.bordered)
+                    .disabled(running || jit != .ready || il2cppStarted || windowsDLLRan)
+                // The il2cpp runtime stays up once started, and the two tests share the mini Win32:
+                // each needs a fresh launch after the other.
+                if il2cppStarted {
+                    Text("il2cpp is running in this app session. Close and reopen the app to run another test.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else if windowsDLLRan {
+                    Text("To run il2cpp_init, close and reopen the app first.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 ScrollView {
                     Text(report.isEmpty ? "No result yet." : report)
@@ -109,8 +134,24 @@ struct ProbeView: View {
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                 jit = JITState.current
             }
+            .fullScreenCover(isPresented: $showGame) {
+                GameScreen(onReady: { layer, width, height in
+                    let launch = pendingLaunch
+                    pendingLaunch = nil
+                    launch?(layer, width, height)
+                }, onClose: { showGame = false })
+            }
+            .toolbar {
+                if il2cppStarted && !showGame {
+                    Button("Show game") { showGame = true }
+                }
+            }
         }
     }
+
+    // Re-read on every render; `running` flips when a test finishes, which renders again.
+    private var il2cppStarted: Bool { ub_il2cpp_probe_started() != 0 }
+    private var windowsDLLRan: Bool { ub_win32_device_has_run() != 0 }
 
     @ViewBuilder private var statusLabel: some View {
         switch jit {
@@ -189,6 +230,93 @@ struct ProbeView: View {
                 report = text
                 running = false
             }
+        }
+    }
+
+    /// First real IL2CPP probe: loads Fellworld's own GameAssembly.dll and calls il2cpp_init.
+    /// The user places GameAssembly.dll and the game's *_Data folder in
+    /// Files › On My iPhone › UB Probe › Game. No game file ships in the app.
+    private func runIl2cpp(engine: Bool) {
+        jit = JITState.current
+        guard jit == .ready else { return }
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let gameDir = docs.appendingPathComponent("Game", isDirectory: true)
+        try? FileManager.default.createDirectory(at: gameDir, withIntermediateDirectories: true)
+        let dll = gameDir.appendingPathComponent("GameAssembly.dll")
+        guard FileManager.default.fileExists(atPath: dll.path) else {
+            report = """
+            GameAssembly.dll not found.
+
+            In the Files app: On My iPhone › UB Probe › Game
+            Put there:
+              • GameAssembly.dll
+              • the game's *_Data folder (e.g. Fellworld_Data), with
+                il2cpp_data/Metadata/global-metadata.dat inside
+
+            Then tap this button again.
+            Folder: \(gameDir.path)
+            """
+            return
+        }
+        // il2cpp appends "/Metadata/global-metadata.dat" to the data dir, and that file lives in
+        // <Game>_Data/il2cpp_data (Unity 2021.3). So point at the folder that contains "Metadata":
+        // prefer <Game>_Data/il2cpp_data, then <Game>_Data, then the Game folder.
+        var dataDir = gameDir
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: gameDir, includingPropertiesForKeys: [.isDirectoryKey]),
+           let data = entries.first(where: { $0.lastPathComponent.hasSuffix("_Data") }) {
+            dataDir = data
+        }
+        let gameData = dataDir  // the <Game>_Data folder: the engine's data (M3e)
+        let il2cppData = dataDir.appendingPathComponent("il2cpp_data", isDirectory: true)
+        if FileManager.default.fileExists(atPath: il2cppData.appendingPathComponent("Metadata").path) {
+            dataDir = il2cppData
+        }
+        let profile = docs.appendingPathComponent("Profile", isDirectory: true)
+        try? FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        // M3d: Unity's Android engine (libmain.so, libunity.so from Unity's Android player, supplied by
+        // the user like the game files) under Husk's runtime, once il2cpp is up.
+        let unityDir = docs.appendingPathComponent("Unity", isDirectory: true)
+        try? FileManager.default.createDirectory(at: unityDir, withIntermediateDirectories: true)
+        let unityData = docs.appendingPathComponent("UnityAppData", isDirectory: true)
+        let haveUnity = FileManager.default.fileExists(atPath: unityDir.appendingPathComponent("libunity.so").path)
+        running = true
+        report = ""
+        let work = { (surface: (layer: CAMetalLayer, width: Int32, height: Int32)?) in
+            Thread.detachNewThread {
+                if let surface {  // M5: present into the game view instead of BMP files
+                    // Retained for good: the engine presents into it for as long as the app runs.
+                    ub_unity_set_surface(Unmanaged.passRetained(surface.layer).toOpaque(), surface.width, surface.height)
+                    ProbeLog.write("game view \(surface.width)x\(surface.height) px")
+                }
+                // Husk's region first, while the address space is still unfragmented: its writable
+                // view must end up within 3 GiB of the executable one.
+                if haveUnity { _ = husk_ios_jit_get_mapping() }
+                ub_il2cpp_probe_set_engine_mode(engine ? 1 : 0)
+                var buffer = [CChar](repeating: 0, count: 65536)
+                let status = ub_il2cpp_probe_run(dll.path, dataDir.path, profile.path, &buffer, buffer.count)
+                var text = String(cString: buffer) + "\nexit status \(status)"
+                if status == 0 && engine {
+                    var unity = [CChar](repeating: 0, count: 16384)
+                    let unityStatus = ub_unity_engine_run(unityDir.path, gameData.path, unityData.path, &unity, unity.count)
+                    text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
+                } else if status == 0 {
+                    var unity = [CChar](repeating: 0, count: 16384)
+                    let unityStatus = ub_unity_probe_run(unityDir.path, unityData.path, &unity, unity.count)
+                    text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
+                }
+                DispatchQueue.main.async {
+                    report = text
+                    running = false
+                }
+            }
+        }
+        if engine && haveUnity {
+            // The engine starts once the game view is on the screen and has its size.
+            pendingLaunch = { layer, width, height in work((layer, width, height)) }
+            showGame = true
+        } else {
+            work(nil)
         }
     }
 

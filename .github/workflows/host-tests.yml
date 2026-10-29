@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/host-tests.yml
       - CMakeLists.txt
+      - engine/**
       - loader/**
       - win32/**
       - tests/**
@@ -28,4 +29,7 @@ jobs:
       - name: Test
         run: |
           ./build/host/win32-host-test build/host/testdll/ubtest.dll
+          ./build/host/il2cpp-bridge-test
+          ./build/host/icall-bridge-test
+          ./build/host/il2cpp-intercept-test
           ./build/host/ub-pe-inspect build/host/testdll/ubtest.dll

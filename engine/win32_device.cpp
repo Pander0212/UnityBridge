@@ -13,11 +13,13 @@
 // share a 16 KiB iOS page, which the engine's static MappedRanges (16 KiB aligned, never writable
 // and executable) cannot express.
 #include "core/fex/fex_guest_engine.h"
+#include "engine/mach_fault.h"
 #include "loader/pe_image.h"
 #include "win32/hle.h"
 
 #include <FEXCore/Core/X86Enums.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
@@ -57,12 +59,21 @@ class Win32Bridge final : public AetherPS4::Fex::GuestBridge {
 public:
   Win32::Runtime* runtime = nullptr;
   std::vector<Core::GuestExecutionRange> executable;  // DLL images and the stub page
+  uintptr_t callbackReturnVeneer = 0;  // GuestEngine::CallbackReturnRange().Begin (the `0F 3E` page)
 
   AetherPS4::Fex::EngineResult<bool> Invoke(Core::GuestCpu::HleCallFrame& frame) override {
     if (!Win32::IsWin32Operation(frame.operation) || runtime == nullptr) {
       std::fprintf(stderr, "UB_WIN32_DEVICE unexpected syscall rax=%#llx\n", static_cast<unsigned long long>(frame.operation));
       return AetherPS4::Fex::EngineFailure {AetherPS4::Fex::EngineStage::Bridge, ENOSYS};
     }
+    // HLE-call depth, so a resume raised in a nested guest language handler (which itself called our
+    // RtlUnwindEx) is realized at the call the faulting code made, not in the nested callback.
+    static thread_local int t_depth = 0;
+    struct DepthGuard {
+      DepthGuard() { Win32::SetInvokeDepth(++t_depth); }
+      ~DepthGuard() { Win32::SetInvokeDepth(--t_depth); }
+    } depthGuard;
+
     Win32::CallContext c;
     c.id = static_cast<uint32_t>(frame.operation & 0xffff);
     c.gpr[0] = frame.gpr[X86::REG_RCX];  // the engine already put the stub's r10 (the caller's rcx) here
@@ -74,7 +85,39 @@ public:
       c.xmm[i][1] = frame.xmm[i][1];
     }
     c.rsp = frame.rsp;
+    // Full register state for the SEH functions (RtlCaptureContext snapshots it; NtContinue restores
+    // it). frame.gpr is in X86State order with RCX already holding the caller's rcx; rip is the
+    // return address the stub would ret to.
+    for (int i = 0; i < 16; ++i) c.x86[i] = frame.gpr[i];
+    for (int i = 0; i < 16; ++i) { c.xmmFull[i][0] = frame.xmm[i][0]; c.xmmFull[i][1] = frame.xmm[i][1]; }
+    c.rip = *reinterpret_cast<const uint64_t*>(frame.rsp);
+    c.haveState = true;
+
     runtime->Dispatch(c);
+
+    uint64_t gpr[16], xmm[16][2], rip;
+    switch (Win32::TakePendingResume(gpr, xmm, rip)) {
+    case Win32::ResumeAction::Apply:
+      // Transfer the guest to the handler target: load the register file and make the stub's `ret`
+      // land at rip, with the unwound stack.
+      for (int i = 0; i < 16; ++i) frame.gpr[i] = gpr[i];
+      for (int i = 0; i < 16; ++i) { frame.xmm[i][0] = xmm[i][0]; frame.xmm[i][1] = xmm[i][1]; }
+      {
+        const uint64_t targetRsp = gpr[X86::REG_RSP];
+        *reinterpret_cast<uint64_t*>(targetRsp - 8) = rip;
+        frame.gpr[X86::REG_RSP] = targetRsp - 8;
+        frame.rsp = targetRsp - 8;
+      }
+      return true;
+    case Win32::ResumeAction::Escape:
+      // A guest language handler called our (noreturn) RtlUnwindEx. Overwrite this HLE call's return
+      // address with the callback-return veneer, so the stub's `ret` makes the enclosing FEXCore
+      // callback return as if the handler had returned; the resume is then realized one level out.
+      *reinterpret_cast<uint64_t*>(frame.rsp) = callbackReturnVeneer;
+      return true;
+    case Win32::ResumeAction::None:
+      break;
+    }
     frame.gpr[X86::REG_RAX] = c.ret;
     if (c.returnsFloat) {
       frame.xmm[0][0] = c.xmmRet[0];
@@ -111,6 +154,7 @@ struct CallResult {
 struct GuestThread {
   HostMemory entry {kPage}, stack {1 << 20}, teb {2 * kPage};
   AetherPS4::Fex::GuestEngine::Thread* thread = nullptr;
+  uintptr_t tls = 0;  // ThreadLocalStoragePointer (TEB+0x58), freed in DestroyGuestThread
 
   // `report` may be null (threads the guest creates log to stderr).
   bool Create(AetherPS4::Fex::GuestEngine& engine, Report* report) {
@@ -130,11 +174,15 @@ struct GuestThread {
     uint64_t tid = 0;
     pthread_threadid_np(nullptr, &tid);
     tid = static_cast<uint32_t>(tid);  // GetCurrentThreadId's value
+    // ThreadLocalStoragePointer @0x58: this thread's copy of each module's __declspec(thread) data,
+    // so gs:[0x58] reaches implicit TLS the way it does on Windows.
+    tls = Win32::AllocThreadTls();
     std::memcpy(t + 0x08, &stackBase, 8);
     std::memcpy(t + 0x10, &stackLimit, 8);
     std::memcpy(t + 0x30, &self, 8);
     std::memcpy(t + 0x40, &pid, 8);
     std::memcpy(t + 0x48, &tid, 8);
+    std::memcpy(t + 0x58, &tls, 8);
     std::memcpy(t + 0x60, &peb, 8);
 
     Core::GuestExecutionRequest request;
@@ -179,9 +227,27 @@ CallResult CallWindows(GuestThread& guest, Report& report, uintptr_t target, std
 
 // Win32::ThreadRunner on iPhone: the new host thread gets a guest thread of its own for the start
 // routine and gives it back before the thread counts as finished (Shutdown needs none left).
+// Runs the registered TLS callbacks on `guest` with the given reason (DLL_THREAD_ATTACH etc.).
+void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
+  for (const auto& [callback, imageBase] : Win32::TlsCallbacks()) {
+    AetherPS4::Fex::Win64Call call;
+    call.Rip = callback;
+    call.Gpr[0] = imageBase;
+    call.Gpr[1] = reason;
+    call.Gpr[2] = 0;
+    g_engine->CallWin64(guest.thread, call);
+  }
+}
+
 uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
+  MachFault::RegisterThisThread();  // report a hardware fault instead of dying silently
   GuestThread guest;
-  if (!guest.Create(*g_engine, nullptr)) return 0xffffffffu;
+  if (!guest.Create(*g_engine, nullptr)) {
+    MachFault::UnregisterThisThread();
+    return 0xffffffffu;
+  }
+  // The Windows loader runs the TLS callbacks with DLL_THREAD_ATTACH before the start routine.
+  RunTlsCallbacksOn(guest, Win32::DLL_THREAD_ATTACH);
   AetherPS4::Fex::Win64Call call;
   call.Rip = start;
   call.Gpr[0] = parameter;
@@ -193,7 +259,10 @@ uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
   } else {
     code = std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];
   }
+  RunTlsCallbacksOn(guest, Win32::DLL_THREAD_DETACH);
+  Win32::FreeThreadTls(guest.tls);
   g_engine->DestroyThread(guest.thread);
+  MachFault::UnregisterThisThread();
   return code;
 }
 
@@ -221,9 +290,23 @@ const char* kChecks[] = {
     "files, find, mapping (profile folder)", "locale: case mapping, compare, en-US", "InterlockedFlushSList",
     "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
     "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread",
+    "implicit TLS: __declspec(thread) + callback",
+    "SEH: __try/__except catches RaiseException",
+    "SEH: __finally runs while unwinding to __except",
+    "SEH: RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/PcToFileHeader",
+    "SuspendThread/GetThreadContext, DuplicateHandle(GetCurrentThread)",
 };
 
 } // namespace
+
+extern "C" int ub_il2cpp_probe_started();
+
+namespace {
+std::atomic<bool> g_deviceRan {false};
+}
+
+// Nonzero once the ubtest runner has run in this process.
+extern "C" int ub_win32_device_has_run() { return g_deviceRan.load() ? 1 : 0; }
 
 // Runs tests/testdll/ubtest.dll under FEXCore. `profileDir` receives the guest's C:\Users\Player.
 extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, char* out, size_t capacity) {
@@ -233,6 +316,13 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
     return status;
   };
   report.Line("UnityBridge M2d: Windows DLL under FEXCore");
+  // The il2cpp probe keeps its runtime (engine, threads, mini-Win32 registrations) up until the app
+  // exits; a second engine with its own registrations next to it is not supported.
+  if (ub_il2cpp_probe_started()) {
+    report.Line("il2cpp_init ran in this app session and its runtime is still up. Close and reopen the app to run this test.");
+    return finish(3);
+  }
+  g_deviceRan = true;
 
   std::ifstream in(dllPath, std::ios::binary);
   const std::vector<uint8_t> file {std::istreambuf_iterator<char>(in), {}};
@@ -261,6 +351,10 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   module.base = reinterpret_cast<uintptr_t>(image.base);
   module.lookup = [&image](std::string_view name) { return image.Export(name); };
   Win32::RegisterModule(std::move(module), true);
+  if (image.tls) Win32::RegisterTlsImage(reinterpret_cast<uintptr_t>(image.base), *image.tls);
+  Win32::RegisterUnwindImage(reinterpret_cast<uintptr_t>(image.base),
+                             reinterpret_cast<uintptr_t>(image.base) + image.size,
+                             reinterpret_cast<uintptr_t>(image.base) + image.pdataRva, image.pdataSize);
 
   static Win32Bridge bridge;
   bridge.runtime = &runtime;
@@ -277,6 +371,8 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   auto engine = std::move(std::get<std::unique_ptr<AetherPS4::Fex::GuestEngine>>(created));
   g_engine = engine.get();
   bridge.executable.push_back(engine->CallbackReturnRange());
+  bridge.callbackReturnVeneer = engine->CallbackReturnRange().Begin;
+  Win32::SetResumeRealizedByBridge(true);  // the bridge applies/escapes resumes; the wrappers defer
   Win32::SetGuestCaller(&CallGuestNested);
   Win32::SetThreadRunner(&RunGuestThread);
   const auto all = image.Export("ub_test_all");
@@ -292,7 +388,15 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
     return finish(1);
   }
 
+  // Hardware faults in guest code: FEX's unaligned-atomic fixups, or a fault report (engine/mach_fault).
+  MachFault::Install(reinterpret_cast<uintptr_t>(image.base), reinterpret_cast<uintptr_t>(image.base) + image.size);
+  MachFault::RegisterThisThread();
+
   int failures = 0;
+
+  // The initial thread runs the TLS callbacks with DLL_PROCESS_ATTACH before any export, as the
+  // Windows loader does; this installs each thread variable's template and lets the callback run.
+  RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_ATTACH);
 
   const auto r = CallWindows(guest, report, *all, {});
   if (!r.ok) ++failures;
@@ -318,6 +422,9 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   if (!missingOk) report.Line("  rax=%#llx, recorded as unimplemented: %s", static_cast<unsigned long long>(m.rax), logged ? "yes" : "no");
   report.Line("%-40s %s", "unimplemented import returns 0", missingOk ? "ok" : "FAIL");
 
+  RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_DETACH);
+  MachFault::UnregisterThisThread();
+  Win32::FreeThreadTls(guest.tls);
   engine->DestroyThread(guest.thread);
   Win32::SetGuestCaller(nullptr);
   Win32::SetThreadRunner(nullptr);

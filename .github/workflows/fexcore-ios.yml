@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 75
+    timeout-minutes: 180  # the first ANGLE build is long; later runs restore it from the cache
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -69,6 +69,28 @@ jobs:
           mkdir -p app/Generated
           cp build/testdll/ubtest.dll app/Generated/ubtest.dll
           ls -la app/Generated/ubtest.dll
+      - name: Fetch Husk's Android runtime
+        run: bash scripts/fetch-husk.sh
+      # ANGLE (EGL + GLES over Metal) for the Unity engine under Husk (M3f), built from WebKit's tree
+      # at the commit pinned in the script; cached by the script's contents.
+      - name: Reuse ANGLE
+        id: angle-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/angle
+          key: angle-ios-v1-${{ hashFiles('scripts/build-angle-ios.sh') }}
+      - name: Build ANGLE
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          bash scripts/build-angle-ios.sh 2>&1 | tee logs/build-angle.log
+      - name: Keep ANGLE
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/angle
+          key: angle-ios-v1-${{ hashFiles('scripts/build-angle-ios.sh') }}
       - name: Build the app
         run: |
           set -euo pipefail
@@ -79,6 +101,7 @@ jobs:
             printf '\n'
           } > app/Generated/Libraries.xcconfig
           cat app/Generated/Libraries.xcconfig
+          echo "commit ${GITHUB_SHA::7}, Probe IPA run ${GITHUB_RUN_NUMBER}" > app/Generated/build-info.txt
           (cd app && xcodegen generate)
           set -o pipefail
           xcodebuild build -project app/UnityBridgeProbe.xcodeproj -scheme UnityBridgeProbe -configuration Release \
@@ -93,6 +116,8 @@ jobs:
           test -f "$app/ubtest.dll" || { echo "ubtest.dll missing from the app bundle"; exit 1; }
           mkdir -p "$app/Frameworks"
           cp -R build/BreakpointJIT.framework "$app/Frameworks/"
+          cp build/angle/libANGLE-shared.dylib "$app/Frameworks/"
+          codesign --force --sign - --timestamp=none "$app/Frameworks/libANGLE-shared.dylib"
           # Ad-hoc placeholder signatures; the sideloading tool re-signs with the user's certificate.
           codesign --force --sign - --timestamp=none "$app/Frameworks/BreakpointJIT.framework"
           codesign --force --sign - --timestamp=none --entitlements app/UnityBridgeProbe.entitlements "$app"

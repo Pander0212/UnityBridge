@@ -4,6 +4,8 @@
 #include "common.h"
 
 #include <cstdio>
+#include <filesystem>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <mutex>
@@ -122,6 +124,23 @@ uint64_t GetLocaleInfoW(CallContext& c) {
   out[value.size()] = 0;
   return value.size() + 1;
 }
+
+// GetLocaleInfoEx(name, LCType, data, cch): same argument layout as GetLocaleInfoW from LCType on,
+// and we answer as en-US regardless of the name, so it reuses the same handler.
+
+// GetUserDefaultLocaleName(name, cch): the user default locale, en-US.
+uint64_t GetUserDefaultLocaleName(CallContext& c) {
+  static const char16_t kName[] = u"en-US";
+  auto* out = c.Ptr<char16_t>(0);
+  const auto size = static_cast<int32_t>(c.Arg(1));
+  constexpr int32_t need = 6;  // "en-US" + null
+  if (size == 0) return need;
+  if (size < need || out == nullptr) return SetError(ERROR_INSUFFICIENT_BUFFER, 0);
+  std::memcpy(out, kName, need * 2);
+  return need;
+}
+
+uint64_t IsValidLocaleName(CallContext&) { return kTrue; }  // we only model en-US, but never block
 
 uint64_t GetCPInfo(CallContext& c) {
   // CPINFO: MaxCharSize u32, DefaultChar[2], LeadByte[12].
@@ -321,6 +340,57 @@ uint64_t InterlockedFlushSList(CallContext& c) {
   }
 }
 
+// ---- Unity 6 (M6) ------------------------------------------------------------------------
+
+// LocalAlloc(flags, bytes): LMEM_ZEROINIT (0x40) zeroes; LMEM_MOVEABLE handles are plain pointers here.
+uint64_t LocalAlloc(CallContext& c) {
+  const size_t n = c.Arg(1) ? size_t(c.Arg(1)) : 1;
+  return reinterpret_cast<uint64_t>((c.Arg(0) & 0x40) ? std::calloc(1, n) : std::malloc(n));
+}
+uint64_t LocalReAlloc(CallContext& c) {  // (memory, bytes, flags)
+  return reinterpret_cast<uint64_t>(std::realloc(c.Ptr<void>(0), c.Arg(1) ? size_t(c.Arg(1)) : 1));
+}
+uint64_t LocalFree(CallContext& c) { std::free(c.Ptr<void>(0)); return 0; }
+
+uint64_t SetThreadDescription(CallContext&) { return 0; }  // S_OK
+uint64_t GetThreadDescription(CallContext& c) {            // (thread, PWSTR* description): "", LocalFree'd
+  auto* empty = static_cast<char16_t*>(std::calloc(1, sizeof(char16_t)));
+  Store<uint64_t>(c.Arg(1), reinterpret_cast<uint64_t>(empty));
+  return 0;
+}
+
+// CopyFile2(source, destination, COPYFILE2_EXTENDED_PARAMETERS*): HRESULT. dwCopyFlags at +4;
+// COPY_FILE_FAIL_IF_EXISTS = 1.
+uint64_t CopyFile2(CallContext& c) {
+  const auto from = HostPath(ReadWide(c.Ptr<const char16_t>(0)));
+  const auto to = HostPath(ReadWide(c.Ptr<const char16_t>(1)));
+  const bool failIfExists = c.Arg(2) && (Load<uint32_t>(c.Arg(2) + 4) & 1);
+  std::error_code ec;
+  const auto options = failIfExists ? std::filesystem::copy_options::none
+                                    : std::filesystem::copy_options::overwrite_existing;
+  if (std::filesystem::copy_file(from, to, options, ec)) return 0;
+  const DWORD error = ec ? ErrorFromErrno(ec.value()) : 80;  // ERROR_FILE_EXISTS
+  return 0x80070000u | error;                                // HRESULT_FROM_WIN32
+}
+
+uint64_t GetTimeZoneInformationForYear(CallContext& c) {  // (year, DYNAMIC_TIME_ZONE_INFORMATION*, TIME_ZONE_INFORMATION*)
+  if (c.Arg(2)) std::memset(c.Ptr<void>(2), 0, 172);    // UTC, no daylight saving
+  return kTrue;
+}
+
+uint64_t GetComputerNameW(CallContext& c) {  // (buffer, DWORD* size)
+  static const std::u16string name = u"IPHONE";
+  auto* size = c.Ptr<DWORD>(1);
+  if (!size) return SetError(87, kFalse);
+  if (*size <= name.size()) {
+    *size = static_cast<DWORD>(name.size() + 1);
+    return SetError(111, kFalse);  // ERROR_BUFFER_OVERFLOW
+  }
+  std::memcpy(c.Ptr<char16_t>(0), name.c_str(), (name.size() + 1) * sizeof(char16_t));
+  *size = static_cast<DWORD>(name.size());
+  return kTrue;
+}
+
 } // namespace
 
 void RegisterKernel32Misc(std::vector<Function>& out) {
@@ -329,10 +399,14 @@ void RegisterKernel32Misc(std::vector<Function>& out) {
   UB_FN(GetUserDefaultLCID); UB_FN(GetThreadLocale); UB_FN(IsValidLocale); UB_FN(EnumSystemLocalesW);
   UB_FN(GetLocaleInfoW); UB_FN(GetCPInfo); UB_FN(LCMapStringW); UB_FN(LCMapStringEx); UB_FN(CompareStringW);
   UB_FN(GetStringTypeW);
+  UB_FN(GetUserDefaultLocaleName); UB_FN(IsValidLocaleName);
+  out.push_back({k, "GetLocaleInfoEx", &GetLocaleInfoW});  // same layout from LCType on; en-US
   UB_FN(GetTimeZoneInformation); UB_FN(GetDynamicTimeZoneInformation); UB_FN(GetSystemTimes);
   UB_FN(FormatMessageW);
   UB_FN(ExitProcess); UB_FN(TerminateProcess); UB_FN(GetExitCodeProcess); UB_FN(K32GetProcessImageFileNameW);
   UB_FN(SetStdHandle); UB_FN(ReadConsoleW); UB_FN(SetThreadErrorMode); UB_FN(InterlockedFlushSList);
+  UB_FN(LocalAlloc); UB_FN(LocalReAlloc); UB_FN(LocalFree); UB_FN(SetThreadDescription); UB_FN(GetThreadDescription);
+  UB_FN(CopyFile2); UB_FN(GetTimeZoneInformationForYear); UB_FN(GetComputerNameW);
 #undef UB_FN
 }
 

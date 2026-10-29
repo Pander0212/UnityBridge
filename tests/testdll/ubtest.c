@@ -10,6 +10,13 @@ typedef void* HANDLE;
 typedef long long LONGLONG;
 
 #define IMPORT __declspec(dllimport)
+#define EXCEPTION_EXECUTE_HANDLER 1
+#define EXCEPTION_CONTINUE_SEARCH 0
+// The SEH intrinsics, declared as clang's own <excpt.h> does (we build freestanding, no CRT).
+unsigned long __cdecl _exception_code(void);
+int __cdecl _abnormal_termination(void);
+#define GetExceptionCode() _exception_code()
+#define AbnormalTermination() _abnormal_termination()
 IMPORT DWORD GetLastError(void);
 IMPORT void SetLastError(DWORD);
 IMPORT HANDLE GetProcessHeap(void);
@@ -56,6 +63,8 @@ IMPORT BOOL UnmapViewOfFile(void*);
 IMPORT BOOL DeleteFileW(const WCHAR*);
 IMPORT BOOL CreateDirectoryW(const WCHAR*, void*);
 IMPORT BOOL RemoveDirectoryW(const WCHAR*);
+IMPORT long NtQueryDirectoryFile(HANDLE, HANDLE, void*, void*, void*, void*, DWORD, int, unsigned char, void*,
+                                 unsigned char);
 
 IMPORT int LCMapStringW(DWORD, DWORD, const WCHAR*, int, WCHAR*, int);
 IMPORT int CompareStringW(DWORD, DWORD, const WCHAR*, int, const WCHAR*, int);
@@ -69,7 +78,92 @@ IMPORT HANDLE CreateThread(void*, unsigned long long, DWORD (*)(void*), void*, D
 IMPORT DWORD ResumeThread(HANDLE);
 IMPORT BOOL GetExitCodeThread(HANDLE, DWORD*);
 IMPORT DWORD GetCurrentThreadId(void);
+IMPORT DWORD SuspendThread(HANDLE);
+IMPORT BOOL GetThreadContext(HANDLE, void*);
+IMPORT BOOL DuplicateHandle(HANDLE, HANDLE, HANDLE, HANDLE*, DWORD, BOOL, DWORD);
+IMPORT HANDLE GetCurrentProcess(void);
+IMPORT HANDLE GetCurrentThread(void);
+IMPORT DWORD GetThreadId(HANDLE);
 IMPORT void Sleep(DWORD);
+
+// x64 structured exception handling. CONTEXT is opaque here (0x4d0 bytes, 16-aligned); we only read
+// Rsp (0x98) and Rip (0xf8) back from it.
+typedef struct __declspec(align(16)) { unsigned char raw[0x4d0]; } CONTEXT;
+IMPORT void RaiseException(DWORD, DWORD, DWORD, const unsigned long long*);
+IMPORT void RtlCaptureContext(CONTEXT*);
+IMPORT void* RtlLookupFunctionEntry(unsigned long long, unsigned long long*, void*);
+IMPORT void* RtlVirtualUnwind(DWORD, unsigned long long, unsigned long long, void*, CONTEXT*,
+                              void**, unsigned long long*, void*);
+IMPORT void* RtlPcToFileHeader(void*, void**);
+IMPORT unsigned short RtlCaptureStackBackTrace(DWORD, DWORD, void**, DWORD*);
+IMPORT void RtlUnwindEx(void*, void*, void*, void*, CONTEXT*, void*);
+static unsigned long long CtxRsp(const CONTEXT* c) { return *(const unsigned long long*)(c->raw + 0x98); }
+static unsigned long long CtxRip(const CONTEXT* c) { return *(const unsigned long long*)(c->raw + 0xf8); }
+
+// __C_specific_handler, provided in the DLL itself rather than imported, the way GameAssembly's
+// statically linked CRT provides its C and C++ exception handlers. The OS dispatcher (UnityBridge's)
+// names it as the language handler in this DLL's UNWIND_INFO and calls it; it runs the __except
+// filters and __finally termination handlers and calls RtlUnwindEx (imported, and from the
+// dispatcher's point of view noreturn) to transfer to the handler. This is the path a real IL2CPP
+// GameAssembly.dll takes, and the one UnityBridge must drive through a guest callback.
+typedef struct { DWORD Count; struct { DWORD Begin, End, Handler, Target; } Rec[]; } SCOPE_TABLE;
+typedef struct {
+  unsigned long long ControlPc, ImageBase;
+  void* FunctionEntry;
+  unsigned long long EstablisherFrame, TargetIp;
+  CONTEXT* ContextRecord;
+  void* LanguageHandler;
+  void* HandlerData;
+  void* HistoryTable;
+  DWORD ScopeIndex, Fill0;
+} DISPATCHER_CONTEXT;
+typedef struct {
+  DWORD Code, Flags;
+  void* Record;
+  void* Address;
+  DWORD Number, Align;
+  unsigned long long Info[15];
+} EXC_RECORD;
+
+int __C_specific_handler(EXC_RECORD* rec, void* frame, CONTEXT* ctx, DISPATCHER_CONTEXT* dispatch) {
+  SCOPE_TABLE* table = (SCOPE_TABLE*)dispatch->HandlerData;
+  unsigned long long base = dispatch->ImageBase, pc = dispatch->ControlPc;
+  if (rec->Flags & 0x6 /* UNWINDING | EXIT_UNWIND */) {
+    for (DWORD i = dispatch->ScopeIndex; i < table->Count; i++) {
+      if (pc < base + table->Rec[i].Begin || pc >= base + table->Rec[i].End || table->Rec[i].Target) continue;
+      if ((rec->Flags & 0x20 /* TARGET_UNWIND */) && dispatch->TargetIp >= base + table->Rec[i].Begin &&
+          dispatch->TargetIp < base + table->Rec[i].End)
+        break;
+      void(__attribute__((ms_abi)) * fin)(unsigned char, void*) =
+          (void(__attribute__((ms_abi))*)(unsigned char, void*))(base + table->Rec[i].Handler);
+      dispatch->ScopeIndex = i + 1;
+      fin(1 /* abnormal termination */, frame);
+    }
+  } else {
+    for (DWORD i = dispatch->ScopeIndex; i < table->Count; i++) {
+      if (pc < base + table->Rec[i].Begin || pc >= base + table->Rec[i].End || !table->Rec[i].Target) continue;
+      if (table->Rec[i].Handler != 1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        void* ptrs[2] = {rec, ctx};  // EXCEPTION_POINTERS
+        int(__attribute__((ms_abi)) * filter)(void*, void*) =
+            (int(__attribute__((ms_abi))*)(void*, void*))(base + table->Rec[i].Handler);
+        int r = filter(ptrs, frame);
+        if (r == 0) continue;   // EXCEPTION_CONTINUE_SEARCH
+        if (r < 0) return 0;    // EXCEPTION_CONTINUE_EXECUTION -> ExceptionContinueExecution
+      }
+      RtlUnwindEx(frame, (void*)(base + table->Rec[i].Target), (void*)rec, 0, dispatch->ContextRecord,
+                  dispatch->HistoryTable);
+    }
+  }
+  return 1;  // ExceptionContinueSearch
+}
+
+// Two frames with their own .pdata so an exception unwinds through a __finally into an outer
+// __except. Kept out of line so each has a real stack frame.
+static volatile int g_finallyRan;
+__declspec(noinline) static void SehInnermost(void) { RaiseException(0xE0002222u, 0, 0, 0); }
+__declspec(noinline) static void SehMiddle(void) {
+  __try { SehInnermost(); } __finally { g_finallyRan = 1; }
+}
 
 static int Append(WCHAR* to, int at, const char* text) {
   while (*text) to[at++] = (WCHAR)*text++;
@@ -96,6 +190,9 @@ IMPORT int SHGetFolderPathW(void*, int, void*, DWORD, WCHAR*);
 
 // baselib.dll exports C++ functions; the declarations take their MSVC-decorated names.
 IMPORT void* SemCreate(void*) __asm__("?Baselib_SystemSemaphore_CreateInplace@il2cpp_baselib@@YA?AUBaselib_SystemSemaphore_Handle@1@PEAX@Z");
+// The same function as MSVC C++ may call it: the handle through a hidden return slot (RCX), a local of
+// the caller; RAX returns the slot's address.
+IMPORT void** SemCreateSlot(void** slot, void*) __asm__("?Baselib_SystemSemaphore_CreateInplace@il2cpp_baselib@@YA?AUBaselib_SystemSemaphore_Handle@1@PEAX@Z");
 IMPORT void SemRelease(void*, unsigned) __asm__("?Baselib_SystemSemaphore_Release@il2cpp_baselib@@YAXUBaselib_SystemSemaphore_Handle@1@I@Z");
 IMPORT _Bool SemTryAcquire(void*) __asm__("?Baselib_SystemSemaphore_TryAcquire@il2cpp_baselib@@YA_NUBaselib_SystemSemaphore_Handle@1@@Z");
 IMPORT _Bool SemTryTimed(void*, unsigned) __asm__("?Baselib_SystemSemaphore_TryTimedAcquire@il2cpp_baselib@@YA_NUBaselib_SystemSemaphore_Handle@1@I@Z");
@@ -136,12 +233,73 @@ static void FlsFreed(void* value) {
 
 // Runs on its own thread: its last-error value and TLS slot are its own.
 struct ThreadTest { DWORD slot; DWORD id; volatile int ran; };
+// Waits for the event in its parameter (a thread for SuspendThread to stop).
+static DWORD WaitingThreadMain(void* parameter) {
+  WaitForSingleObjectEx((HANDLE)parameter, 0xffffffffu, 0);
+  return 5;
+}
 static DWORD ThreadMain(void* parameter) {
   struct ThreadTest* t = (struct ThreadTest*)parameter;
   SetLastError(99);
   t->id = GetCurrentThreadId();
   t->ran = GetLastError() == 99 && TlsGetValue(t->slot) == 0 && TlsSetValue(t->slot, (void*)7);  // TlsGetValue clears it
   return 77;
+}
+
+// --- implicit TLS -------------------------------------------------------------------------------
+// No CRT, so we provide the TLS directory ourselves, the way the MSVC CRT's tlssup.c does: a
+// .tls section bracketed by _tls_start/_tls_end, the _tls_index the loader fills, and a callback
+// array in .CRT$XL* bracketed by __xl_a/__xl_z. The linker finds _tls_used and emits the directory.
+typedef void(__attribute__((ms_abi)) * PIMAGE_TLS_CALLBACK)(void*, DWORD, void*);
+#pragma section(".tls", long, read, write)
+#pragma section(".tls$ZZZ", long, read, write)
+#pragma section(".CRT$XLA", long, read)
+#pragma section(".CRT$XLB", long, read)
+#pragma section(".CRT$XLZ", long, read)
+__declspec(allocate(".tls")) char _tls_start = 0;
+__declspec(allocate(".tls$ZZZ")) char _tls_end = 0;
+unsigned int _tls_index = 0;
+__declspec(allocate(".CRT$XLA")) PIMAGE_TLS_CALLBACK __xl_a = 0;
+__declspec(allocate(".CRT$XLZ")) PIMAGE_TLS_CALLBACK __xl_z = 0;
+typedef struct {
+  unsigned long long StartAddressOfRawData, EndAddressOfRawData, AddressOfIndex, AddressOfCallBacks;
+  DWORD SizeOfZeroFill, Characteristics;
+} IMAGE_TLS_DIRECTORY64;
+__declspec(allocate(".rdata$T")) const IMAGE_TLS_DIRECTORY64 _tls_used = {
+    (unsigned long long)&_tls_start, (unsigned long long)&_tls_end,
+    (unsigned long long)&_tls_index, (unsigned long long)(&__xl_a + 1), 0, 0};
+
+#define DLL_PROCESS_ATTACH 1
+#define DLL_THREAD_ATTACH 2
+
+// A per-thread variable with a non-zero initialiser (so a fresh copy proves the template, not just
+// zeroed memory, was installed) and a larger one to exercise the zero-fill tail.
+__declspec(thread) int g_threadVar = 0x1111;
+__declspec(thread) int g_threadZero[32];
+
+static volatile int g_tlsCallbackCount;
+static volatile int g_sawProcessAttach;
+static volatile DWORD g_tlsCallbackLastReason;
+static void __attribute__((ms_abi)) TlsCallback(void* module, DWORD reason, void* reserved) {
+  (void)module;
+  (void)reserved;
+  ++g_tlsCallbackCount;
+  g_tlsCallbackLastReason = reason;
+  if (reason == DLL_PROCESS_ATTACH) g_sawProcessAttach = 1;
+}
+__declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK __xl_b = TlsCallback;
+
+// Runs on its own thread: its __declspec(thread) data is a fresh copy of the template, and the TLS
+// callback ran for it with DLL_THREAD_ATTACH just before the start routine.
+struct TlsThreadTest { int seen; int zeroTail; DWORD reason; volatile int ran; };
+static DWORD TlsThreadMain(void* parameter) {
+  struct TlsThreadTest* t = (struct TlsThreadTest*)parameter;
+  t->reason = g_tlsCallbackLastReason;
+  t->seen = g_threadVar;          // the template value, independent of the main thread's write
+  t->zeroTail = g_threadZero[31];
+  g_threadVar = 0x3333;
+  t->ran = 1;
+  return 0;
 }
 
 __declspec(dllexport) int ub_test_all(void) {
@@ -233,6 +391,14 @@ __declspec(dllexport) int ub_test_all(void) {
   if (sem == semMemory && SemTryAcquire(sem) && SemTryAcquire(sem) && !SemTryAcquire(sem) && !SemTryTimed(sem, 10) &&
       BaselibThreadId() != 0) ok |= 1 << 16;
   SemFree(sem);
+  {
+    static unsigned char slotMemory[64];
+    void* volatile slot = 0;
+    void** back = SemCreateSlot((void**)&slot, slotMemory);
+    SemRelease(slot, 1);
+    if (!(back == (void**)&slot && slot == slotMemory && SemTryAcquire(slot) && !SemTryAcquire(slot))) ok &= ~(1 << 16);
+    SemFree(slot);
+  }
 
   // Waitable objects (single thread: signalled states and timeouts).
   {
@@ -307,6 +473,32 @@ __declspec(dllexport) int ub_test_all(void) {
     CloseHandle(mapping);
     CloseHandle(h);
 
+    // NtQueryDirectoryFile over the folder: FileFullDirectoryInformation lists ".", ".." and data.bin
+    // (size 10), then no more files; a restart with a pattern and a single entry finds data.bin alone.
+    {
+      HANDLE d = CreateFileW(dir, 0x1 /* FILE_LIST_DIRECTORY */, 7, 0, 3, 0x02000000 /* BACKUP_SEMANTICS */, 0);
+      static unsigned long long info[512];
+      unsigned long long iosb[2] = {0, 0};
+      good &= d != (HANDLE)-1;
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 2, 0, 0, 0) == 0 && iosb[1] > 0;
+      int entries = 0, sawData = 0;
+      for (unsigned char* e = (unsigned char*)info;; e += *(DWORD*)e) {
+        const WCHAR* name = (const WCHAR*)(e + 68);
+        const DWORD bytes = *(DWORD*)(e + 60);
+        if (bytes == 16 && name[0] == 'd' && name[7] == 'n' && *(unsigned long long*)(e + 40) == 10) sawData = 1;
+        ++entries;
+        if (*(DWORD*)e == 0) break;
+      }
+      good &= entries == 3 && sawData;
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 2, 0, 0, 0) == (long)0x80000006;
+      static WCHAR bin[] = {'*', '.', 'B', 'I', 'N', 0};
+      struct { unsigned short length, maximum; unsigned pad; WCHAR* buffer; } pat = {10, 12, 0, bin};
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 1, 1, &pat, 1) == 0 && *(DWORD*)info == 0 &&
+              ((const WCHAR*)((unsigned char*)info + 64))[0] == 'd';
+      good &= NtQueryDirectoryFile(d, 0, 0, 0, iosb, info, sizeof(info), 99, 0, 0, 0) == (long)0xc0000003;
+      CloseHandle(d);
+    }
+
     good &= CreateFileW(file, 0x80000000u, 0, 0, 1 /* CREATE_NEW */, 0x80, 0) == (HANDLE)-1 && GetLastError() == 80;
     good &= DeleteFileW(file) && !DeleteFileW(file) && GetLastError() == 2;
     good &= RemoveDirectoryW(dir);
@@ -372,6 +564,97 @@ __declspec(dllexport) int ub_test_all(void) {
     if (h) CloseHandle(h);
   }
 
+  // Implicit TLS: the TLS callback ran at DLL_PROCESS_ATTACH, this thread's __declspec(thread) data
+  // holds the template value, and a new thread gets its own independent copy.
+  {
+    int good = g_tlsCallbackCount >= 1 && g_sawProcessAttach;
+    good &= g_threadVar == 0x1111 && g_threadZero[31] == 0;
+    g_threadVar = 0x2222;
+    static struct TlsThreadTest tt;
+    DWORD id = 0;
+    HANDLE h = CreateThread(0, 0, TlsThreadMain, &tt, 0, &id);
+    good &= h && WaitForSingleObjectEx(h, 5000, 0) == 0 && tt.ran;
+    good &= tt.seen == 0x1111 && tt.zeroTail == 0;   // the thread saw the template, not our write
+    good &= tt.reason == DLL_THREAD_ATTACH;          // the callback ran for the new thread
+    good &= g_threadVar == 0x2222;                   // and did not disturb this thread's copy
+    if (h) CloseHandle(h);
+    if (good) ok |= 1 << 25;
+  }
+
+  // SEH: RaiseException is caught by a __try/__except whose filter inspects the exception code.
+  {
+    volatile int r = 0;
+    __try {
+      RaiseException(0xE0001111u, 0, 0, 0);
+      r = 1;  // unreachable: control transfers to the __except block
+    } __except (GetExceptionCode() == 0xE0001111u ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+      r = 2;
+    }
+    if (r == 2) ok |= 1 << 26;
+  }
+
+  // SEH: an exception raised two frames down unwinds through a __finally into this __except.
+  {
+    volatile int r = 0;
+    g_finallyRan = 0;
+    __try {
+      SehMiddle();
+      r = 1;  // unreachable
+    } __except (GetExceptionCode() == 0xE0002222u ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+      r = 2;
+    }
+    if (r == 2 && g_finallyRan == 1) ok |= 1 << 27;
+  }
+
+  // The table-walking primitives: capture a context, find its function entry, step out one frame,
+  // map a PC to its module, and walk the stack.
+  {
+    int good = 1;
+    CONTEXT ctx;
+    RtlCaptureContext(&ctx);
+    unsigned long long base = 0;
+    void* fn = RtlLookupFunctionEntry(CtxRip(&ctx), &base, 0);
+    good &= fn != 0 && base != 0;
+    unsigned long long rip0 = CtxRip(&ctx), rsp0 = CtxRsp(&ctx);
+    void* hd = 0;
+    unsigned long long frame = 0;
+    RtlVirtualUnwind(0 /* UNW_FLAG_NHANDLER */, base, rip0, fn, &ctx, &hd, &frame, 0);
+    good &= CtxRip(&ctx) != 0 && CtxRip(&ctx) != rip0 && CtxRsp(&ctx) > rsp0;
+
+    void* moduleBase = 0;
+    void* hdr = RtlPcToFileHeader((void*)&SehMiddle, &moduleBase);
+    good &= hdr != 0 && moduleBase == hdr && (unsigned long long)moduleBase <= (unsigned long long)&SehMiddle;
+
+    void* bt[8] = {0};
+    unsigned short n = RtlCaptureStackBackTrace(0, 8, bt, 0);
+    good &= n >= 1 && bt[0] != 0;
+    if (good) ok |= 1 << 28;
+  }
+
+  // SuspendThread/ResumeThread count, GetThreadContext answers for a suspended thread, and
+  // DuplicateHandle(GetCurrentThread()) gives a real handle to this thread (the GC's registration).
+  {
+    int good = 1;
+    HANDLE go = CreateEventW(0, 1, 0, 0);
+    DWORD id = 0;
+    HANDLE h = CreateThread(0, 0, WaitingThreadMain, go, 0, &id);
+    good &= h != 0 && SuspendThread(h) == 0 && SuspendThread(h) == 1;
+    static unsigned long long context[1232 / 8] __attribute__((aligned(16)));
+    ((DWORD*)context)[0x30 / 4] = 0x10000b;  // CONTEXT_FULL
+    good &= GetThreadContext(h, context) && ((DWORD*)context)[0x30 / 4] == 0x10000b;
+    good &= ResumeThread(h) == 2 && ResumeThread(h) == 1 && ResumeThread(h) == 0;
+    SetEvent(go);
+    DWORD code = 0;
+    good &= WaitForSingleObjectEx(h, 5000, 0) == 0 && GetExitCodeThread(h, &code) && code == 5;
+    HANDLE self = 0;
+    good &= DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0, 0, 2) &&
+            self != 0 && self != GetCurrentThread() && GetThreadId(self) == GetCurrentThreadId();
+    if (h) CloseHandle(h);
+    if (self) CloseHandle(self);
+    CloseHandle(go);
+    if (good) ok |= 1 << 29;
+  }
+
   return ok;
 }
 
@@ -380,3 +663,4 @@ __declspec(dllexport) double ub_test_float(double a, double b) { return a * b + 
 
 // Calls an import that UnityBridge does not implement: must return 0, not crash.
 __declspec(dllexport) DWORD ub_test_missing(void) { return UnityBridgeTestMissingFunction(5); }
+

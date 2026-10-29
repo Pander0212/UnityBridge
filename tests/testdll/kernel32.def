@@ -58,4 +58,17 @@ CreateThread
 ResumeThread
 GetExitCodeThread
 GetCurrentThreadId
+SuspendThread
+GetThreadContext
+DuplicateHandle
+GetCurrentProcess
+GetCurrentThread
+GetThreadId
 Sleep
+RaiseException
+RtlCaptureContext
+RtlLookupFunctionEntry
+RtlVirtualUnwind
+RtlPcToFileHeader
+RtlCaptureStackBackTrace
+RtlUnwindEx

@@ -148,6 +148,9 @@ uint64_t VirtualAlloc(CallContext& c) {
     return SetError(ERROR_INVALID_PARAMETER, 0);  // Windows fails when the requested range is taken
   }
   g_reservations[reinterpret_cast<uintptr_t>(p)] = {size, protect};
+  if (size >= (64u << 20))  // the big ones, to see who holds the address space
+    std::fprintf(stderr, "UB_WIN32 VirtualAlloc(%s) %zu MiB at %p\n", (type & MEM_COMMIT) ? "reserve+commit" : "reserve",
+                 size >> 20, p);
   return reinterpret_cast<uint64_t>(p);
 }
 
@@ -285,6 +288,13 @@ uint64_t FlsSetValue(CallContext& c) {
   t_fls[i] = c.Arg(1);
   return kTrue;
 }
+// The UCRT's newer raw variant: same slot value, without touching the last-error code.
+uint64_t FlsGetValue2(CallContext& c) {
+  const auto i = static_cast<DWORD>(c.Arg(0));
+  return i < kTlsSlots ? t_fls[i] : 0;
+}
+// Our ANSI code page is UTF-8 (GetACP), so the *A file APIs behave as ANSI; report that.
+uint64_t AreFileApisANSI(CallContext&) { return kTrue; }
 
 // ---- synchronisation ---------------------------------------------------------------------
 // The guest's CRITICAL_SECTION / SRWLOCK / CONDITION_VARIABLE memory is only used as a key;
@@ -350,6 +360,21 @@ uint64_t SleepConditionVariableSRW(CallContext& c) {
   }
   return signalled ? kTrue : SetError(ERROR_TIMEOUT, kFalse);
 }
+// (cv, CRITICAL_SECTION*, ms): the section is held once by the caller (a recursive hold would stay
+// held while waiting, which Windows does not do either for a single level).
+uint64_t SleepConditionVariableCS(CallContext& c) {
+  constexpr DWORD INFINITE = 0xffffffffu, ERROR_TIMEOUT = 1460;
+  auto& cv = g_conditions.Get(c.Arg(0));
+  auto& section = g_criticalSections.Get(c.Arg(1));
+  const auto ms = static_cast<DWORD>(c.Arg(2));
+  std::unique_lock guard {section, std::adopt_lock};
+  bool signalled = true;
+  if (ms == INFINITE) cv.wait(guard);
+  else signalled = cv.wait_for(guard, std::chrono::milliseconds(ms)) == std::cv_status::no_timeout;
+  guard.release();
+  return signalled ? kTrue : SetError(ERROR_TIMEOUT, kFalse);
+}
+uint64_t InitializeConditionVariable(CallContext& c) { Store<uint64_t>(c.Arg(0), 0); g_conditions.Get(c.Arg(0)); return 0; }
 uint64_t WakeAllConditionVariable(CallContext& c) { g_conditions.Get(c.Arg(0)).notify_all(); return 0; }
 uint64_t WakeConditionVariable(CallContext& c) { g_conditions.Get(c.Arg(0)).notify_one(); return 0; }
 
@@ -478,7 +503,10 @@ uint64_t WideCharToMultiByte(CallContext& c) {
 std::mutex g_builtinMutex;
 uintptr_t g_nextBuiltin = 0x0000'7ffd'0000'0000ull;
 
-// HMODULE for a built-in DLL, registering it on first use. GetProcAddress on it hands out stubs.
+// HMODULE for a built-in DLL, registering it on first use. GetProcAddress on it hands out stubs for
+// the functions we implement and NULL for the rest, as Windows does for a name a DLL does not export:
+// callers probe (il2cpp tries BCryptGenRandomW before BCryptGenRandom), and a stub that only returns 0
+// read as success there (no random bytes: all-zero GUIDs, M4d).
 uintptr_t BuiltinHandle(std::string_view name) {
   std::scoped_lock lock {g_builtinMutex};
   if (const auto* m = FindModuleByName(name)) return m->base;
@@ -491,7 +519,11 @@ uintptr_t BuiltinHandle(std::string_view name) {
   m.lookup = [dll](std::string_view symbol) -> std::optional<uintptr_t> {
     auto* runtime = Runtime::Current();
     if (runtime == nullptr) return std::nullopt;
-    return runtime->Resolve(dll.find('.') == std::string::npos ? dll + ".dll" : dll, symbol);
+    const std::string file = dll.find('.') == std::string::npos ? dll + ".dll" : dll;
+    if (const auto data = DataExport(file, symbol)) return data;
+    const Function* f = runtime->Lookup(file, symbol);
+    if (f == nullptr || f->handler == nullptr) return std::nullopt;
+    return runtime->Resolve(file, symbol);
   };
   const auto base = m.base;
   RegisterModule(std::move(m));
@@ -544,6 +576,7 @@ uint64_t GetProcAddress(CallContext& c) {
   if (c.Arg(1) < 0x10000) return SetError(ERROR_PROC_NOT_FOUND, 0);  // by ordinal: not supported
   const std::string name(c.Ptr<const char>(1));
   const auto address = module->lookup ? module->lookup(name) : std::nullopt;
+  if (!address) std::fprintf(stderr, "UB_WIN32 GetProcAddress: no %s in %s\n", name.c_str(), module->name.c_str());
   return address ? *address : SetError(ERROR_PROC_NOT_FOUND, 0);
 }
 
@@ -618,6 +651,8 @@ uint64_t GetConsoleOutputCP(CallContext&) { return CP_UTF8; }
 
 } // namespace
 
+uint64_t ModuleHandle(const std::string& name) { return ModuleHandleFor(name); }
+
 void SetLastErrorValue(uint32_t error) { t_lastError = error; }
 uint32_t LastErrorValue() { return t_lastError; }
 
@@ -630,6 +665,9 @@ void RegisterKernel32(std::vector<Function>& out) {
   UB_FN(VirtualAlloc); UB_FN(VirtualFree); UB_FN(VirtualProtect); UB_FN(VirtualQuery);
   UB_FN(TlsAlloc); UB_FN(TlsFree); UB_FN(TlsGetValue); UB_FN(TlsSetValue);
   UB_FN(FlsAlloc); UB_FN(FlsFree); UB_FN(FlsGetValue); UB_FN(FlsSetValue);
+  out.push_back({"kernelbase.dll", "FlsGetValue2", &FlsGetValue2});  // the UCRT imports it from here
+  out.push_back({k, "FlsGetValue2", &FlsGetValue2});
+  UB_FN(AreFileApisANSI);
   UB_FN(InitializeCriticalSection); UB_FN(DeleteCriticalSection); UB_FN(EnterCriticalSection);
   UB_FN(LeaveCriticalSection); UB_FN(TryEnterCriticalSection);
   out.push_back({k, "InitializeCriticalSectionEx", &InitializeCriticalSection});
@@ -637,6 +675,7 @@ void RegisterKernel32(std::vector<Function>& out) {
   UB_FN(InitializeSRWLock); UB_FN(AcquireSRWLockExclusive); UB_FN(ReleaseSRWLockExclusive);
   UB_FN(AcquireSRWLockShared); UB_FN(ReleaseSRWLockShared);
   UB_FN(SleepConditionVariableSRW); UB_FN(WakeAllConditionVariable); UB_FN(WakeConditionVariable);
+  UB_FN(SleepConditionVariableCS); UB_FN(InitializeConditionVariable);
   UB_FN(InitializeSListHead);
   UB_FN(GetCurrentProcess); UB_FN(GetCurrentThread); UB_FN(GetCurrentProcessId); UB_FN(GetCurrentThreadId);
   UB_FN(IsDebuggerPresent);

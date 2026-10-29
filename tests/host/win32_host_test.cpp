@@ -6,11 +6,16 @@
 #include "loader/pe_image.h"
 #include "win32/hle.h"
 
+#include <asm/prctl.h>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <cstdlib>
+#include <cstring>
+#include <pthread.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <vector>
 
 extern "C" void ub_win32_host_entry();
@@ -26,6 +31,46 @@ int g_failures = 0;
 void Check(bool ok, const char* what) {
   std::printf("%-46s %s\n", what, ok ? "ok" : "FAIL");
   if (!ok) ++g_failures;
+}
+
+// Points gs at a fresh TEB for the calling host thread so native guest code finds its TLS at
+// gs:[0x58] exactly as it would under FEXCore. x86-64 Linux keeps its own TLS in fs, so gs is free.
+// The caller runs the TLS callbacks, then releases the block with FreeGuestTeb once no more guest
+// code runs on the thread.
+struct GuestTeb {
+  uint8_t* teb = nullptr;
+  uint8_t* peb = nullptr;
+  uintptr_t tls = 0;
+};
+
+GuestTeb SetupGuestTeb() {
+  uintptr_t stackBase = 0, stackLimit = 0;
+  pthread_attr_t attr;
+  if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+    void* base = nullptr;
+    size_t size = 0;
+    if (pthread_attr_getstack(&attr, &base, &size) == 0) {
+      stackLimit = reinterpret_cast<uintptr_t>(base);
+      stackBase = stackLimit + size;
+    }
+    pthread_attr_destroy(&attr);
+  }
+  GuestTeb out;
+  out.teb = new uint8_t[UnityBridge::Win32::kTebSize];
+  out.peb = new uint8_t[4096] {};
+  out.tls = UnityBridge::Win32::AllocThreadTls();
+  uint64_t tid = static_cast<uint64_t>(syscall(SYS_gettid));
+  UnityBridge::Win32::InitTeb(out.teb, stackBase, stackLimit, reinterpret_cast<uintptr_t>(out.teb),
+                              reinterpret_cast<uintptr_t>(out.peb), static_cast<uint32_t>(getpid()),
+                              static_cast<uint32_t>(tid), out.tls);
+  syscall(SYS_arch_prctl, ARCH_SET_GS, reinterpret_cast<uintptr_t>(out.teb));
+  return out;
+}
+
+void FreeGuestTeb(const GuestTeb& teb) {
+  UnityBridge::Win32::FreeThreadTls(teb.tls);
+  delete[] teb.teb;
+  delete[] teb.peb;
 }
 
 // Guest code is native x86-64 here: call it with the Microsoft convention directly.
@@ -52,7 +97,16 @@ int main(int argc, char** argv) {
                          reinterpret_cast<uintptr_t>(&ub_win32_host_entry));
   Win32::Runtime::SetCurrent(&runtime);
   Win32::SetGuestCaller(&CallGuestNative);
-  Win32::SetThreadRunner([](uintptr_t start, uint64_t parameter) { return CallGuestNative(start, {&parameter, 1}); });
+  Win32::SetThreadRunner([](uintptr_t start, uint64_t parameter) {
+    // Each guest thread gets its own TEB/TLS and runs the TLS callbacks with DLL_THREAD_ATTACH,
+    // the way the Windows loader starts a thread, before the start routine.
+    const GuestTeb teb = SetupGuestTeb();
+    Win32::RunTlsCallbacks(Win32::DLL_THREAD_ATTACH);
+    const uint64_t code = CallGuestNative(start, {&parameter, 1});
+    Win32::RunTlsCallbacks(Win32::DLL_THREAD_DETACH);
+    FreeGuestTeb(teb);
+    return code;
+  });
 
   // The guest's C:\Users\Player lands in a fresh temporary folder.
   char profile[] = "/tmp/ubtest-profile-XXXXXX";
@@ -76,7 +130,7 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 79, "79 imports");
+  Check(image.imports.size() == 93, "93 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";
@@ -84,6 +138,16 @@ int main(int argc, char** argv) {
   module.base = reinterpret_cast<uintptr_t>(image.base);
   module.lookup = [&image](std::string_view name) { return image.Export(name); };
   Win32::RegisterModule(std::move(module), true);
+
+  // Implicit TLS: register the DLL's TLS directory, give this thread a TEB with gs:[0x58] pointing
+  // at its TLS block, and run the TLS callbacks with DLL_PROCESS_ATTACH, as the loader does.
+  if (image.tls) Win32::RegisterTlsImage(reinterpret_cast<uintptr_t>(image.base), *image.tls);
+  // Register the DLL's .pdata so RtlLookupFunctionEntry / the exception dispatcher can unwind it.
+  Win32::RegisterUnwindImage(reinterpret_cast<uintptr_t>(image.base),
+                             reinterpret_cast<uintptr_t>(image.base) + image.size,
+                             reinterpret_cast<uintptr_t>(image.base) + image.pdataRva, image.pdataSize);
+  const GuestTeb mainTeb = SetupGuestTeb();
+  Win32::RunTlsCallbacks(Win32::DLL_PROCESS_ATTACH);
 
   using AllFn = int (__attribute__((ms_abi)) *)();
   using FloatFn = double (__attribute__((ms_abi)) *)(double, double);
@@ -106,8 +170,13 @@ int main(int argc, char** argv) {
                          "files, find, mapping (profile folder)",
                          "locale: case mapping, compare, en-US", "InterlockedFlushSList",
                          "callback: EnumSystemLocalesW", "callback: FlsFree (nested import)",
-                         "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread"};
-  for (int i = 0; i < 25; ++i) Check(bits & (1 << i), names[i]);
+                         "CreateThread: own TLS and last error", "CreateThread suspended + ResumeThread",
+                         "implicit TLS: __declspec(thread) + callback",
+                         "SEH: __try/__except catches RaiseException",
+                         "SEH: __finally runs while unwinding to __except",
+                         "SEH: RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/PcToFileHeader",
+                         "SuspendThread/GetThreadContext, DuplicateHandle(GetCurrentThread)"};
+  for (int i = 0; i < 30; ++i) Check(bits & (1 << i), names[i]);
 
   Check(reinterpret_cast<FloatFn>(*fl)(3.0, 4.0) == 12.5, "double arguments and xmm0 return");
 
@@ -115,6 +184,8 @@ int main(int argc, char** argv) {
   const auto calls = runtime.UnimplementedCalls();
   Check(calls.size() == 1 && calls[0] == "kernel32.dll!UnityBridgeTestMissingFunction", "unimplemented call reported");
 
+  Win32::RunTlsCallbacks(Win32::DLL_PROCESS_DETACH);
+  FreeGuestTeb(mainTeb);
   Pe::Unload(image);
   std::printf("%s (%d failed)\n", g_failures ? "FAILED" : "PASSED", g_failures);
   return g_failures ? 1 : 0;

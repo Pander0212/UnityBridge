@@ -23,3 +23,7 @@ void *husk_ios_jit_get_mapping(void);
 int ub_unity_probe_run(const char *unityDir, const char *dataDir, char *out, size_t capacity);
 int ub_unity_probe_ran(void);
 int ub_unity_engine_run(const char *unityDir, const char *gameData, const char *appData, char *out, size_t capacity);
+// M5: the game view. The CAMetalLayer the engine presents into (pixels), set before ub_unity_engine_run,
+// and its touches (phase 0 down, 1 move, 2 up; pixels, y down).
+void ub_unity_set_surface(void *metalLayer, int width, int height);
+void ub_unity_touch(int phase, int identifier, float x, float y);

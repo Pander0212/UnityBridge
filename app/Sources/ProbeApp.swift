@@ -77,6 +77,9 @@ struct ProbeView: View {
     @State private var jit = JITState.current
     @State private var waiting = false
     @State private var message = ""
+    // M5: the engine run waits for the game view's layer; the view is shown while the engine runs.
+    @State private var showGame = false
+    @State private var pendingLaunch: ((CAMetalLayer, Int32, Int32) -> Void)?
 
     var body: some View {
         NavigationStack {
@@ -130,6 +133,18 @@ struct ProbeView: View {
             .navigationTitle("UnityBridge Probe")
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
                 jit = JITState.current
+            }
+            .fullScreenCover(isPresented: $showGame) {
+                GameScreen(onReady: { layer, width, height in
+                    let launch = pendingLaunch
+                    pendingLaunch = nil
+                    launch?(layer, width, height)
+                }, onClose: { showGame = false })
+            }
+            .toolbar {
+                if il2cppStarted && !showGame {
+                    Button("Show game") { showGame = true }
+                }
             }
         }
     }
@@ -267,27 +282,41 @@ struct ProbeView: View {
         let haveUnity = FileManager.default.fileExists(atPath: unityDir.appendingPathComponent("libunity.so").path)
         running = true
         report = ""
-        Thread.detachNewThread {
-            // Husk's region first, while the address space is still unfragmented: its writable
-            // view must end up within 3 GiB of the executable one.
-            if haveUnity { _ = husk_ios_jit_get_mapping() }
-            ub_il2cpp_probe_set_engine_mode(engine ? 1 : 0)
-            var buffer = [CChar](repeating: 0, count: 65536)
-            let status = ub_il2cpp_probe_run(dll.path, dataDir.path, profile.path, &buffer, buffer.count)
-            var text = String(cString: buffer) + "\nexit status \(status)"
-            if status == 0 && engine {
-                var unity = [CChar](repeating: 0, count: 16384)
-                let unityStatus = ub_unity_engine_run(unityDir.path, gameData.path, unityData.path, &unity, unity.count)
-                text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
-            } else if status == 0 {
-                var unity = [CChar](repeating: 0, count: 16384)
-                let unityStatus = ub_unity_probe_run(unityDir.path, unityData.path, &unity, unity.count)
-                text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
+        let work = { (surface: (layer: CAMetalLayer, width: Int32, height: Int32)?) in
+            Thread.detachNewThread {
+                if let surface {  // M5: present into the game view instead of BMP files
+                    // Retained for good: the engine presents into it for as long as the app runs.
+                    ub_unity_set_surface(Unmanaged.passRetained(surface.layer).toOpaque(), surface.width, surface.height)
+                    ProbeLog.write("game view \(surface.width)x\(surface.height) px")
+                }
+                // Husk's region first, while the address space is still unfragmented: its writable
+                // view must end up within 3 GiB of the executable one.
+                if haveUnity { _ = husk_ios_jit_get_mapping() }
+                ub_il2cpp_probe_set_engine_mode(engine ? 1 : 0)
+                var buffer = [CChar](repeating: 0, count: 65536)
+                let status = ub_il2cpp_probe_run(dll.path, dataDir.path, profile.path, &buffer, buffer.count)
+                var text = String(cString: buffer) + "\nexit status \(status)"
+                if status == 0 && engine {
+                    var unity = [CChar](repeating: 0, count: 16384)
+                    let unityStatus = ub_unity_engine_run(unityDir.path, gameData.path, unityData.path, &unity, unity.count)
+                    text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
+                } else if status == 0 {
+                    var unity = [CChar](repeating: 0, count: 16384)
+                    let unityStatus = ub_unity_probe_run(unityDir.path, unityData.path, &unity, unity.count)
+                    text += "\n\n" + String(cString: unity) + "\nUnity exit status \(unityStatus)"
+                }
+                DispatchQueue.main.async {
+                    report = text
+                    running = false
+                }
             }
-            DispatchQueue.main.async {
-                report = text
-                running = false
-            }
+        }
+        if engine && haveUnity {
+            // The engine starts once the game view is on the screen and has its size.
+            pendingLaunch = { layer, width, height in work((layer, width, height)) }
+            showGame = true
+        } else {
+            work(nil)
         }
     }
 

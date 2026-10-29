@@ -1199,3 +1199,16 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   used variables only, and HLSLcc declares a uniform block's members from the RDEF. A cbuffer both
   stages use now gets the union of both tables' variables, sorted by offset, in both stages (only
   when they differ; the corpus is unchanged). Converter version 8.
+- **iPhone, run 68**: no link errors any more (TextMeshPro/Distance Field links), 60 s, 1866 frames.
+
+### M5: the game on the screen, with touch (2026-10-29, built, waiting for the iPhone)
+
+- The probe app only wrote frames to BMP files; the menu could be seen but not used. Now "Run Unity
+  engine" opens a full-screen game view (`app/Sources/GameView.swift`): a UIView backed by a
+  `CAMetalLayer`, turned to landscape (`requestGeometryUpdate`; Info.plist allows landscape), whose
+  layer and size in pixels go to Husk (`tl_unity_config.metal_layer`, width, height) through
+  `ub_unity_set_surface` before the engine starts; ANGLE presents into it (no BMP frames then).
+- Touches go to the engine through `ub_unity_touch` → Husk's `tl_unity_touch` (pixels, y down, up to
+  10 fingers, phase 0 down / 1 move / 2 up).
+- One view (and layer) for the session, retained for good: a small × closes the game screen (the
+  engine keeps running), "Show game" in the toolbar brings it back.

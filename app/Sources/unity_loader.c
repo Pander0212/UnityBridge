@@ -899,8 +899,27 @@ static const char *angle_path(void)
     return stat(path, &st) == 0 ? path : NULL;
 }
 
+// The app's game view (M5): a CAMetalLayer the engine presents into, its size in pixels. Set by the
+// app on the main thread before ub_unity_engine_run; without it frames go to BMP files (M3f).
+static void *g_layer;
+static int g_layer_width, g_layer_height;
+
+void ub_unity_set_surface(void *metal_layer, int width, int height)
+{
+    g_layer = metal_layer;
+    g_layer_width = width;
+    g_layer_height = height;
+}
+
+// A finger on the game view, in the layer's pixels (y down): phase 0 down, 1 move, 2 up.
+void ub_unity_touch(int phase, int id, float x, float y)
+{
+    tl_unity_touch(phase, id, x, y);
+}
+
 // `frames` (M3f): with ANGLE, draw off-screen and keep frames 1-3 and the latest one (every 60th
-// frame) as BMP files in that folder (Husk's frame capture). NULL: no graphics (M3d/M3e).
+// frame) as BMP files in that folder (Husk's frame capture). NULL: no graphics (M3d/M3e). With the
+// app's layer set (ub_unity_set_surface), ANGLE presents into it instead.
 static bool start(const char *apk, const char *app_data, const char *frames)
 {
     mkdir(app_data, 0755);
@@ -913,7 +932,12 @@ static bool start(const char *apk, const char *app_data, const char *frames)
     cfg.height = 1179;
     if (frames) {
         cfg.angle_egl = angle_path();
-        if (cfg.angle_egl) {
+        if (cfg.angle_egl && g_layer) {
+            cfg.metal_layer = g_layer;
+            cfg.width = g_layer_width;
+            cfg.height = g_layer_height;
+            line("graphics: ANGLE %s, presenting into the game view (%dx%d)", cfg.angle_egl, cfg.width, cfg.height);
+        } else if (cfg.angle_egl) {
             mkdir(frames, 0755);
             cfg.frame_dir = frames;
             cfg.frame_every = -60;

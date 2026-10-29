@@ -18,7 +18,7 @@ using TypeTree::Value;
 constexpr uint32_t kD3D11 = 4, kGles3x = 9;
 constexpr int kTypeGles3 = 4;  // kShaderGpuProgramGLES3
 constexpr int32_t kRecordVersion = 202012090;
-constexpr int kShaderClass = 48;
+constexpr int kShaderClass = 48, kBuildSettingsClass = 141;
 const char* const kStages[] = {"progVertex", "progFragment", "progGeometry", "progHull", "progDomain",
                                "progRayTracing"};
 
@@ -497,6 +497,25 @@ std::optional<Pair> TranslatePair(const std::vector<uint8_t>& dx, uint64_t vsCod
 
 } // namespace
 
+bool SetAndroidGraphicsApis(Value& settings, Stats* stats) {
+  Value* apis = settings.Field("m_GraphicsAPIs");
+  if (!apis || apis->kind != Value::Kind::Vector) return false;
+  std::string had;
+  for (const auto& a : apis->items) {
+    const int64_t api = a.Int();
+    if (api == kApiGles2 || api == kApiGles3 || api == kApiVulkan) return false;  // an Android build's list
+    had += (had.empty() ? "" : ", ") + std::to_string(api);
+  }
+  Value gles3 = TypeTree::NewElement(*apis);
+  gles3.SetInt(kApiGles3);
+  apis->items = {gles3};
+  const std::string line = "BuildSettings: graphics APIs [" + had + "] -> [OpenGLES3]";
+  stats->log += line + "\n";
+  if (stats->progress) stats->progress(line);
+  stats->graphicsApis = true;
+  return true;
+}
+
 std::optional<std::vector<uint8_t>> Lz4Decompress(const uint8_t* src, size_t n, size_t size) {
   std::vector<uint8_t> out;
   out.reserve(size);
@@ -658,6 +677,20 @@ std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size
   std::vector<UnityFile::Replacement> replacements;
   for (size_t i = 0; i < file->objects.size(); ++i) {
     const auto& o = file->objects[i];
+    if (o.classId == kBuildSettingsClass) {
+      const uint8_t* bytes = data + file->dataOffset + o.byteStart;
+      std::string why;
+      auto settings = TypeTree::Read(TypeTree::BuildSettings2021_3(), bytes, o.byteSize, &why);
+      if (settings && TypeTree::Write(*settings) != std::vector<uint8_t>(bytes, bytes + o.byteSize))
+        settings.reset(), why = "does not match the 2021.3 type tree";
+      if (!settings) {
+        stats->log += "BuildSettings: " + why + "\n";
+        if (stats->progress) stats->progress("BuildSettings: " + why);
+      } else if (SetAndroidGraphicsApis(*settings, stats)) {
+        replacements.push_back({i, TypeTree::Write(*settings)});
+      }
+      continue;
+    }
     if (o.classId != kShaderClass) continue;
     std::string why;
     if (stats->progress)

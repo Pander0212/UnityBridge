@@ -198,6 +198,14 @@ const Node& Shader2021_3() {
   return *tree;
 }
 
+const Node& BuildSettings2021_3() {
+  static const Row rows[] = {
+#include "engine/typetree_buildsettings_2021_3.inc"
+  };
+  static const auto tree = Build(rows, sizeof(rows) / sizeof(rows[0]));
+  return *tree;
+}
+
 Value* Value::Field(const std::string& name) {
   if (kind != Kind::Object) return nullptr;
   for (auto& item : items) if (item.node && item.node->name == name) return &item;
@@ -233,6 +241,8 @@ std::vector<uint8_t> Write(const Value& value) {
   w.Write(value, true);
   return std::move(w.out);
 }
+
+Value Zero(const Node& node) { return Zeroed(node); }
 
 Value NewElement(const Value& vector) {
   const Node& n = *vector.node;

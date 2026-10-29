@@ -35,6 +35,8 @@ struct Row {  // one line of a generated table
 std::unique_ptr<Node> Build(const Row* rows, size_t count);
 // Class 48 (Shader), Unity 2021.3.
 const Node& Shader2021_3();
+// Class 141 (BuildSettings, in globalgamemanagers), Unity 2021.3.
+const Node& BuildSettings2021_3();
 
 struct Value {
   enum class Kind { Primitive, Bytes, String, Vector, Object, Pair };
@@ -57,5 +59,7 @@ std::vector<uint8_t> Write(const Value& value);
 
 // A new element for a vector of `vector` (a Value of Kind::Vector), zeroed, with its fields.
 Value NewElement(const Value& vector);
+// A zeroed value of type `node` (empty strings and vectors).
+Value Zero(const Node& node);
 
 } // namespace UnityBridge::TypeTree

@@ -65,7 +65,10 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
     Put(log, logcap, error);
     return 0;
   }
-  if (std::find(file->typeClassIds.begin(), file->typeClassIds.end(), 48) == file->typeClassIds.end()) {
+  const auto has = [&](int classId) {
+    return std::find(file->typeClassIds.begin(), file->typeClassIds.end(), classId) != file->typeClassIds.end();
+  };
+  if (!has(48) && !has(141)) {  // Shader, BuildSettings
     Put(log, logcap, "no shaders");
     return 0;
   }
@@ -99,7 +102,8 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
     Put(log, logcap, "write failed");
     return -1;
   }
-  Put(log, logcap, std::to_string(stats.shaders) + " shaders, " + std::to_string(stats.programs) +
+  Put(log, logcap, std::string(stats.graphicsApis ? "graphics APIs -> OpenGLES3; " : "") +
+                       std::to_string(stats.shaders) + " shaders, " + std::to_string(stats.programs) +
                        " GLES3 programs (" + std::to_string(stats.standIns) + " with stand-ins), " +
                        std::to_string(stats.failed) + " not translated" + failures);
   return 1;
@@ -127,7 +131,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 3; }
+extern "C" int ub_shader_import_version(void) { return 4; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

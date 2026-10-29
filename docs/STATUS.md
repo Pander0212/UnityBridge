@@ -1101,3 +1101,27 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   and checks each component against HLSLcc's own lookup rule (`IsOffsetInType`, matrices as vec4
   arrays); a component without a variable gets a scalar `UnityBridge_cb<n>_<byte>`. The corpus
   needs none (output unchanged); the mutated case translates.
+- **iPhone, run 60**: the conversion went through every file: `resources.assets` 4 programs,
+  `sharedassets0.assets` 17, `unity_builtin_extra` 209, `globalgamemanagers.assets` 220 (2 of
+  URP's UberPost not translated: "malformed code record"); then the engine started and swapped
+  frames. Three findings:
+  1. **Unity runs GLES2.** `Desired shader compiler platform 5 is not available in shader blob` (35
+     times, in every run since the first frames): platform 5 is GLES20, although ANGLE gives an
+     OpenGL ES 3.0 context. The Windows build's `BuildSettings.m_GraphicsAPIs` lists only desktop
+     APIs; the Android player finds none of them, shows "Your device does not match the hardware
+     requirements" (the dialog every run had) and falls back to GLES2, so our GLES3x programs are
+     never asked for. Fix: the import also rewrites BuildSettings (class 141, type tree generated
+     like class 48's: `engine/typetree_buildsettings_2021_3.inc`) to `m_GraphicsAPIs = [11]`
+     (OpenGLES3) when it names no Android API. Checked by `tests/host/unity_assets_test.cpp`
+     (synthetic object, round trip, layout identical to UnityPy's writer) since the game's file is
+     not here.
+  2. **Every program needed stand-ins**, also Unity's own cbuffers (UnityPerDraw, ...): the game's
+     per-variant tables carry no cbuffer bindings, so every cbuffer got register 0. To check next:
+     take the bindings from `m_CommonParameters.m_ConstantBufferBindings` by name.
+  3. **Crash**: il2cpp asked GetProcAddress for `BCryptGenRandomW` first; our built-in bcrypt.dll
+     handed out a stub for any name, and the unimplemented stub returned 0 (STATUS_SUCCESS) without
+     random bytes: all-zero GUIDs, so .NET's case-sensitivity probe file
+     `CASESENSITIVETEST00000000000040008000000000000000` from an earlier run already existed, the
+     IOException went unhandled across the bridge and the process faulted. Fix: GetProcAddress /
+     Baselib_DynamicLibrary_GetFunction on a built-in DLL return NULL for functions we do not
+     implement, as Windows does, so il2cpp falls back to `BCryptGenRandom`.

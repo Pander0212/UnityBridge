@@ -20,6 +20,7 @@ struct Stats {
   int programs = 0;    // vertex + fragment pairs translated
   int failed = 0;      // pairs that could not be translated
   int standIns = 0;    // pairs translated with stand-ins for bindings Unity's tables lack
+  bool graphicsApis = false;  // BuildSettings' graphics API list rewritten
   std::string log;     // a line per shader, and the reasons for failures
   // Called before each shader is translated (and with each failure), so a crash inside HLSLcc can be
   // placed from the log.
@@ -36,8 +37,19 @@ std::vector<uint8_t> Lz4Literals(const std::vector<uint8_t>& data);
 // has one is left alone. False if the shader was not changed.
 bool AddGles3(TypeTree::Value& shader, bool replace, Stats* stats);
 
-// The serialized file `data` with every Shader converted; nullopt if nothing changed (or the file
-// is not one this reads: `error` says why).
+// UnityEngine.Rendering.GraphicsDeviceType values.
+constexpr int64_t kApiGles2 = 8, kApiGles3 = 11, kApiVulkan = 21;
+
+// A desktop build's BuildSettings (class 141) lists its graphics APIs (Direct3D11: 2); the Android
+// player finds none of them on the device, warns that it "does not match the hardware
+// requirements" and falls back to OpenGL ES 2.0, asking for platform 5 programs no shader has. This
+// makes the list [OpenGLES3], the API the GLES3x programs are for. False if the list already names
+// an Android API (left alone) or the field is missing.
+bool SetAndroidGraphicsApis(TypeTree::Value& settings, Stats* stats);
+
+// The serialized file `data` with every Shader converted and a desktop BuildSettings made Android's
+// (SetAndroidGraphicsApis); nullopt if nothing changed (or the file is not one this reads: `error`
+// says why).
 std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size, bool replace, Stats* stats,
                                                 std::string* error);
 

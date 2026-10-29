@@ -90,4 +90,12 @@ if(EXISTS ${HLSLCC_DIR}/src/HLSLcc.cpp)
   target_include_directories(ub-shader-convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(ub-shader-convert PRIVATE -Wall -Wextra)
   set_target_properties(ub-shader-convert PROPERTIES CXX_STANDARD 17)
+
+  add_executable(unity-assets-test tests/host/unity_assets_test.cpp engine/shader_gles3.cpp engine/shader_xlat.cpp
+                 engine/unity_file.cpp engine/unity_typetree.cpp)
+  target_link_libraries(unity-assets-test PRIVATE hlslcc)
+  target_include_directories(unity-assets-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(unity-assets-test PRIVATE -Wall -Wextra)
+  set_target_properties(unity-assets-test PROPERTIES CXX_STANDARD 17)
+  add_test(NAME unity-assets-test COMMAND unity-assets-test)
 endif()

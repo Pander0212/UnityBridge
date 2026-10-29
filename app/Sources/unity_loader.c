@@ -212,8 +212,10 @@ static void apply_patch(const apk_entry *e, uint8_t *buf, uint64_t pos, size_t n
     }
 }
 
-// M4d: Shader objects that carry D3D11 programs only get GLES3x ones (engine/shader_gles3.h), in a
-// converted copy at <unity_dir>/shaders/<entry name>; the entry then points at the copy. A stamp next
+// M4d: Shader objects that carry D3D11 programs only get GLES3x ones (engine/shader_gles3.h), and a
+// desktop BuildSettings' graphics API list becomes [OpenGLES3] (else the Android player falls back
+// to GLES2 and asks for platform 5 programs), in a converted copy at <unity_dir>/shaders/<entry name>;
+// the entry then points at the copy. A stamp next
 // to it (<copy>.src: converter version, source path, size, mtime, result) keeps the work to the first
 // run, and remembers files with nothing to convert too.
 static void shader_note(const char *s) { line("  shaders:   %s", s); }

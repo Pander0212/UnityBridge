@@ -488,7 +488,10 @@ uint64_t WideCharToMultiByte(CallContext& c) {
 std::mutex g_builtinMutex;
 uintptr_t g_nextBuiltin = 0x0000'7ffd'0000'0000ull;
 
-// HMODULE for a built-in DLL, registering it on first use. GetProcAddress on it hands out stubs.
+// HMODULE for a built-in DLL, registering it on first use. GetProcAddress on it hands out stubs for
+// the functions we implement and NULL for the rest, as Windows does for a name a DLL does not export:
+// callers probe (il2cpp tries BCryptGenRandomW before BCryptGenRandom), and a stub that only returns 0
+// read as success there (no random bytes: all-zero GUIDs, M4d).
 uintptr_t BuiltinHandle(std::string_view name) {
   std::scoped_lock lock {g_builtinMutex};
   if (const auto* m = FindModuleByName(name)) return m->base;
@@ -501,7 +504,10 @@ uintptr_t BuiltinHandle(std::string_view name) {
   m.lookup = [dll](std::string_view symbol) -> std::optional<uintptr_t> {
     auto* runtime = Runtime::Current();
     if (runtime == nullptr) return std::nullopt;
-    return runtime->Resolve(dll.find('.') == std::string::npos ? dll + ".dll" : dll, symbol);
+    const std::string file = dll.find('.') == std::string::npos ? dll + ".dll" : dll;
+    const Function* f = runtime->Lookup(file, symbol);
+    if (f == nullptr || f->handler == nullptr) return std::nullopt;
+    return runtime->Resolve(file, symbol);
   };
   const auto base = m.base;
   RegisterModule(std::move(m));

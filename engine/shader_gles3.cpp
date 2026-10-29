@@ -460,6 +460,7 @@ std::optional<Pair> TranslatePair(const Segments& dx, uint64_t vsCode, uint64_t 
                                   std::string* notes) {
   std::vector<uint8_t> dxbc[2];
   ShaderXlat::Reflection tables[2];  // Unity's, before CompleteReflection's stand-ins
+  std::vector<uint8_t> raws[2];
   std::optional<CodeRecord> vsRecord;
   const uint64_t codes[2] = {vsCode, psCode}, paramIdx[2] = {vsParams, psParams};
   const Value* progs[2] = {&vsProg, &psProg};
@@ -473,16 +474,42 @@ std::optional<Pair> TranslatePair(const Segments& dx, uint64_t vsCode, uint64_t 
     const auto params = ReadParams(*paramRec, error);
     if (!params) return std::nullopt;
     tables[s] = ReflectionOf(*params, *progs[s], names);
-    const auto raw = StripUnityHeader(code->code);
-    const auto model = ShaderXlat::ShaderModel(raw);
+    raws[s] = StripUnityHeader(code->code);
+  }
+  // A uniform block both stages use must have the same members in both, or the GLSL program does
+  // not link ("Field numbers of uniform block 'UnityPerCamera' differ", TextMeshPro/Distance
+  // Field). Unity's tables list each stage's used variables only: both stages get the union.
+  ShaderXlat::Reflection shared[2] = {tables[0], tables[1]};
+  for (auto& vcb : shared[0].constantBuffers)
+    for (auto& pcb : shared[1].constantBuffers) {
+      if (vcb.name != pcb.name) continue;
+      std::vector<ShaderXlat::Variable> all = vcb.variables;
+      for (const auto& v : pcb.variables) {
+        bool have = false;
+        for (const auto& x : all) have = have || x.name == v.name;
+        if (!have) all.push_back(v);
+      }
+      const auto sameNames = [](const std::vector<ShaderXlat::Variable>& a, const std::vector<ShaderXlat::Variable>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t k = 0; k < a.size(); ++k) if (a[k].name != b[k].name) return false;
+        return true;
+      };
+      if (sameNames(vcb.variables, pcb.variables)) continue;  // the same members in the same order already
+      std::stable_sort(all.begin(), all.end(),
+                       [](const ShaderXlat::Variable& a, const ShaderXlat::Variable& b) { return a.offset < b.offset; });
+      vcb.variables = pcb.variables = all;
+      vcb.size = pcb.size = std::max(vcb.size, pcb.size);
+    }
+  for (int s = 0; s < 2; ++s) {
+    const auto model = ShaderXlat::ShaderModel(raws[s]);
     if (!model) { *error = "no DXBC shader model"; return std::nullopt; }
-    ShaderXlat::Reflection complete = tables[s];
+    ShaderXlat::Reflection complete = shared[s];
     std::string why;
-    if (!ShaderXlat::CompleteReflection(complete, raw, &why, notes)) {
+    if (!ShaderXlat::CompleteReflection(complete, raws[s], &why, notes)) {
       *error = std::string(s ? "pixel" : "vertex") + " program: " + why;
       return std::nullopt;
     }
-    dxbc[s] = ShaderXlat::WithRdef(raw, ShaderXlat::BuildRdef(complete, model->first, model->second));
+    dxbc[s] = ShaderXlat::WithRdef(raws[s], ShaderXlat::BuildRdef(complete, model->first, model->second));
     if (dxbc[s].empty()) { *error = "not a DXBC container"; return std::nullopt; }
   }
   const auto program = ShaderXlat::Translate(dxbc[0], dxbc[1], ShaderXlat::DefaultFlags(), error);

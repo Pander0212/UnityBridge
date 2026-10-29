@@ -11,7 +11,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 | M1 | Analyse Android `libunity.so` 2021.3.18f1, match the API | done [R] |
 | M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | **reached [i] (2026-10-28):** Fellworld's real `GameAssembly.dll` runs `il2cpp_init` to success on iPhone (returns 1, corlib + domain non-null, 0 unimplemented imports) |
 | M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | research done [R]: Husk's translation layer (GPL-2.0+) already runs Android Unity games; bridge measured |
-| M4 | D3D11 shaders converted; first frame | **first frame reached [i] (2026-10-29):** Unity's splash screen drawn with the GLES3 shaders converted on the device; the game then dies on an uncaught managed exception (C++ EH in GameAssembly, under investigation) |
+| M4 | D3D11 shaders converted; first frame | **reached [i] (2026-10-29):** Fellworld's main menu rendered on the iPhone with the GLES3 shaders converted on the device; 60 s, ~32 fps, no crash |
 
 ## M0: GameAssembly.dll (Fellworld) [R]
 
@@ -1188,3 +1188,14 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
      unmapped keeps its entry) over address space a window took later. Now entries overlapping
      newly reserved space are dropped, each growth is logged, and a refused commit logs which
      region / foreign entry it was taken for.
+- **iPhone, run 67: Fellworld's main menu [i] (2026-10-29).** The frame shows the game's title screen
+  rendered correctly (logo, text, the Continue / New Game / Load Game / Settings / Quit buttons):
+  the Windows game's IL2CPP code under FEXCore, Unity's Android engine, D3D11 shaders converted to
+  GLES3 on the device, ANGLE over Metal. 60 s without a crash, 1941 frames (1939 presented), no
+  window growth needed. All 222 programs of `globalgamemanagers.assets` translate now (blob
+  segments), and the PostProcessPass null reference is gone with UberPost.
+- Left in the log: `TextMeshPro/Distance Field` does not link ("Field numbers of uniform block
+  'UnityPerCamera' differ between VERTEX and FRAGMENT shaders"): Unity's tables list each stage's
+  used variables only, and HLSLcc declares a uniform block's members from the RDEF. A cbuffer both
+  stages use now gets the union of both tables' variables, sorted by offset, in both stages (only
+  when they differ; the corpus is unchanged). Converter version 8.

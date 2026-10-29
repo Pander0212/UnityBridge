@@ -128,7 +128,10 @@ uint64_t Baselib_DynamicLibrary_OpenUtf16(CallContext& c) {
   const auto name = ToUtf8(ReadWide(c.Ptr<const char16_t>(0)));
   const auto* module = FindModuleByName(name);
   if (module == nullptr) {
-    std::fprintf(stderr, "UB_WIN32 baselib: cannot open %s\n", name.c_str());
+    const auto* raw = c.Ptr<const uint8_t>(0);
+    std::fprintf(stderr, "UB_WIN32 baselib: cannot open %s (first bytes %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+                 name.c_str(), raw ? raw[0] : 0, raw ? raw[1] : 0, raw ? raw[2] : 0, raw ? raw[3] : 0, raw ? raw[4] : 0,
+                 raw ? raw[5] : 0, raw ? raw[6] : 0, raw ? raw[7] : 0);
     SetErrorState(c.Arg(1), kErrorFailed);
     return 0;
   }

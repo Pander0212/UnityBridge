@@ -261,6 +261,49 @@ bool DispatchException(ExceptionRecord* rec, Context* orig_context) {
   return false;
 }
 
+// An exception nobody handled: the frames the search walked (from the raise point, as module offsets,
+// with or without unwind info and handler) and where it stopped; for an MSVC C++ exception thrown by
+// il2cpp (an Il2CppExceptionWrapper), the managed exception's class and message. For the log only.
+void DescribeUnhandled(const ExceptionRecord* rec, const Context* raised) {
+  Context context = *raised;
+  for (int depth = 0; depth < 48; ++depth) {
+    uint64_t base = 0;
+    RuntimeFunction* fn = LookupFunctionEntry(context.Rip, &base);
+    const uint64_t module = PcToFileHeader(context.Rip);
+    uint64_t frame = 0;
+    void* handlerData = nullptr;
+    const uint64_t rip = context.Rip;
+    ExceptionRoutine* handler = VirtualUnwind(UNW_FLAG_EHANDLER, base, rip, fn, &context, &handlerData, &frame);
+    std::fprintf(stderr, "UB_WIN32   #%d rip=%#llx %s+%#llx%s handler=%#llx frame=%#llx\n", depth,
+                 static_cast<unsigned long long>(rip), module ? "module" : "(no module)",
+                 static_cast<unsigned long long>(module ? rip - module : 0), fn ? "" : " (no unwind info)",
+                 static_cast<unsigned long long>(handler ? reinterpret_cast<uint64_t>(handler) - module : 0),
+                 static_cast<unsigned long long>(frame));
+    if (!fn && module == 0) { std::fprintf(stderr, "UB_WIN32   (left the guest's code: the search ends here)\n"); break; }
+    if (!frame || !context.Rip) { std::fprintf(stderr, "UB_WIN32   (no caller frame: the search ends here)\n"); break; }
+  }
+  // _CxxThrowException: ExceptionInformation = {magic, object, ThrowInfo, image base}; il2cpp's
+  // object is an Il2CppExceptionWrapper { Il2CppException* ex }; ex->klass->name/namespaze at
+  // +0x10/+0x18 of Il2CppClass, ex->message (Il2CppString: length at +0x10, UTF-16 at +0x14) at +0x18.
+  auto plausible = [](uint64_t p) { return p >= 0x100000000ull && p < 0x800000000000ull && (p & 7) == 0; };
+  if (rec->ExceptionCode != 0xe06d7363 || rec->NumberParameters < 3 || !plausible(rec->ExceptionInformation[1])) return;
+  const uint64_t ex = *reinterpret_cast<const uint64_t*>(rec->ExceptionInformation[1]);
+  if (!plausible(ex)) return;
+  const uint64_t klass = *reinterpret_cast<const uint64_t*>(ex);
+  if (!plausible(klass)) return;
+  const uint64_t name = *reinterpret_cast<const uint64_t*>(klass + 0x10);
+  const uint64_t space = *reinterpret_cast<const uint64_t*>(klass + 0x18);
+  std::string message;
+  const uint64_t msg = *reinterpret_cast<const uint64_t*>(ex + 0x18);
+  if (plausible(msg)) {
+    const int32_t len = *reinterpret_cast<const int32_t*>(msg + 0x10);
+    const auto* chars = reinterpret_cast<const char16_t*>(msg + 0x14);
+    for (int32_t i = 0; i < len && i < 300; ++i) message += chars[i] < 0x80 ? static_cast<char>(chars[i]) : '?';
+  }
+  std::fprintf(stderr, "UB_WIN32   managed exception: %s.%s: %s\n", space && name ? reinterpret_cast<const char*>(space) : "?",
+               name ? reinterpret_cast<const char*>(name) : "?", message.c_str());
+}
+
 } // namespace Ntdll
 
 // ---- HLE import wrappers -----------------------------------------------------------------------
@@ -333,10 +376,13 @@ uint64_t RaiseException(CallContext& c) {
   }
   Context ctx;
   Ntdll::CaptureContextFromCall(&ctx, c);
+  const Context raised = ctx;
   if (Ntdll::DispatchException(&rec, &ctx)) {
     if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
   } else {
     std::fprintf(stderr, "UB_WIN32 unhandled exception %#x at %p\n", rec.ExceptionCode, rec.ExceptionAddress);
+    // 0x406d1388 is MSVC's thread-naming exception: nobody is meant to handle it.
+    if (rec.ExceptionCode != 0x406d1388) Ntdll::DescribeUnhandled(&rec, &raised);
   }
   return 0;
 }

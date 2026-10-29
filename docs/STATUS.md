@@ -798,6 +798,18 @@ Next steps, in order:
         `MADV_DONTNEED` zero-fills it. Other mappings of the Android libraries that land in a
         window's unmapped part are recorded at `mmap` and passed through untouched. 16 regions:
         1 GiB of address space instead of 4. The report counts regions and extensions.
+      - **Device run: the address space holds.** 13 regions after 1 s with 64 MiB each reserved,
+        none grown; at the fault 3,939 MiB free, largest gap 1,088 MiB, no `mmap FAILED`. **The
+        out-of-address-space stop is gone.** New stop, in the game's code: `UB_WIN32 baselib:
+        cannot open B` (il2cpp loading a native library: `Baselib_DynamicLibrary_OpenUtf16`),
+        then `unhandled exception 0xe06d7363` (an MSVC C++ exception, il2cpp's form of a managed
+        one) twice, then a null-pointer fault in GameAssembly+0x1bf5fd right after the
+        `RaiseException` that should not have returned. C++ exceptions were caught before (M2f,
+        `FormatException` through `il2cpp_runtime_invoke`); here the search found no handler.
+      - **Next, [i] pending:** an unhandled exception (other than MSVC's thread-naming one) logs the
+        frames the search walked (module offset, unwind info or not, handler, frame, why it
+        stopped) and, for il2cpp's C++ exceptions, the managed exception's class and message; the
+        failed library open logs the name's first bytes (to rule out a UTF-8/UTF-16 mix-up).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

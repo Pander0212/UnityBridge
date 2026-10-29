@@ -11,7 +11,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 | M1 | Analyse Android `libunity.so` 2021.3.18f1, match the API | done [R] |
 | M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | **reached [i] (2026-10-28):** Fellworld's real `GameAssembly.dll` runs `il2cpp_init` to success on iPhone (returns 1, corlib + domain non-null, 0 unimplemented imports) |
 | M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | research done [R]: Husk's translation layer (GPL-2.0+) already runs Android Unity games; bridge measured |
-| M4 | D3D11 shaders converted; first frame | — |
+| M4 | D3D11 shaders converted; first frame | in progress: conversion on the device built (M4d), iPhone test pending; first (pink) frames reached [i] |
 
 ## M0: GameAssembly.dll (Fellworld) [R]
 
@@ -989,7 +989,7 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   `UnityStereoGlobals` stays a uniform block (`UNITY_BINDING`); textures are listed per program with
   their unit. So a GLES3 table is derived from the translated source, not copied from D3D11's.
 
-### M4b: translation with HLSLcc and a synthesized RDEF (2026-10-29, in progress)
+### M4b: translation with HLSLcc and a synthesized RDEF (2026-10-29)
 
 - `scripts/fetch-hlslcc.sh`: HLSLcc (Unity-Technologies, MIT) at `3ea1fcd6`, into `build/hlslcc`, built
   unmodified (`third_party/hlslcc/PROVENANCE.md`); the host CMake builds it as a static library when
@@ -1047,3 +1047,23 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   result exactly as in the Python prototype's output.
 - Next (M4d): HLSLcc and these sources into the iOS build, conversion of the game's files in
   `make_apk` (cached), test on the iPhone.
+
+### M4d: conversion on the device (2026-10-29, built, waiting for the iPhone)
+
+- `scripts/build-fexcore-ios.sh` fetches HLSLcc (`scripts/fetch-hlslcc.sh`, pinned) and builds it in
+  FEX's project as `libhlslcc.a` (hook v2; a FEX checkout with the old hook must be deleted), the
+  shader sources go into `libunitybridge_engine.a`; the app links every `.a` of the output.
+- `engine/shader_import.{h,cpp}`: `ub_shader_import(src, dst, log)` maps the file, reads only the
+  metadata first (no class 48 type: nothing to do), then `ConvertFile` without `--replace` (shaders
+  with a GLES3 platform stay as they are) and writes the copy.
+- `make_apk` (`app/Sources/unity_loader.c`, `convert_shaders`): every game file without extension or
+  with `.assets` (not `Managed/`) goes through it; a converted copy lives in
+  `Documents/Unity/shaders/<name>` and the APK entry points at it (the build-target rewrite then
+  applies to the copy). A stamp `<name>.src` (converter version, source path, size, mtime, result)
+  skips the work on later runs, also for files with nothing to convert. The log has a line per file
+  converted: shaders, programs, failures (first reasons).
+- Host check: `ub-shader-convert --import` on the Windows `unity default resources` with Unity's
+  GLES3 removed: 6 shaders, 51 programs, none failed, same content as the reference; Unity's
+  Android copy and the original Windows copy: nothing to convert; a non-Unity file: skipped.
+- Next: CI build, then on the iPhone: the first run converts (log lines `shaders:`), frames should
+  show the game instead of pink.

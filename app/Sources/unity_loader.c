@@ -54,6 +54,9 @@ void ub_unity_thread_enter(void);
 void ub_unity_thread_leave(void);
 void ub_il2cpp_engine_report(char *out, size_t capacity);
 void ub_memory_dump(const char *tag);
+// engine/shader_import.cpp
+int ub_shader_import_version(void);
+int ub_shader_import(const char *src, const char *dst, char *log, size_t logcap);
 
 // ---- report -----------------------------------------------------------------------------------
 
@@ -207,6 +210,54 @@ static void apply_patch(const apk_entry *e, uint8_t *buf, uint64_t pos, size_t n
         const uint64_t at = (uint64_t)e->patch_at + (uint64_t)i;
         if (at >= pos && at < pos + n) buf[at - pos] = e->patch[i];
     }
+}
+
+// M4d: Shader objects that carry D3D11 programs only get GLES3x ones (engine/shader_gles3.h), in a
+// converted copy at <unity_dir>/shaders/<entry name>; the entry then points at the copy. A stamp next
+// to it (<copy>.src: converter version, source path, size, mtime, result) keeps the work to the first
+// run, and remembers files with nothing to convert too.
+static void convert_shaders(const char *unity_dir, int first)
+{
+    char dir[1100];
+    snprintf(dir, sizeof(dir), "%s/shaders", unity_dir);
+    mkdir(dir, 0755);
+    int converted = 0, cached = 0;
+    for (int i = first; i < g_nentries; i++) {
+        apk_entry *e = &g_entries[i];
+        const char *base = strrchr(e->name, '/');
+        base = base ? base + 1 : e->name;
+        // Serialized files: no extension (level0, globalgamemanagers, unity default resources) or .assets.
+        const char *dot = strrchr(base, '.');
+        if (dot && strcmp(dot, ".assets") != 0) continue;
+        if (!strncmp(e->name, "assets/bin/Data/Managed/", 24)) continue;
+        char dst[1100], stamp[1110], want[1400], have[1400] = "";
+        snprintf(dst, sizeof(dst), "%s/%s", dir, base);
+        snprintf(stamp, sizeof(stamp), "%s.src", dst);
+        snprintf(want, sizeof(want), "v%d\t%s\t%llu\t%ld\t", ub_shader_import_version(), e->path,
+                 (unsigned long long)e->size, e->mtime);
+        FILE *sf = fopen(stamp, "rb");
+        if (sf) { if (!fgets(have, sizeof(have), sf)) have[0] = 0; fclose(sf); }
+        struct stat sd;
+        int result;
+        if (!strncmp(have, want, strlen(want))) {
+            result = have[strlen(want)] == '1' && stat(dst, &sd) == 0 ? 1 : 0;
+            if (result) ++cached;
+        } else {
+            char log[600] = "";
+            line("  shaders: converting %s (%llu MiB) ...", e->name, (unsigned long long)(e->size >> 20));
+            result = ub_shader_import(e->path, dst, log, sizeof(log));
+            line("  shaders: %s: %s", e->name, log);
+            if (result < 0) continue;  // no stamp: tried again next time
+            sf = fopen(stamp, "wb");
+            if (sf) { fprintf(sf, "%s%d\n", want, result); fclose(sf); }
+            if (result) ++converted;
+        }
+        if (result != 1 || stat(dst, &sd) != 0) continue;
+        snprintf(e->path, sizeof(e->path), "%s", dst);
+        e->size = (uint64_t)sd.st_size;
+        e->mtime = (long)sd.st_mtime;
+    }
+    line("  shaders: %d files converted now, %d from the cache", converted, cached);
 }
 
 // Every file under `dir` as `prefix/<relative path>`, skipping top-level folders in `skip`.
@@ -380,6 +431,7 @@ static bool make_apk(const char *unity_dir, const char *game_data, char *apk, si
             else
                 line("  unity default resources: none (the engine will not find its error shader)");
         }
+        convert_shaders(unity_dir, before);
         int patched = 0;
         for (int i = before; i < g_nentries; i++) {
             plan_platform_patch(&g_entries[i]);

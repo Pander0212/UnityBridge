@@ -85,7 +85,7 @@ if(EXISTS ${HLSLCC_DIR}/src/HLSLcc.cpp)
 
   # M4c: the whole conversion of a serialized file, as the device runs it.
   add_executable(ub-shader-convert tools/shader_convert/main.cpp engine/shader_gles3.cpp engine/shader_xlat.cpp
-                 engine/unity_file.cpp engine/unity_typetree.cpp)
+                 engine/unity_file.cpp engine/unity_typetree.cpp engine/shader_import.cpp)
   target_link_libraries(ub-shader-convert PRIVATE hlslcc)
   target_include_directories(ub-shader-convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(ub-shader-convert PRIVATE -Wall -Wextra)

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // ub-shader-convert <in> <out> [--replace]: ShaderGles3::ConvertFile on a serialized file (M4c), what
 // the device does at import; checked against tools/research/add_gles3.py.
+// ub-shader-convert --import <in> <out>: the device's entry point (engine/shader_import.h).
 // ub-shader-convert --roundtrip <in>: reads every Shader object and the file and writes them back
 // unchanged, which must give the same bytes.
 #include "engine/shader_gles3.h"
+#include "engine/shader_import.h"
 #include "engine/unity_file.h"
 
 #include <cstdio>
@@ -46,6 +48,12 @@ static int RoundTrip(const char* path) {
 
 int main(int argc, char** argv) {
   if (argc == 3 && !std::strcmp(argv[1], "--roundtrip")) return RoundTrip(argv[2]);
+  if (argc == 4 && !std::strcmp(argv[1], "--import")) {
+    char log[600];
+    const int r = ub_shader_import(argv[2], argv[3], log, sizeof(log));
+    std::printf("%d: %s\n", r, log);
+    return r < 0;
+  }
   if (argc < 3) {
     std::fprintf(stderr, "usage: %s <in> <out> [--replace] | --roundtrip <in>\n", argv[0]);
     return 2;

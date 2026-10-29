@@ -1018,3 +1018,19 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   the offsets from the D3D11 tables (std140 and D3D11 packing agree for Unity's vec4-based layouts).
 - Neither file carries type trees (`enableTypeTree` false, as in player builds): rewriting a Shader
   object (M4c) needs the 2021.3 layout of class 48 built in.
+
+### M4c: GLES3x platform into the Shader objects (2026-10-29, in progress)
+
+- **Prototype** `tools/research/add_gles3.py` (UnityPy writes through the 2021.3.18 type tree it carries,
+  2,304 nodes for class 48): per pass and D3D11 keyword variant (VS and PS matched by keyword set) it
+  translates with `ub-shader-xlat`, writes a GLES3 code record (type 4, stats 0, the D3D11 VS's
+  `sourceMap`, no bind channels) and a parameter record (empty base, `$Globals` with the plain
+  uniforms, one cbuffer per uniform block with a cbuffer binding at HLSLcc's binding point, textures
+  with HLSLcc's unit; members and sizes from the D3D11 tables), packs them as a platform-9 blob (an
+  LZ4 block of literals: valid for any LZ4 decoder), and appends the subprogram entries (type 4, the
+  D3D11 VS's keywords and requirements, blob and parameter indices) to `progVertex`'s groups.
+- **Check on the corpus**: Unity's own GLES3 platform removed from the Windows `unity default
+  resources`, ours added: 51 programs in 6 shaders, none failed; the file reads back with UnityPy and
+  its tables have Unity's layout.
+- Next: the same in C++ on the device (serialized-file reader/writer, a type-tree-driven object
+  reader/writer with class 48's nodes generated from UnityPy, HLSLcc built into the app).

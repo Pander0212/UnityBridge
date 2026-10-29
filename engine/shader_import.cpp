@@ -131,7 +131,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 4; }
+extern "C" int ub_shader_import_version(void) { return 5; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

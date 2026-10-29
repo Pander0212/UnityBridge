@@ -320,14 +320,25 @@ std::vector<uint64_t> Keywords(const Value& sp) {
 ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
                                     const std::map<int64_t, std::string>& names) {
   ShaderXlat::Reflection r;
+  const Value* common = program.Field("m_CommonParameters");
+  const auto nameOf = [&](const Value& v, const char* prefix) {
+    const int64_t index = v.Field("m_NameIndex")->Int();
+    const auto it = names.find(index);
+    return it != names.end() ? it->second : prefix + std::to_string(index);
+  };
+  // A cbuffer's register: from the variant's own bindings, or the ones its program shares (where
+  // the game's builds keep them).
   std::map<std::string, int> registers;
   for (const auto& b : params.bindings)
     if (b.kind == 1) registers[b.name] = b.index;
+  if (const Value* shared = common ? common->Field("m_ConstantBufferBindings") : nullptr)
+    for (const auto& b : shared->items) registers.emplace(nameOf(b, "cb"), int(b.Field("m_Index")->Int()));
   for (const auto& cb : params.cbuffers) {
     if (cb.name.empty()) continue;  // the base buffer: empty for D3D11
+    if (!registers.count(cb.name)) continue;  // bound nowhere: CompleteReflection stands in by register
     ShaderXlat::ConstantBuffer c;
     c.name = cb.name;
-    c.bindPoint = registers.count(cb.name) ? registers[cb.name] : 0;
+    c.bindPoint = registers[cb.name];
     c.size = cb.size;
     for (const auto& v : cb.vars) {
       ShaderXlat::Variable x;
@@ -355,13 +366,7 @@ ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
     if (b.kind == 0) texture(b.name, b.index, b.sampler, b.extra >> 1, (b.extra & 1) != 0);
     if (b.kind == 4) r.samplers.push_back({b.name, b.index});
   }
-  const Value* common = program.Field("m_CommonParameters");
   if (!common) return r;
-  const auto nameOf = [&](const Value& v, const char* prefix) {
-    const int64_t index = v.Field("m_NameIndex")->Int();
-    const auto it = names.find(index);
-    return it != names.end() ? it->second : prefix + std::to_string(index);
-  };
   if (const Value* textures = common->Field("m_TextureParams"))
     for (const auto& t : textures->items)
       texture(nameOf(t, "tex"), t.Field("m_Index")->Int(), t.Field("m_SamplerIndex")->Int(), t.Field("m_Dim")->Int(),
@@ -372,22 +377,15 @@ ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
       r.samplers.push_back({"UnityBridge_s" + std::to_string(bind), int(bind)});
     }
   // Constant buffers shared by all variants of the program, bound by name.
-  const Value* buffers = common->Field("m_ConstantBuffers");
-  const Value* bindings = common->Field("m_ConstantBufferBindings");
-  if (buffers && bindings)
+  if (const Value* buffers = common->Field("m_ConstantBuffers"))
     for (const auto& b : buffers->items) {
       ShaderXlat::ConstantBuffer c;
       c.name = nameOf(b, "cb");
       bool same = false;
       for (const auto& x : r.constantBuffers) same = same || x.name == c.name;
       if (same) continue;
-      bool bound = false;
-      for (const auto& x : bindings->items)
-        if (x.Field("m_NameIndex")->Int() == b.Field("m_NameIndex")->Int()) {
-          c.bindPoint = int(x.Field("m_Index")->Int());
-          bound = true;
-        }
-      if (!bound) continue;
+      if (!registers.count(c.name)) continue;
+      c.bindPoint = registers[c.name];
       c.size = int(b.Field("m_Size")->Int());
       if (const Value* vectors = b.Field("m_VectorParams"))
         for (const auto& v : vectors->items) {

@@ -1116,8 +1116,9 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
      (synthetic object, round trip, layout identical to UnityPy's writer) since the game's file is
      not here.
   2. **Every program needed stand-ins**, also Unity's own cbuffers (UnityPerDraw, ...): the game's
-     per-variant tables carry no cbuffer bindings, so every cbuffer got register 0. To check next:
-     take the bindings from `m_CommonParameters.m_ConstantBufferBindings` by name.
+     per-variant tables carry no cbuffer bindings, so every cbuffer got register 0. Fix: registers
+     also from `m_CommonParameters.m_ConstantBufferBindings` (by name); a cbuffer bound nowhere is
+     left to CompleteReflection's stand-in instead of register 0. Converter version 5.
   3. **Crash**: il2cpp asked GetProcAddress for `BCryptGenRandomW` first; our built-in bcrypt.dll
      handed out a stub for any name, and the unimplemented stub returned 0 (STATUS_SUCCESS) without
      random bytes: all-zero GUIDs, so .NET's case-sensitivity probe file

@@ -8,8 +8,10 @@
 // Microsoft x64 gives each argument a positional slot (ints in rcx/rdx/r8/r9, floats in xmm0-3,
 // the rest on the stack); AAPCS64 fills x0-x7 and d0-d7 by two independent counters. So the thunk
 // walks the arguments and, per the signature, reads each from its Microsoft slot (CallContext::Arg
-// or ArgDouble) and appends it to the next integer or floating register. Up to eight of each; the
-// 16 engine functions with more arguments than that (M1) are not handled yet.
+// or ArgDouble) and appends it to the next integer or floating register. Past eight of a kind the
+// arguments go to the stack, as AAPCS64 lays them out (libunity is an Android library: the standard
+// procedure call standard, not Apple's variant): in argument order, one 8-byte slot each, integer
+// and floating arguments alike, below the callee's stack pointer.
 #pragma once
 
 #include <cstddef>
@@ -28,7 +30,8 @@ namespace UnityBridge::IcallBridge {
 // narrow argument undefined, while Apple's arm64 ABI lets the callee assume them extended to 32 bits.
 enum class Kind : uint8_t { Int, Float, Int8, UInt8, Int16, UInt16 };
 
-constexpr size_t kMaxArgs = 16;  // at most 8 integer and 8 floating
+constexpr size_t kMaxArgs = 32;        // TextGenerator::Populate_Internal_Injected has 23 (M3f)
+constexpr size_t kMaxStackSlots = 24;  // the arguments past 8 of a kind
 
 struct Signature {
   uint8_t argCount = 0;     // including the instance pointer for an instance method
@@ -38,14 +41,31 @@ struct Signature {
 
 // True if `signature` fits AAPCS64's argument registers: at most 8 Float and 8 non-Float arguments.
 bool FitsRegisters(const Signature& signature);
+// The AAPCS64 stack slots `signature` needs: the integer arguments past the eighth and the floating
+// ones past the eighth.
+unsigned StackSlots(const Signature& signature);
+// True if the thunks can call a function with `signature`: at most kMaxArgs arguments, at most
+// kMaxStackSlots of them on the stack.
+bool Supported(const Signature& signature);
+
+// Where each argument goes for AAPCS64. `raw[i]` is argument i as the Microsoft x64 caller passed it
+// (its register or stack slot; a floating one's bits); narrow integers are extended here, in a
+// register or a stack slot alike.
+struct Layout {
+  uint64_t gpr[8] = {};
+  double fpr[8] = {};
+  uint64_t stack[kMaxStackSlots] = {};
+  unsigned stackSlots = 0;
+};
+Layout LayOut(const Signature& signature, const uint64_t* raw);
 
 constexpr size_t kMaxThunks = 2048;  // Fellworld registers ~1,371 engine InternalCalls (M1)
 
 // Binds the reverse thunks to the runtime that owns the guest stubs. Clears earlier thunks.
 void Init(Win32::Runtime* runtime);
 
-// A guest x86 stub for ARM64 function `fn` with `signature`, or nullopt if the signature does not
-// fit the registers, the runtime is out of stub space or every thunk slot is taken. Stable: the same fn+signature need not be deduplicated,
+// A guest x86 stub for ARM64 function `fn` with `signature`, or nullopt if the signature is not
+// Supported, the runtime is out of stub space or every thunk slot is taken. Stable: the same fn+signature need not be deduplicated,
 // each call makes a new thunk.
 std::optional<uintptr_t> Make(uintptr_t fn, const Signature& signature);
 

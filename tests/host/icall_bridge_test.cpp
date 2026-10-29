@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <sys/mman.h>
 #include <vector>
 
@@ -111,9 +112,43 @@ int main() {
   Signature eightAndEight;
   eightAndEight.argCount = 16;
   for (unsigned i = 8; i < 16; ++i) eightAndEight.args[i] = Kind::Float;
-  Check(!Bridge::FitsRegisters(nineInts) && !Bridge::Make(reinterpret_cast<uintptr_t>(&ManyInts), nineInts),
-        "nine integer arguments refused (AAPCS64 stack)");
-  Check(Bridge::FitsRegisters(eightAndEight), "eight integer plus eight floating arguments fit");
+  Check(!Bridge::FitsRegisters(nineInts) && Bridge::StackSlots(nineInts) == 1 && Bridge::Supported(nineInts) &&
+            Bridge::Make(reinterpret_cast<uintptr_t>(&ManyInts), nineInts),
+        "nine integer arguments: one AAPCS64 stack slot, a thunk is made");
+  Check(Bridge::FitsRegisters(eightAndEight) && Bridge::StackSlots(eightAndEight) == 0,
+        "eight integer plus eight floating arguments fit");
+
+  // AAPCS64 layout past the registers. Arguments alternate Int, Float, ... (12 each): integers 0-7
+  // and floats 0-7 take x0-x7 / d0-d7, the rest go to the stack in argument order, mixed.
+  {
+    Signature mixed;
+    mixed.argCount = 24;
+    uint64_t raw[24];
+    for (unsigned i = 0; i < 24; ++i) {
+      mixed.args[i] = (i % 2) ? Kind::Float : Kind::Int;
+      const double d = 0.5 + i;
+      if (i % 2) std::memcpy(&raw[i], &d, sizeof(d));
+      else raw[i] = 1000 + i;
+    }
+    mixed.args[18] = Kind::Int8;  // a narrow integer on the stack is extended too
+    raw[18] = 0xabcdef80;
+    const auto l = Bridge::LayOut(mixed, raw);
+    bool ok = l.stackSlots == 8 && Bridge::StackSlots(mixed) == 8;
+    for (unsigned k = 0; k < 8; ++k) ok &= l.gpr[k] == 1000 + 2 * k && l.fpr[k] == 0.5 + (2 * k + 1);
+    // Past the registers: arguments 16..23, in order: Int 16, Float 17, Int8 18, Float 19, ...
+    uint64_t f17, f19;
+    const double d17 = 17.5, d19 = 19.5;
+    std::memcpy(&f17, &d17, 8);
+    std::memcpy(&f19, &d19, 8);
+    ok &= l.stack[0] == 1016 && l.stack[1] == f17 && l.stack[2] == 0xffffffffffffff80ull && l.stack[3] == f19;
+    ok &= l.stack[4] == 1020 && l.stack[6] == 1022;
+    Check(ok, "AAPCS64: 8+8 in registers, the rest on the stack in argument order (narrow ones extended)");
+
+    Signature tooMany;
+    tooMany.argCount = 33;
+    Check(!Bridge::Supported(tooMany) && !Bridge::Make(reinterpret_cast<uintptr_t>(&ManyInts), tooMany),
+          "more than kMaxArgs arguments refused");
+  }
 
   if (g_failures) std::printf("RESULT: %d checks failed\n", g_failures);
   else std::printf("RESULT: all checks passed\n");

@@ -308,13 +308,12 @@ int main() {
   add("UnityEngine.Mathf::Lerp", reinterpret_cast<P>(&NNothing));        // managed method
   add("UnityEngine.Nowhere::Thing", reinterpret_cast<P>(&NNothing));     // stripped class
   add("UnityEngine.Mathf::Normalize", reinterpret_cast<P>(&NNothing));   // Vector3 by value
-  add("UnityEngine.Mathf::Nine", reinterpret_cast<P>(&NNothing));        // 9 integer arguments
   add("UnityEngine.Mathf::Maybe", reinterpret_cast<P>(&NNothing));       // generic value type
   add("UnityEngine.Mathf::Any", reinterpret_cast<P>(&NNothing));         // generic parameter
   add("NoSeparator", reinterpret_cast<P>(&NNothing));
   const auto stats = Intercept::GetStats();
   Check(g_registered.size() == before, "unbridgeable or absent InternalCalls are not passed on");
-  Check(stats.registered == 8 && stats.absent == 2 && stats.failed == 5, "counted: 8 registered, 2 absent, 5 failed");
+  Check(stats.registered == 8 && stats.absent == 2 && stats.failed == 4, "counted: 8 registered, 2 absent, 4 failed");
 
   // 4. The derivation itself.
   std::string error;
@@ -328,6 +327,9 @@ int main() {
         "generic class argument; commas inside <> do not count");
   Check(SameKinds(Intercept::DeriveSignature("UnityEngine.GameObject::get_activeSelf", &error), {Kind::Int}, Kind::UInt8),
         "instance pointer added for an instance method");
+  Check(SameKinds(Intercept::DeriveSignature("UnityEngine.Mathf::Nine", &error),
+                  {Kind::Int, Kind::Int, Kind::Int, Kind::Int, Kind::Int, Kind::Int, Kind::Int, Kind::Int, Kind::Int}, Kind::Int),
+        "nine integer arguments: derived (one goes to the AAPCS64 stack)");
   Check(!Intercept::DeriveSignature("UnityEngine.Mathf::Normalize", &error) && error.find("Vector3") != std::string::npos,
         "struct by value refused, with the reason");
   Check(!Intercept::DeriveSignature("UnityEngine.Mathf::Pick(System.Int32,System.Int32,System.Int32)", &error),

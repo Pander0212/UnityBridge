@@ -11,6 +11,8 @@
 
 #include <array>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <utility>
 
@@ -18,6 +20,18 @@
 // calls `fn`, and writes its integer result (x0/rax) and floating result (d0/xmm0) to `out` as
 // {uint64_t, double}. In engine/call_native_arm64.S (device) and call_native_sysv.S (host test).
 extern "C" void ub_call_native(void* fn, const uint64_t gpr[8], const double fpr[8], void* out);
+// The same with `count` 8-byte AAPCS64 stack arguments from `stack`, placed at the callee's sp.
+// ARM64 only (engine/call_native_arm64.S); x86-64 System V has no such layout to test it with, so
+// the host build has a stand-in that reports the call and stops, and the host tests check LayOut.
+extern "C" void ub_call_native_stack(void* fn, const uint64_t gpr[8], const double fpr[8], void* out,
+                                     const uint64_t* stack, uint64_t count);
+#if !defined(__aarch64__)
+extern "C" void ub_call_native_stack(void*, const uint64_t*, const double*, void*, const uint64_t*, uint64_t count) {
+  std::fprintf(stderr, "ub_call_native_stack: %llu AAPCS64 stack arguments need an ARM64 host\n",
+               static_cast<unsigned long long>(count));
+  std::abort();
+}
+#endif
 
 namespace UnityBridge::IcallBridge {
 namespace {
@@ -56,18 +70,19 @@ uint64_t Extend(Kind k, uint64_t v) {
 
 uint64_t Marshal(size_t index, CallContext& c) {
   const Thunk& t = g_thunks[index];
-  uint64_t gpr[8] = {};
-  double fpr[8] = {};
-  unsigned ngrn = 0, nsrn = 0;  // next integer / floating register, AAPCS64's two counters
+  uint64_t raw[kMaxArgs];
   for (unsigned i = 0; i < t.sig.argCount; ++i) {
     if (IsFloat(t.sig.args[i])) {
-      if (nsrn < 8) fpr[nsrn++] = c.ArgDouble(i);
+      const double d = c.ArgDouble(i);
+      std::memcpy(&raw[i], &d, sizeof(d));
     } else {
-      if (ngrn < 8) gpr[ngrn++] = Extend(t.sig.args[i], c.Arg(i));
+      raw[i] = c.Arg(i);
     }
   }
+  const Layout l = LayOut(t.sig, raw);
   NativeResult result {};
-  ub_call_native(reinterpret_cast<void*>(t.fn), gpr, fpr, &result);
+  if (l.stackSlots == 0) ub_call_native(reinterpret_cast<void*>(t.fn), l.gpr, l.fpr, &result);
+  else ub_call_native_stack(reinterpret_cast<void*>(t.fn), l.gpr, l.fpr, &result, l.stack, l.stackSlots);
   if (t.sig.ret == Kind::Float) {
     c.ReturnDouble(result.floating);
     return 0;  // rax is unused for a floating return
@@ -90,10 +105,33 @@ constexpr auto kHandlers = MakeHandlers(std::make_index_sequence<kMaxThunks>());
 } // namespace
 
 bool FitsRegisters(const Signature& signature) {
-  if (signature.argCount > kMaxArgs) return false;
+  return signature.argCount <= kMaxArgs && StackSlots(signature) == 0;
+}
+
+unsigned StackSlots(const Signature& signature) {
   unsigned ints = 0, floats = 0;
-  for (unsigned i = 0; i < signature.argCount; ++i) ++(IsFloat(signature.args[i]) ? floats : ints);
-  return ints <= 8 && floats <= 8;
+  for (unsigned i = 0; i < signature.argCount && i < kMaxArgs; ++i) ++(IsFloat(signature.args[i]) ? floats : ints);
+  return (ints > 8 ? ints - 8 : 0) + (floats > 8 ? floats - 8 : 0);
+}
+
+bool Supported(const Signature& signature) {
+  return signature.argCount <= kMaxArgs && StackSlots(signature) <= kMaxStackSlots;
+}
+
+Layout LayOut(const Signature& signature, const uint64_t* raw) {
+  Layout l;
+  unsigned ngrn = 0, nsrn = 0;  // next integer / floating register, AAPCS64's two counters
+  for (unsigned i = 0; i < signature.argCount && i < kMaxArgs; ++i) {
+    const Kind k = signature.args[i];
+    if (IsFloat(k)) {
+      if (nsrn < 8) std::memcpy(&l.fpr[nsrn++], &raw[i], sizeof(double));
+      else if (l.stackSlots < kMaxStackSlots) l.stack[l.stackSlots++] = raw[i];
+    } else {
+      if (ngrn < 8) l.gpr[ngrn++] = Extend(k, raw[i]);
+      else if (l.stackSlots < kMaxStackSlots) l.stack[l.stackSlots++] = Extend(k, raw[i]);
+    }
+  }
+  return l;
 }
 
 void Init(Win32::Runtime* runtime) {
@@ -103,9 +141,9 @@ void Init(Win32::Runtime* runtime) {
 }
 
 std::optional<uintptr_t> Make(uintptr_t fn, const Signature& signature) {
-  if (!FitsRegisters(signature)) {
-    std::fprintf(stderr, "UB_ICALL_BRIDGE no thunk for %#lx: %u arguments need AAPCS64 stack slots\n",
-                 static_cast<unsigned long>(fn), signature.argCount);
+  if (!Supported(signature)) {
+    std::fprintf(stderr, "UB_ICALL_BRIDGE no thunk for %#lx: %u arguments, %u AAPCS64 stack slots\n",
+                 static_cast<unsigned long>(fn), signature.argCount, StackSlots(signature));
     return std::nullopt;
   }
   std::scoped_lock lock {g_mutex};

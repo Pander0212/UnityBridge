@@ -271,8 +271,9 @@ std::optional<Signature> SignatureOf(const Api& a, P method, std::string* error)
     return std::nullopt;
   }
   sig.ret = *r;
-  if (!IcallBridge::FitsRegisters(sig)) {
-    *error = "needs AAPCS64 stack arguments (more than 8 of one register kind)";
+  if (!IcallBridge::Supported(sig)) {
+    *error = "needs " + std::to_string(IcallBridge::StackSlots(sig)) + " AAPCS64 stack slots (at most " +
+             std::to_string(IcallBridge::kMaxStackSlots) + ")";
     return std::nullopt;
   }
   return sig;

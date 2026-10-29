@@ -882,6 +882,20 @@ Next steps, in order:
         chained, `ReturnSingleEntry`, `RestartScan`, a search pattern, an entry that does not fit
         kept for the next call, NT status codes. `ubtest.dll` imports it from its own `ntdll.def`
         and checks listing, end, restart with pattern and a wrong class.
+      - **Device run (run 51): the engine renders.** `NtQueryDirectoryFile` resolved (by name, as
+        BCrypt), and then **`after 5 s: 500 frames (498 presented)`**: the engine draws ~100
+        frames a second through ANGLE on Metal (pink: the game's shaders are D3D11 only, M4).
+        Then `System.MissingMethodException: UnityEngine.Mesh::SetArrayForChannelImpl(...)`: one of
+        the 18 InternalCalls never registered because they need AAPCS64 stack arguments (more than
+        8 integer or 8 floating arguments), uncaught up to the bridge, the same fault after it.
+      - **Fix, [i] pending: InternalCalls with stack arguments.** `IcallBridge::LayOut` places the
+        arguments past 8 of a kind on the stack the way AAPCS64 does (libunity is an Android
+        library: one 8-byte slot each, in argument order, integer and floating alike, narrow
+        integers extended), up to 32 arguments and 24 slots; `ub_call_native_stack`
+        (`call_native_arm64.S`) puts them at the callee's sp, 16-byte aligned, and frees them
+        through x29. The host build has no such layout to run it with: host tests check `LayOut`
+        (24 alternating Int/Float arguments, a narrow one on the stack), the 33-argument refusal,
+        and the derivation of the 9-argument `Mathf::Nine`, which now registers.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

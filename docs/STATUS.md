@@ -912,6 +912,10 @@ Next steps, in order:
         test. The by-name `GetFunction` fallback stays for answers that are Android paths.
         `TL_FILE_TRACE` is off (the engine polls the CPU frequency files every frame: 7,500 of
         8,200 log lines).
+      - **The frame (user-checked):** `Documents/Frames/latest.bmp`, ~9 MB (2556x1179, 24-bit, the
+        full surface), plain pink all over. Expected with URP: the final blit to the surface is a
+        shader pass too, D3D11-only like the rest, so the error shader covers the whole frame;
+        whether menu geometry is drawn below it cannot be seen until M4 gives the shaders GLES3.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

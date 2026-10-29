@@ -11,7 +11,7 @@ First target: **Fellworld**, Unity **2021.3.18f1**, IL2CPP, metadata v29, D3D11-
 | M1 | Analyse Android `libunity.so` 2021.3.18f1, match the API | done [R] |
 | M2 | On iPhone: FEXCore + PE loader + mini Win32, `il2cpp_init` succeeds | **reached [i] (2026-10-28):** Fellworld's real `GameAssembly.dll` runs `il2cpp_init` to success on iPhone (returns 1, corlib + domain non-null, 0 unimplemented imports) |
 | M3 | Husk-style loader runs `libunity.so` with the stand-in `libil2cpp.so`; scene loads (log) | research done [R]: Husk's translation layer (GPL-2.0+) already runs Android Unity games; bridge measured |
-| M4 | D3D11 shaders converted; first frame | in progress: conversion on the device built (M4d), iPhone test pending; first (pink) frames reached [i] |
+| M4 | D3D11 shaders converted; first frame | **first frame reached [i] (2026-10-29):** Unity's splash screen drawn with the GLES3 shaders converted on the device; the game then dies on an uncaught managed exception (C++ EH in GameAssembly, under investigation) |
 
 ## M0: GameAssembly.dll (Fellworld) [R]
 
@@ -1140,3 +1140,15 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
     `m_CommonParameters.m_ConstantBuffers`, which were skipped when a same-named buffer existed. Now
     merged into it. Converter version 6. The corpus has no common cbuffers (checked), so this is
     for the device to show.
+- **iPhone, run 63: first real frame [i].** `Frames/latest.bmp` shows Unity's splash screen ("Made with
+  Unity", early in its fade-in, so dark): drawn with our translated GLES3 shaders, no longer pink.
+  Every program now translates without stand-ins (shared cbuffer variables merged), 450 programs in
+  5 files, 2 of URP's UberPost not translated ("malformed code record", to look at).
+  `NtQueryDirectoryFile` works (the empty `Saves` folder: ".", "..", then no more files).
+- Then the same managed NullReferenceException as in run 62 (same frames), unhandled across the
+  bridge. On Windows il2cpp's catch blocks (`__CxxFrameHandler`, module+0x222ca0, on frames 5-15)
+  would take it and Unity would log it and go on. Our dispatcher never found a handler in
+  GameAssembly on the device: also `0x406d1388` (thread names, il2cpp's own `__try/__except`) was
+  reported unhandled in every run. The host tests only exercise our own `__C_specific_handler`, not
+  GameAssembly's statically linked MSVC handlers. Added a trace (`UB_SEH`) of the first 4 C++
+  exceptions: every handler called with its disposition, and every RtlUnwindEx.

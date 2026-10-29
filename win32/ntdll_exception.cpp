@@ -24,6 +24,11 @@ namespace {
 // The context at the point an exception was raised (or an explicit RtlUnwindEx call site); the
 // unwind starts from here so it visits every frame between the raise and the target.
 thread_local Context t_exceptionContext;
+// Traces the dispatch of the first few C++ exceptions (frames, handlers, dispositions, unwinds) to
+// stderr: GameAssembly's own handlers (statically linked __CxxFrameHandler / __C_specific_handler)
+// have never caught one on the device, and only the device runs them.
+thread_local bool t_trace = false;
+int g_traced = 0;
 // The pending non-local resume (NtContinue). Every SEH function returns early once it is set.
 thread_local Context t_resumeContext;
 thread_local bool t_resumePending = false;
@@ -102,6 +107,11 @@ void CaptureContextFromCall(Context* out, const CallContext& call) {
   for (int i = 0; i < 16; ++i) std::memcpy(&out->FltSave.XmmRegisters[i], call.xmmFull[i], 16);
 }
 
+uint64_t ModuleOffset(uint64_t pc) {
+  const uint64_t base = PcToFileHeader(pc);
+  return base ? pc - base : pc;
+}
+
 bool IsValidFrame(uint64_t frame) { return frame != 0 && (frame & (sizeof(void*) - 1)) == 0; }
 
 bool IsOurCSpecificHandler(uint64_t guestAddr) {
@@ -143,6 +153,11 @@ void UnwindEx(void* endFrame, void* targetIp, ExceptionRecord* rec, void* retval
               UnwindHistoryTable* /*table*/) {  // starts from t_exceptionContext
   Context context = t_exceptionContext;
   Context new_context = context;
+  if (t_trace)
+    std::fprintf(stderr, "UB_SEH  unwind to frame %#llx, target +%#llx%s\n",
+                 static_cast<unsigned long long>(reinterpret_cast<uint64_t>(endFrame)),
+                 static_cast<unsigned long long>(ModuleOffset(reinterpret_cast<uint64_t>(targetIp))),
+                 rec && rec->ExceptionCode == STATUS_UNWIND_CONSOLIDATE ? " (consolidate)" : "");
   ExceptionRecord record;
   if (!rec) {
     std::memset(&record, 0, sizeof(record));
@@ -206,6 +221,18 @@ void UnwindEx(void* endFrame, void* targetIp, ExceptionRecord* rec, void* retval
 // call_seh_handlers. Returns true when a handler resolved the exception (a resume is pending).
 bool DispatchException(ExceptionRecord* rec, Context* orig_context) {
   DispatchScope dispatchScope;  // marks the HLE-call depth to resume at (see t_resumeRootDepth)
+  const bool outerTrace = t_trace;
+  t_trace = rec->ExceptionCode == 0xe06d7363 && g_traced < 4;
+  if (t_trace) {
+    ++g_traced;
+    std::fprintf(stderr, "UB_SEH dispatch %#x at +%#llx, %u parameters, magic %#llx\n", rec->ExceptionCode,
+                 static_cast<unsigned long long>(ModuleOffset(orig_context->Rip)), rec->NumberParameters,
+                 static_cast<unsigned long long>(rec->NumberParameters ? rec->ExceptionInformation[0] : 0));
+  }
+  struct Restore {
+    bool v;
+    ~Restore() { t_trace = v; }
+  } restoreTrace {outerTrace};
   t_exceptionContext = *orig_context;
   Context context = *orig_context;
   DispatcherContext dispatch;
@@ -231,6 +258,12 @@ bool DispatchException(ExceptionRecord* rec, Context* orig_context) {
       if (!IsValidFrame(frame)) { rec->ExceptionFlags |= EXCEPTION_STACK_INVALID; break; }
       const ExceptionDisposition res =
           CallLanguageHandler(reinterpret_cast<void*>(handler), rec, frame, orig_context, &dispatch);
+      if (t_trace)
+        std::fprintf(stderr, "UB_SEH  pc +%#llx frame %#llx handler +%#llx -> %d%s\n",
+                     static_cast<unsigned long long>(dispatch.ControlPc - dispatch.ImageBase),
+                     static_cast<unsigned long long>(frame),
+                     static_cast<unsigned long long>(ModuleOffset(reinterpret_cast<uint64_t>(handler))),
+                     static_cast<int>(res), t_resumePending ? " (resume pending)" : "");
       if (t_resumePending) return true;  // a handler executed (RtlUnwindEx ran)
       rec->ExceptionFlags &= EXCEPTION_NONCONTINUABLE;
       switch (res) {

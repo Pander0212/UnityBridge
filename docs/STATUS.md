@@ -1068,3 +1068,10 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
 - CI run 57 (`3a08365`) green: `libhlslcc.a` and the shader sources built for iOS and linked into the app.
 - Next: on the iPhone: the first run converts (log lines `shaders:`), frames should
   show the game instead of pink.
+- **iPhone, run 57** (2026-10-29): `globalgamemanagers` skipped (no shaders), then the app ended during
+  `resources.assets` without a crash report. Most likely a stack overflow: the probe runs on a
+  `Thread.detachNewThread` thread (512 KiB stack) and HLSLcc recurses over the control flow of
+  programs much larger than Unity's built-in ones (the host checks ran on the 8 MiB main thread).
+  Fix: `ub_shader_import` runs the conversion on a thread of its own with a 64 MiB stack, and logs a
+  line per Shader object (`reading`) and per shader (`translating`) before the work, so a crash
+  can be placed from the log.

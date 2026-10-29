@@ -501,6 +501,7 @@ bool AddGles3(Value& shader, bool replace, Stats* stats) {
   Value* subs = Path(shader, {"m_ParsedForm", "m_SubShaders"});
   if (!subs) return false;
 
+  if (stats->progress) stats->progress(name + ": translating");
   std::vector<std::string> records;
   int done = 0, failed = 0;
   for (auto& sub : subs->items) {
@@ -538,6 +539,7 @@ bool AddGles3(Value& shader, bool replace, Stats* stats) {
           if (!pair) {
             ++failed;
             stats->log += name + ": not translated: " + error + "\n";
+            if (stats->progress && failed <= 3) stats->progress(name + ": not translated: " + error);
             continue;
           }
           records.push_back(pair->params);
@@ -595,6 +597,8 @@ std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size
     const auto& o = file->objects[i];
     if (o.classId != kShaderClass) continue;
     std::string why;
+    if (stats->progress)
+      stats->progress("object " + std::to_string(o.pathId) + ": reading " + std::to_string(o.byteSize) + " bytes");
     auto shader = TypeTree::Read(TypeTree::Shader2021_3(), data + file->dataOffset + o.byteStart, o.byteSize, &why);
     // Only a shader that writes back to its own bytes is one the built-in type tree describes.
     const uint8_t* original = data + file->dataOffset + o.byteStart;

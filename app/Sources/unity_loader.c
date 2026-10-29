@@ -56,7 +56,7 @@ void ub_il2cpp_engine_report(char *out, size_t capacity);
 void ub_memory_dump(const char *tag);
 // engine/shader_import.cpp
 int ub_shader_import_version(void);
-int ub_shader_import(const char *src, const char *dst, char *log, size_t logcap);
+int ub_shader_import(const char *src, const char *dst, char *log, size_t logcap, void (*note)(const char *line));
 
 // ---- report -----------------------------------------------------------------------------------
 
@@ -216,6 +216,8 @@ static void apply_patch(const apk_entry *e, uint8_t *buf, uint64_t pos, size_t n
 // converted copy at <unity_dir>/shaders/<entry name>; the entry then points at the copy. A stamp next
 // to it (<copy>.src: converter version, source path, size, mtime, result) keeps the work to the first
 // run, and remembers files with nothing to convert too.
+static void shader_note(const char *s) { line("  shaders:   %s", s); }
+
 static void convert_shaders(const char *unity_dir, int first)
 {
     char dir[1100];
@@ -245,7 +247,7 @@ static void convert_shaders(const char *unity_dir, int first)
         } else {
             char log[600] = "";
             line("  shaders: converting %s (%llu MiB) ...", e->name, (unsigned long long)(e->size >> 20));
-            result = ub_shader_import(e->path, dst, log, sizeof(log));
+            result = ub_shader_import(e->path, dst, log, sizeof(log), shader_note);
             line("  shaders: %s: %s", e->name, log);
             if (result < 0) continue;  // no stamp: tried again next time
             sf = fopen(stamp, "wb");

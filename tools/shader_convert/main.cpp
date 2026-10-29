@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
   if (argc == 3 && !std::strcmp(argv[1], "--roundtrip")) return RoundTrip(argv[2]);
   if (argc == 4 && !std::strcmp(argv[1], "--import")) {
     char log[600];
-    const int r = ub_shader_import(argv[2], argv[3], log, sizeof(log));
+    const int r = ub_shader_import(argv[2], argv[3], log, sizeof(log), [](const char* s) { std::printf("  %s\n", s); });
     std::printf("%d: %s\n", r, log);
     return r < 0;
   }

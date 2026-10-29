@@ -3,6 +3,7 @@
 #include "engine/shader_import.h"
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -43,11 +44,7 @@ private:
   int fd_ = -1;
 };
 
-} // namespace
-
-extern "C" int ub_shader_import_version(void) { return 1; }
-
-extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap) {
+int Import(const char* src, const char* dst, char* log, size_t logcap, void (*note)(const char*)) {
   Mapped in(src);
   if (!in.data) {
     Put(log, logcap, "cannot read");
@@ -65,6 +62,7 @@ extern "C" int ub_shader_import(const char* src, const char* dst, char* log, siz
     return 0;
   }
   ShaderGles3::Stats stats;
+  if (note) stats.progress = [note](const std::string& s) { note(s.c_str()); };
   const auto out = ShaderGles3::ConvertFile(in.data, in.size, false, &stats, &error);
   // The first failure reasons, for the log.
   std::string failures;
@@ -96,4 +94,39 @@ extern "C" int ub_shader_import(const char* src, const char* dst, char* log, siz
   Put(log, logcap, std::to_string(stats.shaders) + " shaders, " + std::to_string(stats.programs) +
                        " GLES3 programs, " + std::to_string(stats.failed) + " not translated" + failures);
   return 1;
+}
+
+struct Job {
+  const char *src, *dst;
+  char* log;
+  size_t logcap;
+  void (*note)(const char*);
+  int result = -1;
+};
+
+void* Run(void* p) {
+  auto* job = static_cast<Job*>(p);
+  job->result = Import(job->src, job->dst, job->log, job->logcap, job->note);
+  return nullptr;
+}
+
+} // namespace
+
+extern "C" int ub_shader_import_version(void) { return 1; }
+
+extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
+                                void (*note)(const char*)) {
+  Job job {src, dst, log, logcap, note};
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, size_t {64} << 20);
+  pthread_t thread;
+  const bool started = pthread_create(&thread, &attr, Run, &job) == 0;
+  pthread_attr_destroy(&attr);
+  if (!started) {
+    Put(log, logcap, "no thread for the conversion");
+    return -1;
+  }
+  pthread_join(thread, nullptr);
+  return job.result;
 }

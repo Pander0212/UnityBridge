@@ -6,6 +6,7 @@
 // device, on the game's files, when it is imported.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -19,6 +20,9 @@ struct Stats {
   int programs = 0;    // vertex + fragment pairs translated
   int failed = 0;      // pairs that could not be translated
   std::string log;     // a line per shader, and the reasons for failures
+  // Called before each shader is translated (and with each failure), so a crash inside HLSLcc can be
+  // placed from the log.
+  std::function<void(const std::string&)> progress;
 };
 
 // The LZ4 block `src` decompressed to `size` bytes; nullopt if it is malformed.

@@ -1006,5 +1006,15 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   cbuffers stay uniform blocks, which is what URP's GLES3 shaders (SRP Batcher) use anyway.
 - `tools/shader_xlat/main.cpp` (`ub-shader-xlat <case>`) and `tools/research/export_xlat_cases.py`: 51
   cases from the corpus (D3D11 VS + PS of each variant, Unity's tables, Unity's GLES3 source as the
-  expected output), local only. **Not run yet**: running the HLSLcc-built tool in this environment
-  needs the user's permission (the session's permission check stops executing fetched code).
+  expected output), local only.
+- **Result (run with the user's permission): all 51 cases translate**, and the output matches Unity's
+  own GLES3 programs instruction for instruction in naming and structure (`hlslcc_mtx4x4...`,
+  `in_POSITION0`, `vs_TEXCOORD0`, `UNITY_LOCATION(0) uniform sampler2D _MainTex`, `SV_Target0`, the
+  `HLSLCC_ENABLE_UNIFORM_BUFFERS`/`UNITY_BINDING` wrappers). `GLOBAL_CONSTS_NEVER_IN_UBO` keeps
+  `$Globals` plain uniforms as Unity does. What differs, by design: precision (Unity's `mediump` came
+  from `fixed`/`half` in its HLSL; desktop DXBC has no min-precision, so highp), `UnityPerDraw`/
+  `UnityPerFrame` stay uniform blocks (see above), and the register allocation of code compiled for
+  D3D11 (equivalent). HLSLcc's `OnConstant` reports offset 0 for every member: the GLES3 table takes
+  the offsets from the D3D11 tables (std140 and D3D11 packing agree for Unity's vec4-based layouts).
+- Neither file carries type trees (`enableTypeTree` false, as in player builds): rewriting a Shader
+  object (M4c) needs the 2021.3 layout of class 48 built in.

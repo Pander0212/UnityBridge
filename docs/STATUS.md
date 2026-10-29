@@ -816,6 +816,18 @@ Next steps, in order:
       - The game's `Plugins/x86_64/` holds `lib_burst_generated.dll` (Burst-compiled x86-64 code,
         Windows, like GameAssembly.dll): likely the library il2cpp failed to open. Being x86-64 PE
         code, it can run under FEXCore like GameAssembly once the PE loader loads it as a module.
+      - **Device run with the exception report:** not Burst. The managed exception is
+        `System.EntryPointNotFoundException: Unable to find an entry point named 'BCryptGenRandom'
+        in 'BCrypt.dll'` (.NET's random numbers / `Guid.NewGuid` P/Invoke it; the failed open of
+        "B", bytes `42 00 00 00`, is il2cpp's first try at the name). Our `bcrypt.dll` was a
+        built-in with no functions. The search walked 4 and 16 guest frames (`__CxxFrameHandler`
+        frames among them, none catching this) up to `0x1031c0000 (no module, no unwind info)`, the
+        bridge where libunity called into the game: the exception would have to cross host frames,
+        which it cannot, so `RaiseException` returned and the code after it faulted.
+      - **Fix, [i] pending:** `bcrypt.dll` gets `BCryptGenRandom` (system-preferred RNG or the RNG
+        handle, `arc4random_buf`), `BCryptOpenAlgorithmProvider` ("RNG" only) and
+        `BCryptCloseAlgorithmProvider`. Open: what to do with a managed exception that reaches the
+        bridge boundary uncaught (on Android it would reach libunity's own C++ frames).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

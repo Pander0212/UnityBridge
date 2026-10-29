@@ -183,21 +183,56 @@ uint64_t CoGetApartmentType(CallContext& c) {
 constexpr uint64_t kCryptProvider = 0x7ffb'0000'0001ull;
 uint64_t CryptAcquireContextW(CallContext& c) { Store<uint64_t>(c.Arg(0), kCryptProvider); return kTrue; }
 uint64_t CryptReleaseContext(CallContext&) { return kTrue; }
-uint64_t CryptGenRandom(CallContext& c) {
-  auto* out = c.Ptr<uint8_t>(2);
-  size_t length = static_cast<DWORD>(c.Arg(1));
-  if (out == nullptr && length) return SetError(ERROR_INVALID_PARAMETER, kFalse);
+// Fills `out` from the system's generator.
+bool FillRandom(uint8_t* out, size_t length) {
 #if defined(__APPLE__)
   arc4random_buf(out, length);
 #else
   while (length) {
     const auto n = getrandom(out, length, 0);
-    if (n <= 0) return SetError(ERROR_NOT_SUPPORTED, kFalse);
+    if (n <= 0) return false;
     out += n;
     length -= static_cast<size_t>(n);
   }
 #endif
+  return true;
+}
+
+uint64_t CryptGenRandom(CallContext& c) {
+  auto* out = c.Ptr<uint8_t>(2);
+  const size_t length = static_cast<DWORD>(c.Arg(1));
+  if (out == nullptr && length) return SetError(ERROR_INVALID_PARAMETER, kFalse);
+  if (!FillRandom(out, length)) return SetError(ERROR_NOT_SUPPORTED, kFalse);
   return kTrue;
+}
+
+// ---- BCRYPT: random numbers (.NET's RandomNumberGenerator and Guid.NewGuid P/Invoke these) -------
+// NTSTATUS results. Only the RNG algorithm is provided; its handle is a constant.
+
+constexpr uint64_t kStatusSuccess = 0, kStatusInvalidParameter = 0xc000000d, kStatusNotFound = 0xc0000225;
+constexpr uint64_t kRngAlgorithm = 0x7ffb'0000'0002ull;
+constexpr uint32_t kUseSystemPreferredRng = 0x2;  // BCRYPT_USE_SYSTEM_PREFERRED_RNG
+
+uint64_t BCryptOpenAlgorithmProvider(CallContext& c) {  // (phAlgorithm, pszAlgId, pszImplementation, dwFlags)
+  const auto id = c.Arg(1) ? ToUtf8(ReadWide(c.Ptr<const char16_t>(1))) : std::string();
+  if (c.Arg(0) == 0) return kStatusInvalidParameter;
+  if (id != "RNG") {
+    std::fprintf(stderr, "UB_WIN32 BCryptOpenAlgorithmProvider(%s): only RNG is provided\n", id.c_str());
+    return kStatusNotFound;
+  }
+  Store<uint64_t>(c.Arg(0), kRngAlgorithm);
+  return kStatusSuccess;
+}
+
+uint64_t BCryptCloseAlgorithmProvider(CallContext&) { return kStatusSuccess; }
+
+uint64_t BCryptGenRandom(CallContext& c) {  // (hAlgorithm, pbBuffer, cbBuffer, dwFlags)
+  auto* out = c.Ptr<uint8_t>(1);
+  const size_t length = static_cast<uint32_t>(c.Arg(2));
+  const auto flags = static_cast<uint32_t>(c.Arg(3));
+  if (out == nullptr && length) return kStatusInvalidParameter;
+  if (!(flags & kUseSystemPreferredRng) && c.Arg(0) != kRngAlgorithm) return kStatusInvalidParameter;
+  return FillRandom(out, length) ? kStatusSuccess : kStatusInvalidParameter;
 }
 
 // ---- SHELL32: folder paths ---------------------------------------------------------------
@@ -309,6 +344,11 @@ void RegisterOtherDlls(std::vector<Function>& out) {
   out.push_back({adv, "CryptAcquireContextW", &CryptAcquireContextW});
   out.push_back({adv, "CryptReleaseContext", &CryptReleaseContext});
   out.push_back({adv, "CryptGenRandom", &CryptGenRandom});
+
+  const std::string bc = "bcrypt.dll";
+  out.push_back({bc, "BCryptOpenAlgorithmProvider", &BCryptOpenAlgorithmProvider});
+  out.push_back({bc, "BCryptCloseAlgorithmProvider", &BCryptCloseAlgorithmProvider});
+  out.push_back({bc, "BCryptGenRandom", &BCryptGenRandom});
 
   out.push_back({"shell32.dll", "SHGetFolderPathW", &SHGetFolderPathW});
   out.push_back({"shell32.dll", "SHGetKnownFolderPath", &SHGetKnownFolderPath});

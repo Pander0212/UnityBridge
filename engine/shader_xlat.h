@@ -63,7 +63,8 @@ std::vector<uint8_t> BuildRdef(const Reflection& reflection, int major, int mino
 
 // Adds to `reflection` what the program `dxbc` declares and it lacks, because HLSLcc dereferences a
 // binding it does not find: constant buffers (placeholders named UnityBridge_cb<n>, one float4 array
-// over the whole buffer) and samplers. False (and `error`) for what cannot be stood in for: a texture
+// over the whole buffer), samplers, and a scalar UnityBridge_cb<n>_<byte> for each component the
+// instructions read that no variable covers (variables then sorted by offset). False (and `error`) for what cannot be stood in for: a texture
 // the tables do not describe, UAVs and buffer resources, shader model 5.1 declarations. `notes` (may
 // be null) gets a
 // line per placeholder added.

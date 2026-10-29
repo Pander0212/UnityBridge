@@ -167,13 +167,58 @@ std::vector<uint8_t> BuildRdef(const Reflection& r, int major, int minor) {
 
 namespace {
 
-// The resources a program declares, from its SHDR/SHEX token stream.
+struct CbRead {
+  int reg;
+  uint32_t byte;  // offset of the component read
+};
+
+// The resources a program declares, and the constant buffer components its instructions read, from
+// its SHDR/SHEX token stream.
 struct Declared {
   std::map<int, int> cbuffers;  // register -> size in 16-byte registers
   std::vector<int> samplers, textures;
+  std::vector<CbRead> reads;
   bool unsupported = false;     // UAVs, raw/structured buffers, shader model 5.1 layouts
   bool ok = false;
 };
+
+// One operand at `pos` (advanced past it, nested relative-index operands included); constant buffer
+// operands (cb<reg>[<vec4>].<components>) add a read per component. HLSLcc looks up the variable
+// at the immediate part of the index, so that is what counts for a relatively indexed one too.
+void ScanOperand(const std::vector<uint8_t>& b, size_t& pos, size_t end, std::vector<CbRead>& reads, int depth) {
+  if (pos + 4 > end || depth > 4) { pos = end; return; }
+  const uint32_t tok = Load32(b, pos);
+  pos += 4;
+  const uint32_t numType = tok & 3, mode = (tok >> 2) & 3;
+  const uint32_t type = (tok >> 12) & 0xff, dims = (tok >> 20) & 3;
+  for (uint32_t ext = tok; (ext & 0x80000000u) && pos + 4 <= end; pos += 4) ext = Load32(b, pos);
+  const int comps = numType == 2 ? 4 : numType == 1 ? 1 : 0;
+  if (type == 4) { pos += 4 * size_t(comps == 4 ? 4 : 1); return; }  // immediate32
+  if (type == 5) { pos += 8 * size_t(comps == 4 ? 4 : 1); return; }  // immediate64
+  uint32_t index[3] = {0, 0, 0};
+  for (uint32_t i = 0; i < dims && pos <= end; ++i) {
+    switch ((tok >> (22 + 3 * i)) & 7) {
+    case 0: index[i] = Load32(b, pos); pos += 4; break;
+    case 1: index[i] = Load32(b, pos + 4); pos += 8; break;
+    case 2: ScanOperand(b, pos, end, reads, depth + 1); break;
+    case 3: index[i] = Load32(b, pos); pos += 4; ScanOperand(b, pos, end, reads, depth + 1); break;
+    case 4: index[i] = Load32(b, pos + 4); pos += 8; ScanOperand(b, pos, end, reads, depth + 1); break;
+    default: pos = end; return;
+    }
+  }
+  if (type != 8 || dims < 2) return;
+  std::vector<uint32_t> selected;
+  if (comps == 1) selected = {0};
+  else if (comps == 4 && mode == 0) { for (uint32_t c = 0; c < 4; ++c) if (tok & (0x10u << c)) selected.push_back(c); }
+  else if (comps == 4 && mode == 1) { for (uint32_t c = 0; c < 4; ++c) selected.push_back((tok >> (4 + 2 * c)) & 3); }
+  else if (comps == 4 && mode == 2) selected = {(tok >> 4) & 3};
+  for (const uint32_t c : selected) reads.push_back({static_cast<int>(index[0]), index[1] * 16 + c * 4});
+}
+
+bool IsDeclaration(uint32_t opcode) {
+  return opcode == 0x35 || (opcode >= 88 && opcode <= 106) || (opcode >= 113 && opcode <= 116) ||
+         (opcode >= 143 && opcode <= 162) || opcode == 206;
+}
 
 Declared Declarations(const std::vector<uint8_t>& dxbc) {
   Declared d;
@@ -210,6 +255,11 @@ Declared Declarations(const std::vector<uint8_t>& dxbc) {
       default: break;
       }
       if ((opcode == 0x58 || opcode == 0x59 || opcode == 0x5a) && sm51) d.unsupported = true;
+      if (!IsDeclaration(opcode)) {
+        size_t at = operand;
+        const size_t next = std::min(end, pos + length * 4);
+        while (at < next) ScanOperand(dxbc, at, next, d.reads, 0);
+      }
       pos += length * 4;
     }
     d.ok = true;
@@ -251,6 +301,33 @@ bool CompleteReflection(Reflection& r, const std::vector<uint8_t>& dxbc, std::st
     all.arraySize = size > 1 ? size : 0;
     r.constantBuffers.push_back({"UnityBridge_cb" + std::to_string(reg), reg, size * 16, {all}});
     if (notes) *notes += "constant buffer cb" + std::to_string(reg) + " added\n";
+  }
+  // Every component the program reads needs a variable HLSLcc finds at its offset (by HLSLcc's own
+  // rule, ShaderInfo.cpp IsOffsetInType with matrices as vec4 arrays); a scalar for the rest.
+  const auto found = [](const ConstantBuffer& cb, uint32_t byte) {
+    for (const auto& v : cb.variables) {
+      const uint32_t size = v.isMatrix ? uint32_t(v.columns) * 16 : uint32_t(v.columns) * uint32_t(v.rows) * 4;
+      const uint32_t span = v.arraySize ? ((size + 15) / 16) * 16 * uint32_t(v.arraySize - 1) + size : size;
+      if (byte >= uint32_t(v.offset) && byte < uint32_t(v.offset) + span) return true;
+    }
+    return false;
+  };
+  for (auto& cb : r.constantBuffers) {
+    int added = 0;
+    for (const auto& read : d.reads) {
+      if (read.reg != cb.bindPoint || found(cb, read.byte)) continue;
+      Variable v;
+      v.name = "UnityBridge_cb" + std::to_string(read.reg) + "_" + std::to_string(read.byte);
+      v.columns = 1;
+      v.offset = static_cast<int>(read.byte);
+      cb.variables.push_back(v);
+      cb.size = std::max(cb.size, v.offset + 4);
+      ++added;
+    }
+    if (!added) continue;
+    std::stable_sort(cb.variables.begin(), cb.variables.end(),
+                     [](const Variable& a, const Variable& b) { return a.offset < b.offset; });
+    if (notes) *notes += cb.name + ": " + std::to_string(added) + " components without a variable\n";
   }
   return true;
 }

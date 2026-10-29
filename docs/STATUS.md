@@ -1092,3 +1092,12 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   - The conversion thread registers with `MachFault`, so a fault there gets a report with symbols.
   - Host: the corpus result unchanged (0 stand-ins needed); a case with UnityPerDraw and the sampler
     removed from the tables translates with stand-ins; one with the texture removed fails cleanly.
+- **iPhone, run 59**: now a fault report: `ToGLSL::TranslateVariableNameWithMask`, load from 0xc (a null
+  `ShaderVarType`'s `Columns`): `GetShaderVarFromOffset` found no variable at an offset the program
+  reads, in a cbuffer that is there. Reproduced on the host with the run-59 code and a case whose
+  table lacks two variables the program reads (same function, same address 0xc).
+- Fix (converter version 3): `CompleteReflection` also scans the instructions' operands (opcode and
+  extended tokens, nested relative indices, immediates) for constant buffer reads `cb<n>[i].xyzw`
+  and checks each component against HLSLcc's own lookup rule (`IsOffsetInType`, matrices as vec4
+  arrays); a component without a variable gets a scalar `UnityBridge_cb<n>_<byte>`. The corpus
+  needs none (output unchanged); the mutated case translates.

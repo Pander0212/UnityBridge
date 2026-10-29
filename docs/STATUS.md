@@ -956,3 +956,35 @@ Measured with `tools/research/*.py` (UnityPy, data only):
   3. Check with the Android player (M3) that it picks GLES3 and draws (ANGLE → Metal through Husk's layer).
 - Open questions: how the GLES3 parameter blob maps uniforms/texture units; whether the Android player
   accepts data built for `StandaloneWindows64` at all (M3 risk); keyword/variant selection.
+
+### M4a: the compiled-shader formats of 2021.3, decoded (2026-10-29) [R]
+
+Reference corpus, local only (scratchpad, never in the repo or CI): `unity default resources` of
+Unity 2021.3.18f1's own players. The **Windows** player's copy carries every platform of the built-in
+shaders (`platforms` 4 D3D11, 5 GLES2, 9 GLES3x, 14 Metal, 15 GLCore, 18 Vulkan), so the same shader
+is there as D3D11 and as Unity's own GLES3 translation: a pair per variant to test M4b against; the
+Android copy has 5, 9, 18. Reader: `tools/research/shader_blob.py` (UnityPy for the serialized part;
+the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
+
+- **Per platform** one LZ4 blob (`offsets`/`compressedLengths`/`decompressedLengths`, one segment
+  each here): `int count`, then `count` x `(offset, length, segment)`, then the records.
+- **Per pass and stage**, `m_PlayerSubPrograms` (4 groups, one filled here) lists every platform's
+  subprograms one after another (type, keyword indices, `m_BlobIndex` into that platform's blob,
+  requirements); `m_ParameterBlobIndices` runs alongside with the parameter record of each. A
+  subprogram's platform follows from its GPU program type (DX11* 4, GLES3 9, ...).
+- **Code record** (version 202012090): type, 4 stats, keywords (`int n`, strings), code (`int len`
+  + bytes, 4-aligned), bind channels (`sourceMap`, `int n`, pairs). D3D11 code is a Unity header (6
+  bytes, + 0x20 when its first byte is >= 2: 38 bytes here) then **DXBC with only ISGN/OSGN/SHDR**
+  (no RDEF). **GLES3 code is one HLSLcc source for both stages** (`#ifdef VERTEX` ... `#ifdef
+  FRAGMENT`, `#version 300 es`), on the vertex subprogram only; the fragment stage has no GLES3 entry.
+- **Parameter record**: version, `int 1 + nCB`, a base (unnamed) cbuffer then the cbuffers, each
+  `name, size, int n` x `(name, type, rows, columns, isMatrix, arraySize, offset)`, `int nStruct`; then
+  `int n` typed bindings `name, kind` + kind 0 texture `(register, sampler, dim<<1|msaa)`, 1 cbuffer /
+  2 buffer `(register, arraySize)`, 3 UAV `(register, original)`, 4 sampler `(bind, sampler)`.
+  Textures shared by all variants may sit in the pass's `m_CommonParameters` instead (D3D11 pixel
+  shaders here), names through `m_NameIndices`.
+- **GLES3 differs from D3D11 in its tables**: `$Globals`, `UnityPerDraw` and `UnityPerFrame` are
+  flattened into one `$Globals` of plain uniforms (offsets by declaration order: e.g.
+  `unity_ObjectToWorld@0, unity_MatrixVP@64, _MainTex_ST@128, _Color@144`), while e.g.
+  `UnityStereoGlobals` stays a uniform block (`UNITY_BINDING`); textures are listed per program with
+  their unit. So a GLES3 table is derived from the translated source, not copied from D3D11's.

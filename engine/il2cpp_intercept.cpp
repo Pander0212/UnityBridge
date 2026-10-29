@@ -6,6 +6,7 @@
 // declared as full 64-bit words and masked: an MSVC-compiled callee leaves the upper bits of a
 // narrow result undefined.
 #include "engine/il2cpp_intercept.h"
+#include "win32/hle.h"
 
 #include <atomic>
 #include <cstdio>
@@ -450,8 +451,48 @@ void RegisterLogCallback(P callback) {  // void (*)(const char* message)
   if (auto* set = Original<void (*)(uintptr_t)>("il2cpp_register_log_callback")) set(WrapCallback(callback, 1));
 }
 
-void SetFindPluginCallback(P callback) {  // const char* (*)(const char* name)
-  if (auto* set = Original<void (*)(uintptr_t)>("il2cpp_set_find_plugin_callback")) set(WrapCallback(callback, 1));
+// Il2CppSetFindPlugInCallback: const Il2CppNativeChar* (*)(const Il2CppNativeChar* name). The two
+// sides disagree on Il2CppNativeChar: the Windows GameAssembly passes and expects UTF-16, Android's
+// libunity takes and returns UTF-8. Passed through unchanged (M3f) the engine saw "BCrypt.dll" as
+// "B", tried System.loadLibrary("B"), and handed back "B" as a narrow string that il2cpp read as a
+// wide one. The adapter converts both ways; the UTF-16 answers stay valid for the process.
+std::atomic<uintptr_t> g_findPlugin {0};
+std::mutex g_pluginNamesMutex;
+std::map<std::string, std::u16string> g_pluginNames;  // the engine's answer -> its UTF-16 copy
+
+uint64_t FindPluginAdapter(Win32::CallContext& c) {
+  using Fn = const char* (*)(const char*);
+  const auto fn = reinterpret_cast<Fn>(g_findPlugin.load());
+  const auto* wide = c.Ptr<const char16_t>(0);
+  if (fn == nullptr || wide == nullptr) return 0;
+  const std::string name = Win32::ToUtf8(Win32::ReadWide(wide));
+  const char* found = fn(name.c_str());
+  if (found == nullptr) return 0;
+  std::scoped_lock lock {g_pluginNamesMutex};
+  const auto [it, fresh] = g_pluginNames.try_emplace(found, Win32::ToUtf16(found));
+  if (fresh && g_pluginNames.size() <= 16)
+    std::fprintf(stderr, "UB_IL2CPP_INTERCEPT find plugin %s -> %s\n", name.c_str(), found);
+  return reinterpret_cast<uint64_t>(it->second.c_str());
+}
+
+void SetFindPluginCallback(P callback) {
+  auto* set = Original<void (*)(uintptr_t)>("il2cpp_set_find_plugin_callback");
+  if (set == nullptr) return;
+  if (callback == nullptr) return set(0);
+  g_findPlugin.store(reinterpret_cast<uintptr_t>(callback));
+  static uintptr_t stub = 0;
+  if (stub == 0) {
+    auto* runtime = Win32::Runtime::Current();
+    const auto bound = runtime ? runtime->BindCallback(&FindPluginAdapter, "il2cpp_find_plugin") : std::nullopt;
+    if (!bound) {
+      std::fprintf(stderr, "UB_IL2CPP_INTERCEPT no stub for the find-plugin callback; not installed\n");
+      return;
+    }
+    stub = *bound;
+    std::scoped_lock lock {g_mutex};
+    ++g_stats.callbacks;
+  }
+  set(stub);
 }
 
 // The two heap walks call back with (data, userData) in the public declaration and (userData,

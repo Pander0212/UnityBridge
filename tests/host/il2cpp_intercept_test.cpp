@@ -194,7 +194,11 @@ P RealLivenessAllocateStruct(P filter, Word max, uintptr_t callback, P, uintptr_
   return max == 64 ? filter : nullptr;
 }
 
+uintptr_t g_findPluginStub = 0;
+void RealSetFindPluginCallback(uintptr_t stub) { g_findPluginStub = stub; }
+
 const std::map<std::string, P> g_original = {
+    {"il2cpp_set_find_plugin_callback", reinterpret_cast<P>(&RealSetFindPluginCallback)},
     {"il2cpp_override_stack_backtrace", reinterpret_cast<P>(&RealOverrideStackBacktrace)},
     {"il2cpp_unity_liveness_allocate_struct", reinterpret_cast<P>(&RealLivenessAllocateStruct)},
     {"il2cpp_add_internal_call", reinterpret_cast<P>(&RealAddInternalCall)},
@@ -220,6 +224,15 @@ bool NActiveSelf(void* self) { return self == &g_object; }
 int16_t NTwice(int16_t mode) { return static_cast<int16_t>(mode * 2); }
 P NPing(P s) { return s; }
 void NNothing() {}
+
+// libunity's find-plugin callback: UTF-8 in, a UTF-8 path out.
+std::string g_pluginAsked;
+const char* NFindPlugin(const char* name) {
+  g_pluginAsked = name;
+  static std::string path;
+  path = std::string("/data/app/lib/arm64/lib") + name + ".so";
+  return path.c_str();
+}
 
 size_t g_mallocSize = 0;
 P NMalloc(size_t size) {
@@ -358,6 +371,14 @@ int main() {
             g_heapArgs[2] == reinterpret_cast<P>(0x2000),
         "heap walk: callback gets its three arguments");
   Check(Intercept::GetStats().callbacks >= 3, "callbacks counted");
+
+  // The find-plugin callback: the guest passes and expects UTF-16, the engine's callback UTF-8.
+  reinterpret_cast<void (*)(P)>(Intercept::Replacement("il2cpp_set_find_plugin_callback"))(reinterpret_cast<P>(&NFindPlugin));
+  const char16_t* found = g_findPluginStub
+                              ? reinterpret_cast<const char16_t*(MS*)(const char16_t*)>(g_findPluginStub)(u"BCrypt.dll")
+                              : nullptr;
+  Check(g_pluginAsked == "BCrypt.dll" && found && std::u16string(found) == u"/data/app/lib/arm64/libBCrypt.dll.so",
+        "find plugin: UTF-16 name in as UTF-8, UTF-8 answer back as UTF-16");
 
   // The engine's ARM64 unwinder is never handed to il2cpp; the liveness callbacks are wrapped.
   reinterpret_cast<void (*)(P)>(Intercept::Replacement("il2cpp_override_stack_backtrace"))(reinterpret_cast<P>(&NNothing));

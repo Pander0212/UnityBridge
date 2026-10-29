@@ -896,6 +896,22 @@ Next steps, in order:
         through x29. The host build has no such layout to run it with: host tests check `LayOut`
         (24 alternating Int/Float arguments, a narrow one on the stack), the 33-argument refusal,
         and the derivation of the 9-argument `Mathf::Nine`, which now registers.
+      - **Device run (run 52): 60 s without a crash, the game's main menu starting.** All 1,359
+        InternalCalls registered (`0 not bridgeable`); 510 frames after 5 s, 651 after 10 s,
+        1,205 after 30 s, 2,029 after 60 s (~27 a second after the first burst), all presented;
+        17 regions, none grown; `UNITY: engine running`. The game's own C# logs: `game manager
+        is online`, `Instantiating Event`, `Event state change of Event mainMenu is initiated`.
+        **M3f's goal is reached: the engine runs the game and draws** (pink, M4).
+      - **The "B" explained:** the same run shows `UnityPlayer.loadLibrary` failing for `libB.so`
+        and `libn.so`. il2cpp asks the engine's find-plugin callback (`il2cpp_set_find_plugin_
+        callback`) for a P/Invoke library, and the Windows GameAssembly passes UTF-16 where
+        Android's libunity expects UTF-8 (it read "BCrypt.dll" as "B") and returns UTF-8 that
+        il2cpp then reads as UTF-16 (the "B" `OpenUtf16` got). **Fix, [i] pending:** the callback
+        gets an adapter (a stub of our own, not the generic integer thunk) that converts the name
+        to UTF-8 for the engine and its answer back to UTF-16, kept valid for the process; host
+        test. The by-name `GetFunction` fallback stays for answers that are Android paths.
+        `TL_FILE_TRACE` is off (the engine polls the CPU frequency files every frame: 7,500 of
+        8,200 log lines).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

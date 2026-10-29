@@ -897,7 +897,8 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     if (g_ran++) { line("already ran in this app session; reopen the app"); return 3; }
     char apk[1100];
     if (!make_apk(unity_dir, game_data, apk, sizeof(apk))) return 2;
-    setenv("TL_FILE_TRACE", "1", 1);
+    // TL_FILE_TRACE off since M3f ran 60 s: file access works, and the engine polls the CPU frequency files
+    // every frame (7,500 of 8,200 log lines).
     setenv("TL_DL_TRACE", "1", 1);
     // M3f: who holds the address space. Every guest mmap/munmap; one of 64 MiB or more also names
     // the library function that asked. (TL_EGL_TRACE showed EGL working; off again, it is noisy.)

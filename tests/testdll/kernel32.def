@@ -58,6 +58,12 @@ CreateThread
 ResumeThread
 GetExitCodeThread
 GetCurrentThreadId
+SuspendThread
+GetThreadContext
+DuplicateHandle
+GetCurrentProcess
+GetCurrentThread
+GetThreadId
 Sleep
 RaiseException
 RtlCaptureContext

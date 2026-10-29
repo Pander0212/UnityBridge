@@ -856,6 +856,21 @@ Next steps, in order:
         and the 32 bytes behind RCX and RDX; each function logs its convention on its own. And a
         robust way past it: `GetFunction` on a handle we never gave out looks the name up among
         the functions the built-in DLLs implement (`BCryptGenRandom` is unique) and logs that.
+      - **Device run (run 49):** the fallback works (`BCryptGenRandom from an unknown handle 0:
+        bcrypt.dll's`), the `EntryPointNotFoundException` is gone. (The open gets "B" followed by
+        zeros, with `0x17` 24 bytes on: the open question stays.) Next stop: the GC stops the world
+        with `SuspendThread` and `GetThreadContext`, both unimplemented, then `MessageBox "Fatal
+        error in GC": ResumeThread failed` and a fault.
+      - **Fix, [i] pending: SuspendThread/GetThreadContext for guest threads.** A thread stops only
+        outside guest code. The device bridge reports every crossing (`GuestLeft` with the guest's
+        registers at each import/InternalCall, `GuestReturning` before going back,
+        `GuestEntering`/`GuestExited` around every `CallWin64`: thread start, bridge, nested and
+        probe calls, TLS callbacks); returning or entering blocks while suspended, checked against
+        the suspend count with sequentially consistent atomics. `SuspendThread` waits until the
+        thread is outside guest code (2 s at most, then logs); `GetThreadContext` returns the
+        registers of its last exit (integer and control), or its stack base when no guest frames
+        are live. `DuplicateHandle(GetCurrentThread())`, how the GC registers a thread, now gives
+        a real handle per thread (it returned the pseudo handle). `ubtest.dll` checks it (bit 29).
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

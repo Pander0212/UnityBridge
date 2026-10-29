@@ -4,8 +4,12 @@
 // All objects share one lock and one condition variable; every state change wakes all waiters,
 // which then re-check. Simple and correct for WaitForMultipleObjects (any and all).
 #include "common.h"
+#include "winnt_seh.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <condition_variable>
 #include <map>
 #include <memory>
@@ -62,13 +66,57 @@ struct Semaphore final : Object {
   void Acquire() override { --count; }
 };
 
+constexpr uint64_t kCurrentThreadPseudoHandle = ~uint64_t {0} - 1;  // GetCurrentThread(): (HANDLE)-2
+
+// Where one host thread's guest code is (see GuestLeft in hle.h). The owning thread pushes the
+// guest's registers at each call into the host and pops them on the way back; another thread reads
+// them only while this one is suspended outside guest code, when nothing changes them. `inGuest` and
+// `suspendCount` are checked against each other with sequentially consistent atomics (the owner sets
+// inGuest then reads the count, a suspender raises the count then reads inGuest), so a thread never
+// runs guest code while a suspender believes it stopped.
+struct ThreadState {
+  struct Exit { uint64_t gpr[16]; uint64_t rsp, rip; };
+  static constexpr int kMaxDepth = 64;
+  Exit exits[kMaxDepth];
+  std::atomic<int> depth {0};
+  std::atomic<bool> inGuest {false};
+  std::atomic<int> suspendCount {0};
+  std::atomic<uint64_t> stackBase {0}, stackLimit {0};
+  std::atomic<bool> finished {false};
+  uint64_t id {};
+  std::mutex m;
+  std::condition_variable resumed;
+};
+
+std::shared_ptr<ThreadState>& CurrentState() {
+  thread_local std::shared_ptr<ThreadState> state = [] {
+    auto s = std::make_shared<ThreadState>();
+    s->id = ThreadId();
+    return s;
+  }();
+  return state;
+}
+
+// Blocks while the thread is suspended, then marks it running guest code.
+void EnterGuestCode(ThreadState& s) {
+  for (;;) {
+    s.inGuest.store(true);
+    if (s.suspendCount.load() == 0) return;
+    s.inGuest.store(false);
+    std::unique_lock lock {s.m};
+    s.resumed.wait(lock, [&] { return s.suspendCount.load() == 0; });
+  }
+}
+
 // A guest thread: one host thread that runs the start routine through the ThreadRunner. Signalled
-// once it has finished. CREATE_SUSPENDED holds it before the start routine until ResumeThread.
+// once it has finished. CREATE_SUSPENDED holds it before the start routine until ResumeThread
+// (`suspendCount`); a running thread is suspended through its ThreadState.
 struct Thread final : Object {
   uint64_t id {};
   int32_t suspendCount {};
   bool finished {};
   DWORD exitCode {};
+  std::shared_ptr<ThreadState> state;
   bool Signalled() const override { return finished; }
 };
 
@@ -222,10 +270,12 @@ uint64_t CreateThread(CallContext& c) {
     {
       std::unique_lock lock {g_lock};
       thread->id = static_cast<DWORD>(ThreadId());
+      thread->state = CurrentState();
       g_changed.notify_all();
       g_changed.wait(lock, [&] { return thread->suspendCount <= 0; });
     }
     const auto code = static_cast<DWORD>(runner(start, parameter));
+    CurrentState()->finished.store(true);
     {
       std::scoped_lock lock {g_lock};
       thread->exitCode = code;
@@ -239,19 +289,101 @@ uint64_t CreateThread(CallContext& c) {
   return handle;
 }
 
-// Returns the previous suspend count; only threads created suspended can be resumed (SuspendThread
-// on a running thread needs the engine to stop it, not done yet).
+// The ThreadState behind a thread handle, or nullptr. Caller holds g_lock.
+std::shared_ptr<ThreadState> StateOf(uint64_t handle) {
+  auto* thread = Find<Thread>(handle);
+  return thread ? thread->state : nullptr;
+}
+
+// Returns the previous suspend count. A thread created suspended that has not started yet is held
+// by its Thread's count; a running one by its ThreadState's.
 uint64_t ResumeThread(CallContext& c) {
   int32_t previous;
+  std::shared_ptr<ThreadState> state;
   {
     std::scoped_lock lock {g_lock};
     auto* thread = Find<Thread>(c.Arg(0));
     if (thread == nullptr) return SetError(ERROR_INVALID_HANDLE, 0xffffffffu);
-    previous = thread->suspendCount;
-    if (thread->suspendCount > 0) --thread->suspendCount;
+    if (thread->suspendCount > 0 || !thread->state) {
+      previous = thread->suspendCount;
+      if (thread->suspendCount > 0) --thread->suspendCount;
+    } else {
+      state = thread->state;
+    }
   }
-  g_changed.notify_all();
+  if (!state) {
+    g_changed.notify_all();
+    return static_cast<DWORD>(previous);
+  }
+  {
+    std::scoped_lock lock {state->m};
+    previous = state->suspendCount.load();
+    if (previous > 0) state->suspendCount.store(previous - 1);
+  }
+  state->resumed.notify_all();
   return static_cast<DWORD>(previous);
+}
+
+// SuspendThread: raises the count, then waits until the thread is outside guest code (at an import,
+// an InternalCall, or not in guest code at all), where it stays until resumed. A thread that keeps
+// running guest code without calling out is waited for up to 2 s, then reported as it was last seen.
+uint64_t SuspendThread(CallContext& c) {
+  std::shared_ptr<ThreadState> state;
+  {
+    std::scoped_lock lock {g_lock};
+    if (Find<Thread>(c.Arg(0)) == nullptr) return SetError(ERROR_INVALID_HANDLE, 0xffffffffu);
+    state = StateOf(c.Arg(0));
+  }
+  if (!state) return 0;  // created suspended, not started: already held
+  int previous;
+  {
+    std::scoped_lock lock {state->m};
+    previous = state->suspendCount.load();
+    state->suspendCount.store(previous + 1);
+  }
+  if (state == CurrentState() || state->finished.load()) return static_cast<DWORD>(previous);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (state->inGuest.load()) {
+    if (std::chrono::steady_clock::now() > deadline) {
+      std::fprintf(stderr, "UB_WIN32 SuspendThread: thread %llu stays in guest code; its last exit is reported\n",
+                   static_cast<unsigned long long>(state->id));
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+  return static_cast<DWORD>(previous);
+}
+
+// GetThreadContext: the registers where the (suspended) thread last left guest code; with no guest
+// frames live, an rsp at its stack base (nothing of it to scan). Integer and control registers only.
+uint64_t GetThreadContext(CallContext& c) {
+  std::shared_ptr<ThreadState> state;
+  {
+    std::scoped_lock lock {g_lock};
+    if (Find<Thread>(c.Arg(0)) == nullptr) return SetError(ERROR_INVALID_HANDLE, kFalse);
+    state = StateOf(c.Arg(0));
+  }
+  auto* ctx = c.Ptr<Context>(1);
+  if (ctx == nullptr) return SetError(ERROR_INVALID_PARAMETER, kFalse);
+  const uint32_t flags = ctx->ContextFlags;
+  for (int i = 0; i < 16; ++i) (&ctx->Rax)[i] = 0;
+  ctx->Rip = 0;
+  if (state) {
+    const int depth = state->depth.load();
+    if (depth > 0) {
+      const auto& e = state->exits[std::min(depth, ThreadState::kMaxDepth) - 1];
+      for (int i = 0; i < 16; ++i) (&ctx->Rax)[i] = e.gpr[i];
+      ctx->Rsp = e.rsp;
+      ctx->Rip = e.rip;
+    } else {
+      ctx->Rsp = state->stackBase.load();
+    }
+  }
+  ctx->ContextFlags = flags;
+  ctx->SegCs = 0x33;
+  ctx->SegSs = 0x2b;
+  ctx->EFlags = 0x202;
+  return kTrue;
 }
 
 uint64_t GetExitCodeThread(CallContext& c) {
@@ -284,7 +416,18 @@ uint64_t DuplicateHandle(CallContext& c) {
   std::scoped_lock lock {g_lock};
   const auto it = g_handles.find(source);
   if (it == g_handles.end()) {
-    // Not one of ours (a pseudo handle such as GetCurrentThread()): hand back the same value.
+    if (source == kCurrentThreadPseudoHandle) {
+      // A real handle to the calling thread (the GC registers each thread this way, to suspend it).
+      auto thread = std::make_shared<Thread>();
+      thread->id = ThreadId();
+      thread->state = CurrentState();
+      const uint64_t handle = g_nextHandle;
+      g_nextHandle += 4;
+      g_handles[handle] = std::move(thread);
+      Store<uint64_t>(c.Arg(3), handle);
+      return kTrue;
+    }
+    // Not one of ours (another pseudo handle, e.g. GetCurrentProcess()): hand back the same value.
     Store<uint64_t>(c.Arg(3), source);
     return kTrue;
   }
@@ -299,6 +442,35 @@ uint64_t DuplicateHandle(CallContext& c) {
 
 void SetThreadRunner(ThreadRunner runner) { g_threadRunner = runner; }
 
+void GuestLeft(const CallContext& call) {
+  ThreadState& s = *CurrentState();
+  const int d = s.depth.load();
+  if (d < ThreadState::kMaxDepth) {
+    auto& e = s.exits[d];
+    for (int i = 0; i < 16; ++i) e.gpr[i] = call.x86[i];
+    e.rsp = call.rsp + 8;  // the caller's rsp once the import returns, as RtlCaptureContext reports it
+    e.rip = call.rip;
+  }
+  s.depth.store(d + 1);
+  s.inGuest.store(false);
+}
+
+void GuestReturning() {
+  ThreadState& s = *CurrentState();
+  EnterGuestCode(s);
+  s.depth.store(s.depth.load() - 1);
+}
+
+void GuestEntering() { EnterGuestCode(*CurrentState()); }
+
+void GuestExited() { CurrentState()->inGuest.store(false); }
+
+void NoteGuestStack(uint64_t base, uint64_t limit) {
+  ThreadState& s = *CurrentState();
+  s.stackBase.store(base);
+  s.stackLimit.store(limit);
+}
+
 void RegisterKernel32Sync(std::vector<Function>& out) {
   const std::string k = "kernel32.dll";
 #define UB_FN(name) out.push_back({k, #name, &name})
@@ -307,7 +479,7 @@ void RegisterKernel32Sync(std::vector<Function>& out) {
   UB_FN(CreateSemaphoreW); UB_FN(ReleaseSemaphore);
   UB_FN(WaitForSingleObjectEx); UB_FN(WaitForMultipleObjectsEx);
   UB_FN(CloseHandle); UB_FN(DuplicateHandle);
-  UB_FN(CreateThread); UB_FN(ResumeThread); UB_FN(GetExitCodeThread); UB_FN(GetThreadId);
+  UB_FN(CreateThread); UB_FN(ResumeThread); UB_FN(SuspendThread); UB_FN(GetThreadContext); UB_FN(GetExitCodeThread); UB_FN(GetThreadId);
   UB_FN(SetThreadPriority); UB_FN(GetThreadPriority);
   out.push_back({k, "WaitForSingleObject", &WaitForSingleObjectEx});
 #undef UB_FN

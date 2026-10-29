@@ -177,6 +177,21 @@ uint64_t CallGuest(uintptr_t function, std::initializer_list<uint64_t> arguments
 using ThreadRunner = uint64_t (*)(uintptr_t start, uint64_t parameter);
 void SetThreadRunner(ThreadRunner runner);
 
+// ---- where each thread's guest code is (kernel32_sync.cpp) --------------------------------
+// SuspendThread/GetThreadContext, which the GC uses to stop the world and scan each thread's
+// registers and stack, need a thread stopped at a known point. A thread stops only outside guest
+// code: at a guest call into the host (an import, an InternalCall) or before entering guest code at
+// all. The device bridge reports every crossing: GuestLeft when the guest calls into the host (with
+// the guest's registers there) and GuestReturning before going back; GuestEntering/GuestExited
+// around a host call into the guest (a thread's start, a bridge or nested call). GuestReturning and
+// GuestEntering block while the thread is suspended. NoteGuestStack gives the thread's guest stack,
+// reported when it has no guest frames live. Host tests run no guest code and report nothing.
+void GuestLeft(const CallContext& call);
+void GuestReturning();
+void GuestEntering();
+void GuestExited();
+void NoteGuestStack(uint64_t base, uint64_t limit);
+
 // ---- implicit TLS and the thread environment block (win32/tls.cpp) -----------------------
 // A loaded PE module can carry a TLS directory (__declspec(thread) data and TLS callbacks). Each
 // guest thread needs its own copy of that data, reached through the TEB: x64 Windows code loads

@@ -108,7 +108,9 @@ public:
     c.rip = *reinterpret_cast<const uint64_t*>(frame.rsp);
     c.haveState = true;
 
+    Win32::GuestLeft(c);  // outside guest code until GuestReturning: a SuspendThread may hold us there
     runtime->Dispatch(c);
+    Win32::GuestReturning();
 
     uint64_t gpr[16], xmm[16][2], rip;
     switch (Win32::TakePendingResume(gpr, xmm, rip)) {
@@ -182,6 +184,7 @@ struct GuestThread {
     tls = Win32::AllocThreadTls();
     std::memcpy(t + 0x08, &stackBase, 8);
     std::memcpy(t + 0x10, &stackLimit, 8);
+    Win32::NoteGuestStack(stackBase, stackLimit);
     std::memcpy(t + 0x30, &self, 8);
     std::memcpy(t + 0x40, &pid, 8);
     std::memcpy(t + 0x48, &tid, 8);
@@ -211,7 +214,9 @@ CallResult CallWindows(GuestThread& guest, Report& report, uintptr_t target, std
   call.Rip = target;
   size_t i = 0;
   for (const auto a : args) if (i < 4) call.Gpr[i++] = a;
+  Win32::GuestEntering();
   auto run = g_engine->CallWin64(guest.thread, call);
+  Win32::GuestExited();
   if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
     report.Line("FAIL call %#lx: stage=%d error=%d", static_cast<unsigned long>(target),
                 static_cast<int>(failure->Stage), failure->Error);
@@ -230,7 +235,9 @@ void RunTlsCallbacksOn(GuestThread& guest, uint32_t reason) {
     call.Gpr[0] = imageBase;
     call.Gpr[1] = reason;
     call.Gpr[2] = 0;
+    Win32::GuestEntering();
     g_engine->CallWin64(guest.thread, call);
+    Win32::GuestExited();
   }
 }
 
@@ -269,7 +276,9 @@ uint64_t RunGuestThread(uintptr_t start, uint64_t parameter) {
   AetherPS4::Fex::Win64Call call;
   call.Rip = start;
   call.Gpr[0] = parameter;
+  Win32::GuestEntering();
   auto run = g_engine->CallWin64(guest.thread, call);
+  Win32::GuestExited();
   uint64_t code = 0xffffffffu;
   if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
     std::fprintf(stderr, "UB_IL2CPP thread %#lx failed: stage=%d error=%d\n", static_cast<unsigned long>(start),
@@ -291,7 +300,9 @@ uint64_t CallGuestNested(uintptr_t function, std::span<const uint64_t> arguments
   call.Rip = function;
   for (size_t i = 0; i < arguments.size() && i < 4; ++i) call.Gpr[i] = arguments[i];
   if (arguments.size() > 4) call.Stack = arguments.subspan(4);
+  Win32::GuestEntering();
   auto run = g_engine->CallWin64(nullptr, call);
+  Win32::GuestExited();
   if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
     std::fprintf(stderr, "UB_IL2CPP callback %#lx failed: stage=%d error=%d\n", static_cast<unsigned long>(function),
                  static_cast<int>(failure->Stage), failure->Error);
@@ -325,7 +336,9 @@ uint64_t BridgeCall(uintptr_t target, const uint64_t (&args)[8]) {
     }
     thread = t_bridgeGuest->thread;
   }
+  Win32::GuestEntering();
   auto run = g_engine->CallWin64(thread, call);
+  Win32::GuestExited();
   if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
     std::fprintf(stderr, "UB_IL2CPP bridge call %#lx failed: stage=%d error=%d\n", static_cast<unsigned long>(target),
                  static_cast<int>(failure->Stage), failure->Error);
@@ -600,7 +613,9 @@ int RunIcallBridgeTests(Report& report, GuestThread& guest) {
       ++i;
     }
     CallResult out;
+    Win32::GuestEntering();
     auto run = g_engine->CallWin64(guest.thread, c);
+    Win32::GuestExited();
     if (const auto* f = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
       report.Line("  call failed: stage=%d error=%d", static_cast<int>(f->Stage), f->Error);
       return out;

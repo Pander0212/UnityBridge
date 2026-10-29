@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 86, "86 imports");
+  Check(image.imports.size() == 92, "92 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";
@@ -174,8 +174,9 @@ int main(int argc, char** argv) {
                          "implicit TLS: __declspec(thread) + callback",
                          "SEH: __try/__except catches RaiseException",
                          "SEH: __finally runs while unwinding to __except",
-                         "SEH: RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/PcToFileHeader"};
-  for (int i = 0; i < 29; ++i) Check(bits & (1 << i), names[i]);
+                         "SEH: RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/PcToFileHeader",
+                         "SuspendThread/GetThreadContext, DuplicateHandle(GetCurrentThread)"};
+  for (int i = 0; i < 30; ++i) Check(bits & (1 << i), names[i]);
 
   Check(reinterpret_cast<FloatFn>(*fl)(3.0, 4.0) == 12.5, "double arguments and xmm0 return");
 

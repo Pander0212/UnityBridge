@@ -294,6 +294,7 @@ const char* kChecks[] = {
     "SEH: __try/__except catches RaiseException",
     "SEH: __finally runs while unwinding to __except",
     "SEH: RtlCaptureContext/LookupFunctionEntry/VirtualUnwind/PcToFileHeader",
+    "SuspendThread/GetThreadContext, DuplicateHandle(GetCurrentThread)",
 };
 
 } // namespace

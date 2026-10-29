@@ -76,6 +76,12 @@ IMPORT HANDLE CreateThread(void*, unsigned long long, DWORD (*)(void*), void*, D
 IMPORT DWORD ResumeThread(HANDLE);
 IMPORT BOOL GetExitCodeThread(HANDLE, DWORD*);
 IMPORT DWORD GetCurrentThreadId(void);
+IMPORT DWORD SuspendThread(HANDLE);
+IMPORT BOOL GetThreadContext(HANDLE, void*);
+IMPORT BOOL DuplicateHandle(HANDLE, HANDLE, HANDLE, HANDLE*, DWORD, BOOL, DWORD);
+IMPORT HANDLE GetCurrentProcess(void);
+IMPORT HANDLE GetCurrentThread(void);
+IMPORT DWORD GetThreadId(HANDLE);
 IMPORT void Sleep(DWORD);
 
 // x64 structured exception handling. CONTEXT is opaque here (0x4d0 bytes, 16-aligned); we only read
@@ -225,6 +231,11 @@ static void FlsFreed(void* value) {
 
 // Runs on its own thread: its last-error value and TLS slot are its own.
 struct ThreadTest { DWORD slot; DWORD id; volatile int ran; };
+// Waits for the event in its parameter (a thread for SuspendThread to stop).
+static DWORD WaitingThreadMain(void* parameter) {
+  WaitForSingleObjectEx((HANDLE)parameter, 0xffffffffu, 0);
+  return 5;
+}
 static DWORD ThreadMain(void* parameter) {
   struct ThreadTest* t = (struct ThreadTest*)parameter;
   SetLastError(99);
@@ -590,6 +601,30 @@ __declspec(dllexport) int ub_test_all(void) {
     unsigned short n = RtlCaptureStackBackTrace(0, 8, bt, 0);
     good &= n >= 1 && bt[0] != 0;
     if (good) ok |= 1 << 28;
+  }
+
+  // SuspendThread/ResumeThread count, GetThreadContext answers for a suspended thread, and
+  // DuplicateHandle(GetCurrentThread()) gives a real handle to this thread (the GC's registration).
+  {
+    int good = 1;
+    HANDLE go = CreateEventW(0, 1, 0, 0);
+    DWORD id = 0;
+    HANDLE h = CreateThread(0, 0, WaitingThreadMain, go, 0, &id);
+    good &= h != 0 && SuspendThread(h) == 0 && SuspendThread(h) == 1;
+    static unsigned long long context[1232 / 8] __attribute__((aligned(16)));
+    ((DWORD*)context)[0x30 / 4] = 0x10000b;  // CONTEXT_FULL
+    good &= GetThreadContext(h, context) && ((DWORD*)context)[0x30 / 4] == 0x10000b;
+    good &= ResumeThread(h) == 2 && ResumeThread(h) == 1 && ResumeThread(h) == 0;
+    SetEvent(go);
+    DWORD code = 0;
+    good &= WaitForSingleObjectEx(h, 5000, 0) == 0 && GetExitCodeThread(h, &code) && code == 5;
+    HANDLE self = 0;
+    good &= DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0, 0, 2) &&
+            self != 0 && self != GetCurrentThread() && GetThreadId(self) == GetCurrentThreadId();
+    if (h) CloseHandle(h);
+    if (self) CloseHandle(self);
+    CloseHandle(go);
+    if (good) ok |= 1 << 29;
   }
 
   return ok;

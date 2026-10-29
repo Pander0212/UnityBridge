@@ -46,7 +46,10 @@ thread_local int t_invokeDepth = 0;
 thread_local int t_dispatchRootDepth = 0;
 thread_local bool t_dispatchActive = false;
 thread_local int t_resumeRootDepth = 0;
-thread_local bool t_resumeByBridge = false;
+// Process-wide: the device bridge realizes resumes on every thread that runs guest code. (It was
+// thread_local and set on the probe thread only, so on the engine's threads RtlUnwindEx handed its
+// resume to the host-test path, which the bridge never reads: run 65 lost every catch.)
+bool g_resumeByBridge = false;
 
 std::optional<uint64_t> DecodeJumpTarget(uint64_t addr) {
   const auto* p = reinterpret_cast<const uint8_t*>(addr);
@@ -420,7 +423,7 @@ uint64_t RaiseException(CallContext& c) {
   Ntdll::CaptureContextFromCall(&ctx, c);
   const Context raised = ctx;
   if (Ntdll::DispatchException(&rec, &ctx)) {
-    if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
+    if (!Ntdll::g_resumeByBridge) Ntdll::TakeResumeInto(c);
   } else {
     std::fprintf(stderr, "UB_WIN32 unhandled exception %#x at %p\n", rec.ExceptionCode, rec.ExceptionAddress);
     // 0x406d1388 is MSVC's thread-naming exception: nobody is meant to handle it.
@@ -435,7 +438,7 @@ uint64_t RtlRaiseException(CallContext& c) {
   Context ctx;
   Ntdll::CaptureContextFromCall(&ctx, c);
   if (Ntdll::DispatchException(rec, &ctx)) {
-    if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
+    if (!Ntdll::g_resumeByBridge) Ntdll::TakeResumeInto(c);
   } else {
     std::fprintf(stderr, "UB_WIN32 unhandled RtlRaiseException %#x\n", rec->ExceptionCode);
   }
@@ -453,19 +456,19 @@ uint64_t RtlUnwindEx(CallContext& c) {
   }
   Ntdll::UnwindEx(c.Ptr<void>(0), c.Ptr<void>(1), c.Ptr<ExceptionRecord>(2), c.Ptr<void>(3),
                   c.Ptr<UnwindHistoryTable>(5));
-  if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
+  if (!Ntdll::g_resumeByBridge) Ntdll::TakeResumeInto(c);
   return 0;
 }
 
 uint64_t NtContinue(CallContext& c) {
   Ntdll::RequestResume(c.Ptr<Context>(0));
-  if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
+  if (!Ntdll::g_resumeByBridge) Ntdll::TakeResumeInto(c);
   return 0;
 }
 
 uint64_t RtlRestoreContext(CallContext& c) {
   Ntdll::RestoreContext(c.Ptr<Context>(0), c.Ptr<ExceptionRecord>(1), -1);
-  if (!Ntdll::t_resumeByBridge) Ntdll::TakeResumeInto(c);
+  if (!Ntdll::g_resumeByBridge) Ntdll::TakeResumeInto(c);
   return 0;
 }
 
@@ -516,7 +519,7 @@ void RegisterNtdllSeh(std::vector<Function>& out) {
 
 // ---- device bridge: non-local resume realization -----------------------------------------------
 void SetInvokeDepth(int depth) { Ntdll::t_invokeDepth = depth; }
-void SetResumeRealizedByBridge(bool bridge) { Ntdll::t_resumeByBridge = bridge; }
+void SetResumeRealizedByBridge(bool bridge) { Ntdll::g_resumeByBridge = bridge; }
 
 ResumeAction TakePendingResume(uint64_t gpr[16], uint64_t xmm[16][2], uint64_t& rip) {
   if (!Ntdll::t_resumePending) return ResumeAction::None;

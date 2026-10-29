@@ -1164,3 +1164,10 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   DispatchScope's (no more clearing on apply), and UnwindEx fixes its resume root on entry, before
   the consolidate callback runs guest code. The trace now also logs each resume request and the
   bridge's apply/escape decision.
+- **iPhone, run 65**: no crash any more, but no catch either: the trace shows the resume requested
+  with the right root (`root depth 1 (now 2)`), yet the handler came back with none pending and no
+  apply/escape decision logged, and the engine stalled after 425 frames. Cause, also of run 64:
+  `t_resumeByBridge` was `thread_local` and set only on the probe thread; the engine's threads
+  (UnityMain calling il2cpp through the bridge) took the host-test path, where RtlUnwindEx moves
+  the resume into CallContext fields the device bridge never reads, and clears it. Now a process
+  flag. (Run 64's fix of the resume root stays: it is right, but it was not what lost the catch.)

@@ -828,6 +828,11 @@ Next steps, in order:
         handle, `arc4random_buf`), `BCryptOpenAlgorithmProvider` ("RNG" only) and
         `BCryptCloseAlgorithmProvider`. Open: what to do with a managed exception that reaches the
         bridge boundary uncaught (on Android it would reach libunity's own C++ frames).
+      - **Next device run:** the same `EntryPointNotFoundException` for `BCryptGenRandom`, frame for
+        frame. The CI build of the fix had succeeded, but the log could not tell which IPA ran.
+        Now the launch line carries the build (`commit …, Probe IPA run N`, a `build-info.txt`
+        that CI writes into the bundle), and a function that `Baselib_DynamicLibrary_GetFunction`
+        or `GetProcAddress` does not find is logged with its module.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

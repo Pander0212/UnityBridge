@@ -101,6 +101,7 @@ jobs:
             printf '\n'
           } > app/Generated/Libraries.xcconfig
           cat app/Generated/Libraries.xcconfig
+          echo "commit ${GITHUB_SHA::7}, Probe IPA run ${GITHUB_RUN_NUMBER}" > app/Generated/build-info.txt
           (cd app && xcodegen generate)
           set -o pipefail
           xcodebuild build -project app/UnityBridgeProbe.xcodeproj -scheme UnityBridgeProbe -configuration Release \

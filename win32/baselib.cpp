@@ -148,6 +148,9 @@ uint64_t Baselib_DynamicLibrary_GetFunction(CallContext& c) {
   const auto* module = FindModuleByHandle(c.Arg(0));
   const char* name = c.Ptr<const char>(1);
   const auto address = module && module->lookup && name ? module->lookup(name) : std::nullopt;
+  if (!address)
+    std::fprintf(stderr, "UB_WIN32 baselib: no function %s in %s\n", name ? name : "(null)",
+                 module ? module->name.c_str() : "(unknown module)");
   SetErrorState(c.Arg(2), address ? 0 : kErrorFailed);
   return address.value_or(0);
 }

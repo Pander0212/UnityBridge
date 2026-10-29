@@ -23,6 +23,8 @@ targets:
         buildPhase: resources
       - path: Generated/ubtest.dll
         buildPhase: resources
+      - path: Generated/build-info.txt
+        buildPhase: resources
     configFiles:
       Release: Generated/Libraries.xcconfig
       Debug: Generated/Libraries.xcconfig

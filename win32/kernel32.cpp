@@ -554,6 +554,7 @@ uint64_t GetProcAddress(CallContext& c) {
   if (c.Arg(1) < 0x10000) return SetError(ERROR_PROC_NOT_FOUND, 0);  // by ordinal: not supported
   const std::string name(c.Ptr<const char>(1));
   const auto address = module->lookup ? module->lookup(name) : std::nullopt;
+  if (!address) std::fprintf(stderr, "UB_WIN32 GetProcAddress: no %s in %s\n", name.c_str(), module->name.c_str());
   return address ? *address : SetError(ERROR_PROC_NOT_FOUND, 0);
 }
 

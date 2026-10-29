@@ -27,7 +27,11 @@ enum ProbeLog {
     static func redirectStderr() {
         freopen(url.path, "a", stderr)  // "a" creates the file if missing; it is never truncated
         setvbuf(stderr, nil, _IONBF, 0)
-        FileHandle.standardError.write(Data("\n==== UB Probe launch \(Date()) ====\n".utf8))
+        // Which build is running: commit and CI run, written into the bundle by CI "Probe IPA".
+        let build = Bundle.main.url(forResource: "build-info", withExtension: "txt")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown build"
+        FileHandle.standardError.write(Data("\n==== UB Probe launch \(Date()) (\(build)) ====\n".utf8))
     }
 
     static func write(_ line: String) {

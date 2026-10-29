@@ -466,22 +466,33 @@ static int ub_sched_getaffinity(int pid, size_t size, void *mask)
     return 0;
 }
 
-// ---- aligned reservations without the slack -----------------------------------------------------
-// Unity's low-level virtual-memory allocator gives each of its allocators regions of 256 MiB aligned
-// to 256 MiB (it keys ownership by address >> 28). Baselib gets one by reserving twice that less a
-// page (an mmap of 0x1fffc000, PROT_NONE) and unmapping the edges outside the aligned window. An app
-// without the extended-virtual-addressing entitlement has ~8 GiB beside the shared cache (M3f): the
-// sixteenth or so region finds no 512 MiB gap, and every trimmed edge leaves a hole behind. Here such
-// a request gets the aligned window directly (vm_map with an alignment mask; Baselib then finds it
-// aligned and skips the front unmap), and the tail it then unmaps -- never mapped -- is ignored.
+// ---- Unity's 256 MiB regions, reserved as far as they are used ----------------------------------
+// Unity's low-level virtual-memory allocator gives each of its allocators a region of 256 MiB aligned
+// to 256 MiB (it keys ownership by address >> 28). Baselib reserves one as twice that less a page (an
+// mmap of 0x1fffc000, PROT_NONE) and unmaps the edges outside the aligned window. An app without the
+// extended-virtual-addressing entitlement has ~8 GiB beside the shared cache (M3f), and the engine
+// wants ~16 regions, 4 GiB, while committing at most the first 16 MiB of each, always from the start.
+// So such a request gets an aligned window whose first UB_REGION_HEAD bytes are reserved (vm_map with
+// an alignment mask: Baselib finds it aligned and skips the front unmap); the rest stays unmapped and
+// is mapped, in UB_REGION_STEP steps from the reserved end, when the engine commits there (mprotect).
+// That extension asks for a fixed range and fails, as an out-of-memory commit, if something else got
+// there first. munmap and madvise only ever touch what is mapped here; the tail Baselib unmaps after
+// the reservation was never mapped and is ignored.
 typedef void *(*mmap_fn)(void *, size_t, int, int, int, long);
 typedef int (*munmap_fn)(void *, size_t);
+typedef int (*mprotect_fn)(void *, size_t, int);
+typedef int (*madvise_fn)(void *, size_t, int);
 static mmap_fn g_bionic_mmap;
 static munmap_fn g_bionic_munmap;
-#define UB_MAX_TAILS 128
-static struct { uintptr_t start, end; } g_tails[UB_MAX_TAILS];  // the unmapped tails, by range
-static pthread_mutex_t g_tails_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_aligned, g_aligned_failed;
+static mprotect_fn g_bionic_mprotect;
+static madvise_fn g_bionic_madvise;
+#define UB_REGION_HEAD ((size_t)64 << 20)
+#define UB_REGION_STEP ((uintptr_t)16 << 20)
+#define UB_MAX_REGIONS 256
+// base..base+size: what the engine believes it owns (window plus Baselib's tail); base..mapped_end: mapped.
+static struct { uintptr_t base, window, size, mapped_end; } g_regions[UB_MAX_REGIONS];
+static pthread_mutex_t g_regions_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_aligned, g_aligned_failed, g_extended, g_extend_failed;
 
 // The window size R if (len, prot, flags) is "R aligned to R" in Baselib's form: len = 2R - page, R a
 // power of two of at least 64 MiB, an anonymous private reservation with no address asked for.
@@ -496,66 +507,191 @@ static size_t aligned_request(void *addr, size_t len, int prot, int flags, int f
     return 0;
 }
 
-static void *reserve_aligned(size_t r)
+// Reserves (no access) `size` bytes at an address aligned to `align`, or exactly at `at` (align 0).
+static uintptr_t reserve(uintptr_t at, size_t size, size_t align)
 {
 #ifdef __APPLE__
-    vm_address_t a = 0;
-    if (vm_map(mach_task_self(), &a, r, r - 1, VM_FLAGS_ANYWHERE, MACH_PORT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL,
-               VM_INHERIT_COPY) != KERN_SUCCESS)
-        return NULL;
-    return (void *)a;
+    vm_address_t a = at;
+    if (vm_map(mach_task_self(), &a, size, align ? align - 1 : 0, align ? VM_FLAGS_ANYWHERE : VM_FLAGS_FIXED,
+               MACH_PORT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY) != KERN_SUCCESS)
+        return 0;
+    return a;
 #else
-    void *p = mmap(NULL, 2 * r, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) return NULL;
-    const uintptr_t b = (uintptr_t)p, a = (b + r - 1) & ~(uintptr_t)(r - 1);
+    if (!align) {  // only for the syntax check on other hosts
+        void *p = mmap((void *)at, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return 0;
+        if ((uintptr_t)p != at) { munmap(p, size); return 0; }
+        return at;
+    }
+    void *p = mmap(NULL, size + align, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 0;
+    const uintptr_t b = (uintptr_t)p, a = (b + align - 1) & ~(uintptr_t)(align - 1);
     if (a > b) munmap(p, a - b);
-    munmap((void *)(a + r), b + 2 * r - (a + r));
-    return (void *)a;
+    munmap((void *)(a + size), b + size + align - (a + size));
+    return a;
 #endif
+}
+
+// Other mappings of the Android libraries that the kernel placed in a window's unmapped part: calls on
+// them go on to Husk unchanged. (The host's own mappings there are never unmapped or protected through
+// these functions; a commit onto one fails as out of memory.)
+#define UB_MAX_FOREIGN 512
+static struct { uintptr_t start, end; } g_foreign[UB_MAX_FOREIGN];
+
+static bool in_window(uintptr_t a, uintptr_t e)  // caller holds g_regions_lock
+{
+    for (int i = 0; i < UB_MAX_REGIONS; i++)
+        if (g_regions[i].base && a < g_regions[i].base + g_regions[i].window && e > g_regions[i].mapped_end) return true;
+    return false;
+}
+
+static int foreign_of(uintptr_t a)  // caller holds g_regions_lock
+{
+    for (int i = 0; i < UB_MAX_FOREIGN; i++)
+        if (g_foreign[i].start && a >= g_foreign[i].start && a < g_foreign[i].end) return i;
+    return -1;
+}
+
+// The region whose claimed range overlaps [a, e) and that [a, e) belongs to, or -1. Caller holds
+// g_regions_lock.
+static int region_of(uintptr_t a, uintptr_t e)
+{
+    if (foreign_of(a) >= 0) return -1;
+    for (int i = 0; i < UB_MAX_REGIONS; i++)
+        if (g_regions[i].base && a < g_regions[i].base + g_regions[i].size && e > g_regions[i].base) return i;
+    return -1;
 }
 
 static void *ub_mmap(void *addr, size_t len, int prot, int flags, int fd, long off)
 {
     const size_t r = aligned_request(addr, len, prot, flags, fd);
     if (r) {
-        void *a = reserve_aligned(r);
-        pthread_mutex_lock(&g_tails_lock);
+        const size_t head = r < UB_REGION_HEAD ? r : UB_REGION_HEAD;
+        const uintptr_t a = reserve(0, head, r);
+        pthread_mutex_lock(&g_regions_lock);
         int slot = -1;
-        for (int i = 0; a && i < UB_MAX_TAILS && slot < 0; i++) if (!g_tails[i].start) slot = i;
-        if (a && slot >= 0) {
-            g_tails[slot].start = (uintptr_t)a + r;
-            g_tails[slot].end = (uintptr_t)a + len;
+        for (int i = 0; a && i < UB_MAX_REGIONS && slot < 0; i++) if (!g_regions[i].base) slot = i;
+        if (slot >= 0) {
+            g_regions[slot].base = a;
+            g_regions[slot].window = r;
+            g_regions[slot].size = len;
+            g_regions[slot].mapped_end = a + head;
             ++g_aligned;
         } else {
             ++g_aligned_failed;
         }
-        pthread_mutex_unlock(&g_tails_lock);
-        if (a && slot >= 0) {
-            if (g_aligned <= 3) line("  aligned reservation: %zu MiB at %p directly (asked %#zx)", r >> 20, a, len);
-            return a;
+        const int n = g_aligned;
+        pthread_mutex_unlock(&g_regions_lock);
+        if (slot >= 0) {
+            if (n <= 3) line("  region: %zu MiB window at %#lx, first %zu MiB reserved (asked %#zx)", r >> 20, (unsigned long)a,
+                             head >> 20, len);
+            return (void *)a;
         }
-        if (a) munmap(a, r);  // no slot left to remember the tail: Husk's way instead
+        if (a) munmap((void *)a, head);  // no slot left: Husk's way instead
     }
-    return g_bionic_mmap(addr, len, prot, flags, fd, off);
+    void *m = g_bionic_mmap(addr, len, prot, flags, fd, off);
+    if (m != MAP_FAILED) {
+        const uintptr_t s = (uintptr_t)m, e = s + len;
+        pthread_mutex_lock(&g_regions_lock);
+        if (in_window(s, e)) {
+            for (int i = 0; i < UB_MAX_FOREIGN; i++)
+                if (!g_foreign[i].start) { g_foreign[i].start = s; g_foreign[i].end = e; break; }
+        }
+        pthread_mutex_unlock(&g_regions_lock);
+    }
+    return m;
 }
 
 static int ub_munmap(void *addr, size_t len)
 {
     const uintptr_t a = (uintptr_t)addr, e = a + len;
-    pthread_mutex_lock(&g_tails_lock);
-    for (int i = 0; i < UB_MAX_TAILS; i++) {
-        if (!g_tails[i].start || a >= g_tails[i].end || e <= g_tails[i].start) continue;
-        // Within a tail: nothing there is ours. The tail goes once all of it was given back.
-        const bool whole = a <= g_tails[i].start && e >= g_tails[i].end;
-        const uintptr_t keep_end = g_tails[i].start;
-        if (whole) g_tails[i].start = g_tails[i].end = 0;
-        pthread_mutex_unlock(&g_tails_lock);
-        // A range that also covers mapped memory before the tail: that part is unmapped for real.
-        if (a < keep_end) return g_bionic_munmap(addr, keep_end - a);
-        return 0;
+    pthread_mutex_lock(&g_regions_lock);
+    const int f = foreign_of(a);
+    if (f >= 0) {  // another mapping: unmapped for real, and forgotten once all of it is
+        if (e >= g_foreign[f].end && a <= g_foreign[f].start) g_foreign[f].start = g_foreign[f].end = 0;
+        pthread_mutex_unlock(&g_regions_lock);
+        return g_bionic_munmap(addr, len);
     }
-    pthread_mutex_unlock(&g_tails_lock);
-    return g_bionic_munmap(addr, len);
+    const int i = region_of(a, e);
+    if (i < 0) { pthread_mutex_unlock(&g_regions_lock); return g_bionic_munmap(addr, len); }
+    const uintptr_t base = g_regions[i].base, mapped = g_regions[i].mapped_end, claimed = base + g_regions[i].size;
+    // The whole window given back: the region ends (the tail Baselib unmaps right after the reservation
+    // does not end it).
+    if (a <= base && e >= base + g_regions[i].window) g_regions[i].base = 0;
+    else if (a >= base + g_regions[i].window) g_regions[i].size = g_regions[i].window;  // Baselib's tail: no longer claimed
+    else if (a <= mapped && e >= mapped && a > base) g_regions[i].mapped_end = a;  // its mapped end given back
+    pthread_mutex_unlock(&g_regions_lock);
+    int rc = 0;
+    // Only what is mapped here, and whatever lies outside the region's claim, is unmapped for real.
+    const uintptr_t s1 = a > base ? a : base, e1 = e < mapped ? e : mapped;
+    if (s1 < e1 && g_bionic_munmap((void *)s1, e1 - s1) != 0) rc = -1;
+    if (a < base && g_bionic_munmap(addr, base - a) != 0) rc = -1;
+    if (e > claimed && g_bionic_munmap((void *)claimed, e - claimed) != 0) rc = -1;
+    return rc;
+}
+
+static int ub_mprotect(void *addr, size_t len, int prot)
+{
+    const uintptr_t a = (uintptr_t)addr, e = a + len;
+    pthread_mutex_lock(&g_regions_lock);
+    const int i = region_of(a, e);
+    if (i >= 0 && prot != 0 && e > g_regions[i].mapped_end) {
+        // A commit past the mapped part: map up to the next step (inside the window), or fail as
+        // out of memory if another mapping took that space.
+        const uintptr_t limit = g_regions[i].base + g_regions[i].window;
+        uintptr_t want = (e + UB_REGION_STEP - 1) & ~(UB_REGION_STEP - 1);
+        if (want > limit) want = limit;
+        const uintptr_t from = g_regions[i].mapped_end;
+        const bool ok = e <= limit && reserve(from, want - from, 0) == from;
+        if (ok) { g_regions[i].mapped_end = want; ++g_extended; }
+        else ++g_extend_failed;
+        pthread_mutex_unlock(&g_regions_lock);
+        if (!ok) {
+            line("region at %#lx: no room to commit up to +%lu MiB (something else is mapped there)",
+                 (unsigned long)g_regions[i].base, (unsigned long)((e - g_regions[i].base) >> 20));
+            tl_set_guest_errno(12);  // ENOMEM
+            return -1;
+        }
+        return g_bionic_mprotect(addr, len, prot);
+    }
+    if (i >= 0 && a >= g_regions[i].mapped_end) { pthread_mutex_unlock(&g_regions_lock); return 0; }  // decommit of nothing
+    if (i >= 0 && e > g_regions[i].mapped_end) len = g_regions[i].mapped_end - a;
+    pthread_mutex_unlock(&g_regions_lock);
+    return g_bionic_mprotect(addr, len, prot);
+}
+
+// MADV_DONTNEED inside a region: the pages read as zero afterwards (Husk does this for the mappings it
+// made itself, not these), by mapping fresh anonymous memory over them with their protection.
+static int ub_madvise(void *addr, size_t len, int advice)
+{
+    const uintptr_t a = (uintptr_t)addr, e = a + len;
+    pthread_mutex_lock(&g_regions_lock);
+    const int i = region_of(a, e);
+    uintptr_t s = 0, t = 0;
+    if (i >= 0) {
+        s = a > g_regions[i].base ? a : g_regions[i].base;
+        t = e < g_regions[i].mapped_end ? e : g_regions[i].mapped_end;
+    }
+    pthread_mutex_unlock(&g_regions_lock);
+    if (i < 0) return g_bionic_madvise(addr, len, advice);
+    if (advice != 4 || s >= t) return 0;  // MADV_DONTNEED; the others are hints
+#ifdef __APPLE__
+    for (uintptr_t p = s & ~(uintptr_t)16383; p < t;) {
+        vm_address_t ra = p;
+        vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+        if (vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS)
+            break;
+        if (ra > p) { p = ra; continue; }
+        const uintptr_t re = ra + rs < t ? ra + rs : t;
+        const int prot = (info.protection & VM_PROT_READ ? PROT_READ : 0) | (info.protection & VM_PROT_WRITE ? PROT_WRITE : 0);
+        mmap((void *)p, re - p, prot, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+        p = re;
+    }
+#endif
+    return 0;
 }
 
 // ---- dialogs are answered -----------------------------------------------------------------------
@@ -654,16 +790,20 @@ static bool interpose(void)
     g_bionic_pthread_create = (pthread_create_fn)tl_bionic_find("pthread_create");
     g_bionic_mmap = (mmap_fn)tl_bionic_find("mmap");
     g_bionic_munmap = (munmap_fn)tl_bionic_find("munmap");
+    g_bionic_mprotect = (mprotect_fn)tl_bionic_find("mprotect");
+    g_bionic_madvise = (madvise_fn)tl_bionic_find("madvise");
     if (!g_bionic_dlopen || !g_bionic_dlsym) { line("FAIL Husk's bionic has no dlopen/dlsym"); return false; }
     tl_ld_interpose("dlopen", (void *)&ub_dlopen);
     tl_ld_interpose("android_dlopen_ext", (void *)&ub_android_dlopen_ext);
     tl_ld_interpose("dlsym", (void *)&ub_dlsym);
     if (g_bionic_pthread_create) tl_ld_interpose("pthread_create", (void *)&ub_pthread_create);
     tl_ld_interpose("sched_getaffinity", (void *)&ub_sched_getaffinity);
-    if (g_bionic_mmap && g_bionic_munmap) {
+    if (g_bionic_mmap && g_bionic_munmap && g_bionic_mprotect && g_bionic_madvise) {
         tl_ld_interpose("mmap", (void *)&ub_mmap);
         tl_ld_interpose("mmap64", (void *)&ub_mmap);
         tl_ld_interpose("munmap", (void *)&ub_munmap);
+        tl_ld_interpose("mprotect", (void *)&ub_mprotect);
+        tl_ld_interpose("madvise", (void *)&ub_madvise);
     }
     tl_ld_set_verbosity(1);
     return true;
@@ -779,9 +919,10 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
         sleep(1);
         if (s == 1 || s == 5 || s == 10 || s == 30 || s == 60) {
             ub_il2cpp_engine_report(report, sizeof(report));
-            line("after %d s: %lu frames (%lu presented); libil2cpp.so %d dlopen, %d dlsym (%d not exported); %d aligned "
-                 "reservations (%d not); %d threads started; %s", s, tl_unity_frames(), tl_egl_frames_presented(), g_il2cpp_opens,
-                 g_il2cpp_syms, g_il2cpp_missing, g_aligned, g_aligned_failed, g_threads, report);
+            line("after %d s: %lu frames (%lu presented); libil2cpp.so %d dlopen, %d dlsym (%d not exported); %d regions "
+                 "(%d not), %d grown (%d could not); %d threads started; %s", s, tl_unity_frames(), tl_egl_frames_presented(),
+                 g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing, g_aligned, g_aligned_failed, g_extended, g_extend_failed,
+                 g_threads, report);
             ub_memory_dump("UB_MEM");
         }
     }

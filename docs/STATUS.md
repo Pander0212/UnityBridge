@@ -783,6 +783,21 @@ Next steps, in order:
         `sched_getaffinity` in front of Husk's, which ignores it; Unity read its big.LITTLE mask
         `0x3f` there): fewer job workers, so fewer threads, stacks and per-thread allocators with
         their regions. The report counts the threads the Android libraries start.
+      - **Device run:** `Cores = 2` took effect (stacks before `il2cpp_init` 39 MiB instead of
+        106; 20 threads after 1 s), but the engine still wants ~16 regions (3,985 MiB reserved at
+        the fault, same crash). So the regions are per allocator, not per worker. The mm trace
+        shows how little of them is used: summing the commits (`mprotect` rw) per 256 MiB region
+        over three runs, **the highest committed offset is 1-16 MiB in every region, always from
+        its start** (16 MiB = one allocator block). Also found: since the aligned reservations
+        came from `vm_map`, Husk's `MADV_DONTNEED` (zero-fill, only for its own mappings) did
+        nothing on them.
+      - **Fix, [i] pending:** a region request gets its 256 MiB-aligned window with only the
+        **first 64 MiB reserved**; the rest stays unmapped and is mapped in 16 MiB steps when the
+        engine commits past the mapped end (`mprotect`, `vm_map` at a fixed address, which fails
+        as ENOMEM if something else is there). `munmap`/`madvise` act only on the mapped part;
+        `MADV_DONTNEED` zero-fills it. Other mappings of the Android libraries that land in a
+        window's unmapped part are recorded at `mmap` and passed through untouched. 16 regions:
+        1 GiB of address space instead of 4. The report counts regions and extensions.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

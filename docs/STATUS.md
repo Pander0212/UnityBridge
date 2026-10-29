@@ -988,3 +988,23 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   `unity_ObjectToWorld@0, unity_MatrixVP@64, _MainTex_ST@128, _Color@144`), while e.g.
   `UnityStereoGlobals` stays a uniform block (`UNITY_BINDING`); textures are listed per program with
   their unit. So a GLES3 table is derived from the translated source, not copied from D3D11's.
+
+### M4b: translation with HLSLcc and a synthesized RDEF (2026-10-29, in progress)
+
+- `scripts/fetch-hlslcc.sh`: HLSLcc (Unity-Technologies, MIT) at `3ea1fcd6`, into `build/hlslcc`, built
+  unmodified (`third_party/hlslcc/PROVENANCE.md`); the host CMake builds it as a static library when
+  it is there (CI's host tests do not fetch it).
+- `engine/shader_xlat.{h,cpp}`: `BuildRdef` writes a D3D11 reflection chunk from Unity's tables
+  (cbuffers with variables and type descriptors, bindings for cbuffers, textures and their samplers;
+  half is float in a D3D11 cbuffer, precision comes from the bytecode's min-precision markers),
+  `WithRdef` rebuilds the DXBC container with it, `Translate` runs HLSLcc on the vertex and the pixel
+  program with a shared `GLSLCrossDependencyData` (matching varyings) and joins them in Unity's layout
+  (`#ifdef VERTEX` ... `#ifdef FRAGMENT`), collecting HLSLcc's reflection callbacks (`OnConstantBuffer`,
+  `OnConstant`, `OnTextureBinding`, `OnInputBinding`): the GLES3 parameter table's contents.
+- Unity's flattening of `UnityPerDraw`/`UnityPerFrame` into `$Globals` in the built-in shaders happens
+  in its HLSL headers (`CBUFFER_START` empty for legacy GLES3), before HLSLcc; from D3D11 bytecode the
+  cbuffers stay uniform blocks, which is what URP's GLES3 shaders (SRP Batcher) use anyway.
+- `tools/shader_xlat/main.cpp` (`ub-shader-xlat <case>`) and `tools/research/export_xlat_cases.py`: 51
+  cases from the corpus (D3D11 VS + PS of each variant, Unity's tables, Unity's GLES3 source as the
+  expected output), local only. **Not run yet**: running the HLSLcc-built tool in this environment
+  needs the user's permission (the session's permission check stops executing fetched code).

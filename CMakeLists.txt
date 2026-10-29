@@ -65,3 +65,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
   target_compile_options(il2cpp-intercept-test PRIVATE -Wall -Wextra)
   add_test(NAME il2cpp-intercept-test COMMAND il2cpp-intercept-test)
 endif()
+
+# M4: HLSLcc (fetched by scripts/fetch-hlslcc.sh into build/hlslcc, MIT) and the D3D11 -> GLSL ES 3.0
+# translation around it; ub-shader-xlat runs it on a case exported from Unity's own shaders.
+set(HLSLCC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/build/hlslcc)
+if(EXISTS ${HLSLCC_DIR}/src/HLSLcc.cpp)
+  file(GLOB HLSLCC_SOURCES ${HLSLCC_DIR}/src/*.cpp ${HLSLCC_DIR}/src/cbstring/*.c)
+  add_library(hlslcc STATIC ${HLSLCC_SOURCES})
+  target_include_directories(hlslcc SYSTEM PUBLIC ${HLSLCC_DIR} ${HLSLCC_DIR}/include
+                             PRIVATE ${HLSLCC_DIR}/src ${HLSLCC_DIR}/src/cbstring ${HLSLCC_DIR}/src/internal_includes)
+  target_compile_options(hlslcc PRIVATE -w)  # third-party code, built unmodified
+  set_target_properties(hlslcc PROPERTIES CXX_STANDARD 11)
+
+  add_executable(ub-shader-xlat tools/shader_xlat/main.cpp engine/shader_xlat.cpp)
+  target_link_libraries(ub-shader-xlat PRIVATE hlslcc)
+  target_include_directories(ub-shader-xlat PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_compile_options(ub-shader-xlat PRIVATE -Wall -Wextra)
+  set_target_properties(ub-shader-xlat PROPERTIES CXX_STANDARD 17)
+endif()

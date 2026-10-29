@@ -833,6 +833,20 @@ Next steps, in order:
         Now the launch line carries the build (`commit …, Probe IPA run N`, a `build-info.txt`
         that CI writes into the bundle), and a function that `Baselib_DynamicLibrary_GetFunction`
         or `GetProcAddress` does not find is logged with its module.
+      - **Device run (commit b081acd, run 47, the right build):** the BCrypt functions are there,
+        but il2cpp never got to them: `cannot open B`, then `no function BCryptGenRandomW /
+        BCryptGenRandom in (unknown module)`. So opening the library failed, and il2cpp went on
+        as if it had not (no `DllNotFoundException`): the error state we set was not where it
+        looked. `Baselib_DynamicLibrary_OpenUtf16` returns a `Baselib_DynamicLibrary_Handle` by
+        value, and the evidence fits a hidden return slot in RCX (the "name" read from RCX was
+        the caller's uninitialised slot, our error landed in the real name). Then
+        `Baselib_SystemSemaphore_CreateInplace`, the same shape, has keyed every semaphore by the
+        slot and never written the handle: il2cpp's baselib semaphores have been no-ops.
+      - **Fix, [i] pending:** the three functions returning a handle by value detect the
+        convention per call (a return slot is a local just above the guest's `rsp`; a semaphore's
+        memory or a name is not), log which one they saw (first four calls), and handle both:
+        the handle into the slot and its address in RAX, or the handle in RAX. `OpenUtf16` also
+        opens built-in DLLs not yet used (`bcrypt.dll`). `ubtest.dll` checks both conventions.
 - [ ] Synthetic APK from the user's Unity Android package + game data; platform field rewrite.
 - [x] Prerequisite from M2e: TLS and exceptions in the mini Win32 — done, `il2cpp_init` succeeds on iPhone (M2f).
 - [ ] M4: D3D11 shaders → GLES3.

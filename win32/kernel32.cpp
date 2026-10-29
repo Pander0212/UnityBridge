@@ -629,6 +629,8 @@ uint64_t GetConsoleOutputCP(CallContext&) { return CP_UTF8; }
 
 } // namespace
 
+uint64_t ModuleHandle(const std::string& name) { return ModuleHandleFor(name); }
+
 void SetLastErrorValue(uint32_t error) { t_lastError = error; }
 uint32_t LastErrorValue() { return t_lastError; }
 

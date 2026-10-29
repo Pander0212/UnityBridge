@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <atomic>
 #include <cstdio>
 #include <map>
 #include <mutex>
@@ -88,11 +89,37 @@ Semaphore* FindSemaphore(uint64_t handle) {
   return it == g_semaphores.end() ? nullptr : it->second.get();
 }
 
-uint64_t Baselib_SystemSemaphore_CreateInplace(CallContext& c) {
-  const uint64_t memory = c.Arg(0);
-  std::scoped_lock lock {g_semaphoresMutex};
-  g_semaphores[memory] = std::make_unique<Semaphore>();
-  return memory;
+// The functions that return a Baselib_*_Handle by value (CreateInplace, DynamicLibrary_OpenUtf16,
+// DynamicLibrary_FromNativeHandle) are C++ functions of il2cpp_baselib. Their handle comes back either
+// in RAX (an 8-byte aggregate under the x64 ABI) or through a hidden pointer, RCX being the caller's
+// return slot, the declared arguments following and RAX returning that pointer. The device's
+// GameAssembly behaved like the second (M3f: the "library name" read as plain arguments was "B", and
+// the error state went unseen), the ABI's rule says the first; the call tells: a return slot is a local
+// of the caller, just above its stack pointer, which a semaphore's memory or a library name is not.
+bool HiddenReturnSlot(const CallContext& c, const char* function) {
+  const uint64_t a0 = c.Arg(0);
+  const bool hidden = a0 >= c.rsp && a0 < c.rsp + (64u << 10);
+  static std::atomic<int> said {0};
+  if (said.fetch_add(1) < 4)
+    std::fprintf(stderr, "UB_WIN32 baselib: %s returns its handle %s\n", function,
+                 hidden ? "through a hidden return slot (RCX)" : "in RAX");
+  return hidden;
+}
+
+uint64_t ReturnHandle(CallContext& c, bool hidden, uint64_t handle) {
+  if (!hidden) return handle;
+  Store<uint64_t>(c.Arg(0), handle);
+  return c.Arg(0);
+}
+
+uint64_t Baselib_SystemSemaphore_CreateInplace(CallContext& c) {  // ([return slot,] memory)
+  const bool hidden = HiddenReturnSlot(c, "Baselib_SystemSemaphore_CreateInplace");
+  const uint64_t memory = c.Arg(hidden ? 1 : 0);
+  {
+    std::scoped_lock lock {g_semaphoresMutex};
+    g_semaphores[memory] = std::make_unique<Semaphore>();
+  }
+  return ReturnHandle(c, hidden, memory);
 }
 
 uint64_t Baselib_SystemSemaphore_FreeInplace(CallContext& c) {
@@ -124,24 +151,26 @@ uint64_t Baselib_SystemSemaphore_Release(CallContext& c) {
 // ---- dynamic libraries -------------------------------------------------------------------
 // The module registry decides what can be opened: loaded PE images and UnityBridge's built-in DLLs.
 
-uint64_t Baselib_DynamicLibrary_OpenUtf16(CallContext& c) {
-  const auto name = ToUtf8(ReadWide(c.Ptr<const char16_t>(0)));
-  const auto* module = FindModuleByName(name);
-  if (module == nullptr) {
-    const auto* raw = c.Ptr<const uint8_t>(0);
-    std::fprintf(stderr, "UB_WIN32 baselib: cannot open %s (first bytes %02x %02x %02x %02x %02x %02x %02x %02x)\n",
-                 name.c_str(), raw ? raw[0] : 0, raw ? raw[1] : 0, raw ? raw[2] : 0, raw ? raw[3] : 0, raw ? raw[4] : 0,
-                 raw ? raw[5] : 0, raw ? raw[6] : 0, raw ? raw[7] : 0);
-    SetErrorState(c.Arg(1), kErrorFailed);
-    return 0;
+uint64_t Baselib_DynamicLibrary_OpenUtf16(CallContext& c) {  // ([return slot,] pathnameUtf16, errorState)
+  const bool hidden = HiddenReturnSlot(c, "Baselib_DynamicLibrary_OpenUtf16");
+  const int a = hidden ? 1 : 0;
+  const auto name = c.Arg(a) ? ToUtf8(ReadWide(c.Ptr<const char16_t>(a))) : std::string();
+  // A built-in DLL (bcrypt.dll, ...) gets its handle on first use, as LoadLibrary does.
+  const uint64_t handle = ModuleHandle(name);
+  if (handle == 0) {
+    std::fprintf(stderr, "UB_WIN32 baselib: cannot open %s\n", name.c_str());
+    SetErrorState(c.Arg(a + 1), kErrorFailed);
+    return ReturnHandle(c, hidden, 0);
   }
-  SetErrorState(c.Arg(1), 0);
-  return module->base;
+  SetErrorState(c.Arg(a + 1), 0);
+  return ReturnHandle(c, hidden, handle);
 }
 
-uint64_t Baselib_DynamicLibrary_FromNativeHandle(CallContext& c) {
-  SetErrorState(c.Arg(2), 0);
-  return c.Arg(0);
+uint64_t Baselib_DynamicLibrary_FromNativeHandle(CallContext& c) {  // ([return slot,] handle, type, errorState)
+  const bool hidden = HiddenReturnSlot(c, "Baselib_DynamicLibrary_FromNativeHandle");
+  const int a = hidden ? 1 : 0;
+  SetErrorState(c.Arg(a + 2), 0);
+  return ReturnHandle(c, hidden, c.Arg(a));
 }
 
 uint64_t Baselib_DynamicLibrary_GetFunction(CallContext& c) {

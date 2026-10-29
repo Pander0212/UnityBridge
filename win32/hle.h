@@ -134,6 +134,9 @@ const Module* FindModuleByName(std::string_view name);   // "kernel32", "KERNEL3
 const Module* FindModuleByHandle(uintptr_t handle);
 const Module* MainModule();
 bool IsBuiltinDll(std::string_view name);
+// HMODULE of a loaded module or a built-in DLL (registered on first use), as LoadLibrary sees it; 0 if
+// neither.
+uint64_t ModuleHandle(const std::string& name);
 
 // Windows paths <-> host paths (kernel32_files.cpp). "C:\" is the host root, so the Unix paths
 // the Android engine passes (e.g. /var/mobile/...) reach the guest as C:\var\mobile\... and map

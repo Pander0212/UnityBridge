@@ -182,6 +182,9 @@ IMPORT int SHGetFolderPathW(void*, int, void*, DWORD, WCHAR*);
 
 // baselib.dll exports C++ functions; the declarations take their MSVC-decorated names.
 IMPORT void* SemCreate(void*) __asm__("?Baselib_SystemSemaphore_CreateInplace@il2cpp_baselib@@YA?AUBaselib_SystemSemaphore_Handle@1@PEAX@Z");
+// The same function as MSVC C++ may call it: the handle through a hidden return slot (RCX), a local of
+// the caller; RAX returns the slot's address.
+IMPORT void** SemCreateSlot(void** slot, void*) __asm__("?Baselib_SystemSemaphore_CreateInplace@il2cpp_baselib@@YA?AUBaselib_SystemSemaphore_Handle@1@PEAX@Z");
 IMPORT void SemRelease(void*, unsigned) __asm__("?Baselib_SystemSemaphore_Release@il2cpp_baselib@@YAXUBaselib_SystemSemaphore_Handle@1@I@Z");
 IMPORT _Bool SemTryAcquire(void*) __asm__("?Baselib_SystemSemaphore_TryAcquire@il2cpp_baselib@@YA_NUBaselib_SystemSemaphore_Handle@1@@Z");
 IMPORT _Bool SemTryTimed(void*, unsigned) __asm__("?Baselib_SystemSemaphore_TryTimedAcquire@il2cpp_baselib@@YA_NUBaselib_SystemSemaphore_Handle@1@I@Z");
@@ -375,6 +378,14 @@ __declspec(dllexport) int ub_test_all(void) {
   if (sem == semMemory && SemTryAcquire(sem) && SemTryAcquire(sem) && !SemTryAcquire(sem) && !SemTryTimed(sem, 10) &&
       BaselibThreadId() != 0) ok |= 1 << 16;
   SemFree(sem);
+  {
+    static unsigned char slotMemory[64];
+    void* volatile slot = 0;
+    void** back = SemCreateSlot((void**)&slot, slotMemory);
+    SemRelease(slot, 1);
+    if (!(back == (void**)&slot && slot == slotMemory && SemTryAcquire(slot) && !SemTryAcquire(slot))) ok &= ~(1 << 16);
+    SemFree(slot);
+  }
 
   // Waitable objects (single thread: signalled states and timeouts).
   {

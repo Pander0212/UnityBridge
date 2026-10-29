@@ -162,7 +162,11 @@ struct CallResult {
 };
 
 struct GuestThread {
-  HostMemory entry {kPage}, stack {8u << 20}, teb {2 * kPage};  // 8 MiB stack: il2cpp_init recurses deep
+  // 8 MiB stack by default: il2cpp_init recurses deep. A host thread of the engine's that calls into
+  // il2cpp (UnityMain) nests engine -> managed -> engine calls on its one guest stack, deepest while a
+  // scene loads: run 71 ran out of 8 MiB loading an area. Unused pages cost nothing.
+  explicit GuestThread(size_t stackBytes = 8u << 20) : stack {stackBytes} {}
+  HostMemory entry {kPage}, stack, teb {2 * kPage};
   AetherPS4::Fex::GuestEngine::Thread* thread = nullptr;
   uintptr_t tls = 0;
 
@@ -325,7 +329,7 @@ uint64_t BridgeCall(uintptr_t target, const uint64_t (&args)[8]) {
   AetherPS4::Fex::GuestEngine::Thread* thread = nullptr;  // nested
   if (t_hleDepth == 0) {
     if (t_bridgeGuest == nullptr) {
-      auto* guest = new GuestThread;
+      auto* guest = new GuestThread(size_t {64} << 20);
       MachFault::RegisterThisThread();
       if (!PrepareFexThread("bridge thread") || !guest->Create(*g_engine, nullptr)) {
         delete guest;
@@ -342,10 +346,13 @@ uint64_t BridgeCall(uintptr_t target, const uint64_t (&args)[8]) {
   if (const auto* failure = std::get_if<AetherPS4::Fex::EngineFailure>(&run)) {
     char name[64];
     if (pthread_getname_np(pthread_self(), name, sizeof(name)) != 0 || !name[0]) std::snprintf(name, sizeof(name), "?");
-    std::fprintf(stderr, "UB_IL2CPP bridge call GameAssembly+%#lx failed: stage=%d error=%d (thread %s, HLE depth %d, %s)\n",
+    std::fprintf(stderr, "UB_IL2CPP bridge call GameAssembly+%#lx failed: stage=%d error=%d (thread %s, HLE depth %d, %s; "
+                 "bridge stack %#lx-%#lx)\n",
                  static_cast<unsigned long>(target - g_imageBase),
                  static_cast<int>(failure->Stage), failure->Error, name, t_hleDepth,
-                 thread ? "own guest thread" : "nested");
+                 thread ? "own guest thread" : "nested",
+                 static_cast<unsigned long>(t_bridgeGuest ? t_bridgeGuest->stack.addr() : 0),
+                 static_cast<unsigned long>(t_bridgeGuest ? t_bridgeGuest->stack.addr() + t_bridgeGuest->stack.size : 0));
     return 0;
   }
   return std::get<Core::GuestExecutionState>(run).Gpr[X86::REG_RAX];

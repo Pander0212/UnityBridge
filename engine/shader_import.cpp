@@ -70,15 +70,45 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
     return std::find(file->typeClassIds.begin(), file->typeClassIds.end(), classId) != file->typeClassIds.end();
   };
   // M5: which texture formats the game uses (desktop ones do not sample on the iPhone's GPU).
-  const std::string textures = UnityTextures::CensusLine(UnityTextures::Census(*file, in.data, in.size));
+  const auto census = UnityTextures::Census(*file, in.data, in.size);
+  const std::string textures = UnityTextures::CensusLine(census);
   if (note && !textures.empty()) note(textures.c_str());
-  if (!has(48) && !has(141)) {  // Shader, BuildSettings
+  const bool dxt = census.count(10) || census.count(12);
+  if (!has(48) && !has(141) && !dxt) {  // Shader, BuildSettings, DXT1/DXT5 textures
     Put(log, logcap, textures.empty() ? "no shaders" : "no shaders; " + textures);
     return 0;
   }
+  // Streamed texture data is read from the resource files next to `src` and decoded into a new one
+  // next to `dst`, "<name>.ub.resS", which make_apk puts beside the converted file.
+  const std::string srcDir = std::string(src).substr(0, std::string(src).find_last_of('/') + 1);
+  const std::string dstName = std::string(dst).substr(std::string(dst).find_last_of('/') + 1);
+  const std::string resPath = std::string(dst) + ".ub.resS";
+  std::remove(resPath.c_str());
+  FILE* res = nullptr;
+  UnityTextures::TextureIO io;
+  io.path = dstName + ".ub.resS";
+  io.read = [&](const std::string& path, uint64_t offset, uint32_t bytes) -> std::optional<std::vector<uint8_t>> {
+    if (path.find('/') != std::string::npos || path.find(':') != std::string::npos) return std::nullopt;
+    const int fd = open((srcDir + path).c_str(), O_RDONLY);
+    if (fd < 0) return std::nullopt;
+    std::vector<uint8_t> buffer(bytes);
+    const ssize_t got = pread(fd, buffer.data(), bytes, off_t(offset));
+    close(fd);
+    if (got != ssize_t(bytes)) return std::nullopt;
+    return buffer;
+  };
+  io.write = [&](const uint8_t* bytes, size_t n) {
+    if (!res) res = std::fopen(resPath.c_str(), "wb");
+    return res && std::fwrite(bytes, 1, n, res) == n;
+  };
   ShaderGles3::Stats stats;
   if (note) stats.progress = [note](const std::string& s) { note(s.c_str()); };
-  const auto out = ShaderGles3::ConvertFile(in.data, in.size, false, &stats, &error);
+  const auto out = ShaderGles3::ConvertFile(in.data, in.size, false, &stats, &error, &io);
+  if (res && std::fclose(res) != 0) {
+    std::remove(resPath.c_str());
+    Put(log, logcap, "write failed (" + io.path + ")");
+    return -1;
+  }
   // The first failure reasons, for the log.
   std::string failures;
   size_t from = 0;
@@ -89,9 +119,14 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
     failures += "; " + stats.log.substr(at, end - at);
     from = end;
   }
-  const std::string census = textures.empty() ? "" : "; " + textures;
+  const std::string census_ = (textures.empty() ? "" : "; " + textures) +
+                              (stats.textures || stats.textureErrors
+                                   ? "; " + std::to_string(stats.textures) + " decoded to RGBA32" +
+                                         (stats.textureErrors ? ", " + std::to_string(stats.textureErrors) + " not" : "")
+                                   : "");
   if (!out) {
-    Put(log, logcap, error + failures + census);
+    std::remove(resPath.c_str());
+    Put(log, logcap, error + failures + census_);
     return 0;
   }
   const std::string tmp = std::string(dst) + ".tmp";
@@ -110,7 +145,7 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   Put(log, logcap, std::string(stats.graphicsApis ? "graphics APIs -> OpenGLES3; " : "") +
                        std::to_string(stats.shaders) + " shaders, " + std::to_string(stats.programs) +
                        " GLES3 programs (" + std::to_string(stats.standIns) + " with stand-ins), " +
-                       std::to_string(stats.failed) + " not translated" + failures + census);
+                       std::to_string(stats.failed) + " not translated" + failures + census_);
   return 1;
 }
 
@@ -136,7 +171,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 10; }
+extern "C" int ub_shader_import_version(void) { return 11; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

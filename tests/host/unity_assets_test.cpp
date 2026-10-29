@@ -2,6 +2,7 @@
 // M4d host checks without game data: the BuildSettings graphics-API rewrite on a synthetic object
 // (written and read back through the 2021.3 type tree) and the LZ4 helpers.
 #include "engine/shader_gles3.h"
+#include "engine/unity_textures.h"
 #include "engine/unity_typetree.h"
 
 #include <cstdio>
@@ -87,6 +88,22 @@ int main() {
   const auto m = ShaderGles3::Lz4Decompress(block, sizeof(block), 8);
   CHECK(m && *m == std::vector<uint8_t>(8, 'a'));
   CHECK(!ShaderGles3::Lz4Decompress(block, sizeof(block), 9));  // wrong size
+
+  // DXT1 (BC1): red and blue end points, index 0 in the top row, 1 below, 2 and 3 (thirds between).
+  {
+    const uint8_t block[8] = {0x00, 0xf8, 0x1f, 0x00, 0x00, 0x55, 0xaa, 0xff};
+    uint8_t rgba[16 * 4];
+    CHECK(UnityTextures::DecodeBlocks(10, block, sizeof(block), 4, 4, rgba));
+    CHECK(rgba[0] == 255 && rgba[1] == 0 && rgba[2] == 0 && rgba[3] == 255);            // row 0: red
+    CHECK(rgba[16] == 0 && rgba[18] == 255 && rgba[19] == 255);                          // row 1: blue
+    CHECK(rgba[32] == 170 && rgba[34] == 85);                                            // row 2: 2/3 red
+    CHECK(rgba[48] == 85 && rgba[50] == 170);                                            // row 3: 1/3 red
+    CHECK(!UnityTextures::DecodeBlocks(10, block, 7, 4, 4, rgba));                       // too short
+    // DXT5 (BC3): alpha 255..0 in eight steps, index 1 everywhere -> alpha 0; colour all red.
+    const uint8_t dxt5[16] = {0xff, 0x00, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24, 0x00, 0xf8, 0x00, 0xf8, 0, 0, 0, 0};
+    CHECK(UnityTextures::DecodeBlocks(12, dxt5, sizeof(dxt5), 4, 4, rgba));
+    CHECK(rgba[0] == 255 && rgba[3] == 0 && rgba[63] == 0);
+  }
 
   if (g_failures) return 1;
   std::printf("unity_assets_test: all checks passed\n");

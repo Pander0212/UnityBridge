@@ -226,7 +226,13 @@ static void convert_shaders(const char *unity_dir, int first)
     snprintf(dir, sizeof(dir), "%s/shaders", unity_dir);
     mkdir(dir, 0755);
     int converted = 0, cached = 0;
-    for (int i = first; i < g_nentries; i++) {
+    // Decoded texture data a converted file streams from (<copy>.ub.resS), added once the loop is done
+    // (add_entry may move g_entries).
+    enum { kMaxResources = 64 };
+    char res_names[kMaxResources][600], res_paths[kMaxResources][1100];
+    int nres = 0;
+    const int last = g_nentries;
+    for (int i = first; i < last; i++) {
         apk_entry *e = &g_entries[i];
         const char *base = strrchr(e->name, '/');
         base = base ? base + 1 : e->name;
@@ -267,7 +273,16 @@ static void convert_shaders(const char *unity_dir, int first)
         snprintf(e->path, sizeof(e->path), "%s", dst);
         e->size = (uint64_t)sd.st_size;
         e->mtime = (long)sd.st_mtime;
+        char res[1110];
+        snprintf(res, sizeof(res), "%s.ub.resS", dst);
+        if (nres < kMaxResources && stat(res, &sd) == 0) {
+            snprintf(res_paths[nres], sizeof(res_paths[nres]), "%s", res);
+            snprintf(res_names[nres], sizeof(res_names[nres]), "%s.ub.resS", e->name);
+            ++nres;
+        }
     }
+    for (int k = 0; k < nres; k++)
+        if (add_entry(res_names[k], res_paths[k])) line("  textures: %s added (decoded RGBA32 data)", res_names[k]);
     line("  shaders: %d files converted now, %d from the cache", converted, cached);
 }
 

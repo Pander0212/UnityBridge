@@ -1239,3 +1239,18 @@ the record layouts after USCSandbox, GPL-3.0, github.com/nesrak1/USCSandbox).
   too low, stack-argument slots not writable); each now logs which (`UB_FEX CallWin64(...)`), and
   the bridge's failure line names the GameAssembly offset, the thread, the HLE depth and whether the
   call nested on a running guest thread.
+- **iPhone, run 71**: the census: Fellworld's textures are DXT5 (141 in sharedassets0, 6 in
+  resources.assets), plus RGBA32/RGB24/Alpha8 (fine on GLES) and Unity's own DXT1/DXT5; no BC7.
+  The crash on "Loading area: Malith" again: `stack arguments at 0x126c77fe0 not writable (nested,
+  rsp 0x126c78078)` on UnityMain at HLE depth 1, with no exception dispatched before: most likely
+  the 8 MiB guest stack of UnityMain's bridge thread ran out (a scene load nests engine -> managed
+  -> engine calls on it). Bridge threads now get 64 MiB (pages are only used when touched); the
+  failure line also names the bridge stack's range, to tell an overflow from a wrong rsp.
+- **Textures decoded at import**: DXT1 (BC1) and DXT5 (BC3) Texture2D objects become RGBA32, every
+  mip level (`UnityTextures::DecodeBlocks`, `ToRgba32`). Pixels kept in the object are replaced
+  there; streamed ones (`m_StreamData` into a `.resS`) are read from the game's resource file and
+  written, 16-byte aligned, to a new `<file>.ub.resS` next to the converted copy, which `make_apk`
+  adds beside it; the objects point there (offset, size, path). The original files are not changed.
+  Host checks: a DXT1 and a DXT5 block decode to the expected texels; Unity's Windows
+  `unity default resources` converted: its two DXT textures (the splash cube, 2048x1024 with 12
+  mips, and a 32x32 DXT1) match UnityPy's own decoding within 1 per channel. Converter version 11.

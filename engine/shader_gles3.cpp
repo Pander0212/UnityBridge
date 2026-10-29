@@ -18,7 +18,7 @@ using TypeTree::Value;
 constexpr uint32_t kD3D11 = 4, kGles3x = 9;
 constexpr int kTypeGles3 = 4;  // kShaderGpuProgramGLES3
 constexpr int32_t kRecordVersion = 202012090;
-constexpr int kShaderClass = 48, kBuildSettingsClass = 141;
+constexpr int kShaderClass = 48, kBuildSettingsClass = 141, kTexture2DClass = 28;
 const char* const kStages[] = {"progVertex", "progFragment", "progGeometry", "progHull", "progDomain",
                                "progRayTracing"};
 
@@ -721,7 +721,7 @@ bool AddGles3(Value& shader, bool replace, Stats* stats) {
 }
 
 std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size, bool replace, Stats* stats,
-                                                std::string* error) {
+                                                std::string* error, UnityTextures::TextureIO* textures) {
   const auto file = UnityFile::Parse(data, size, error);
   if (!file) return std::nullopt;
   if (file->unityVersion.rfind("2021.3.", 0) != 0) {
@@ -742,6 +742,21 @@ std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size
         if (stats->progress) stats->progress("BuildSettings: " + why);
       } else if (SetAndroidGraphicsApis(*settings, stats)) {
         replacements.push_back({i, TypeTree::Write(*settings)});
+      }
+      continue;
+    }
+    if (o.classId == kTexture2DClass && textures) {
+      const uint8_t* bytes = data + file->dataOffset + o.byteStart;
+      std::string why;
+      auto texture = TypeTree::Read(TypeTree::Texture2D2021_3(), bytes, o.byteSize, &why);
+      if (texture && TypeTree::Write(*texture) != std::vector<uint8_t>(bytes, bytes + o.byteSize))
+        texture.reset(), why = "does not match the 2021.3 type tree";
+      if (texture && UnityTextures::ToRgba32(*texture, *textures, &why)) {
+        replacements.push_back({i, TypeTree::Write(*texture)});
+        ++stats->textures;
+      } else if (!why.empty()) {
+        if (++stats->textureErrors <= 3 && stats->progress) stats->progress("texture not converted: " + why);
+        stats->log += "texture not converted: " + why + "\n";
       }
       continue;
     }

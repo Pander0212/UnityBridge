@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/unity_textures.h"
 #include "engine/unity_typetree.h"
 
 namespace UnityBridge::ShaderGles3 {
@@ -21,6 +22,8 @@ struct Stats {
   int failed = 0;      // pairs that could not be translated
   int standIns = 0;    // pairs translated with stand-ins for bindings Unity's tables lack
   bool graphicsApis = false;  // BuildSettings' graphics API list rewritten
+  int textures = 0;           // DXT1/DXT5 textures decoded to RGBA32
+  int textureErrors = 0;      // ones that could not be
   std::string log;     // a line per shader, and the reasons for failures
   // Called before each shader is translated (and with each failure), so a crash inside HLSLcc can be
   // placed from the log.
@@ -50,7 +53,9 @@ bool SetAndroidGraphicsApis(TypeTree::Value& settings, Stats* stats);
 // The serialized file `data` with every Shader converted and a desktop BuildSettings made Android's
 // (SetAndroidGraphicsApis); nullopt if nothing changed (or the file is not one this reads: `error`
 // says why).
+// With `textures`, DXT1/DXT5 Texture2D objects are decoded to RGBA32 too (UnityTextures::ToRgba32):
+// the iPhone's GPU samples neither (M5).
 std::optional<std::vector<uint8_t>> ConvertFile(const uint8_t* data, size_t size, bool replace, Stats* stats,
-                                                std::string* error);
+                                                std::string* error, UnityTextures::TextureIO* textures = nullptr);
 
 } // namespace UnityBridge::ShaderGles3

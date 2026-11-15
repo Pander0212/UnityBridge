@@ -22,6 +22,7 @@
 #include "husk-tl-bionic.h"
 #include "husk-tl-egl.h"
 #include "husk-tl-jni.h"
+#include "husk-tl-jni-internal.h"  // tl_jclass's natives, for the Unity 6 initJni diagnosis
 #include "husk-tl-ld.h"
 #include "husk-tl-unity.h"
 
@@ -220,6 +221,14 @@ static void apply_patch(const apk_entry *e, uint8_t *buf, uint64_t pos, size_t n
 // run, and remembers files with nothing to convert too.
 static void shader_note(const char *s) { line("  shaders:   %s", s); }
 
+// A path as the caches compare it: from the app's Documents folder on. The part before holds the data
+// container's UUID, which a reinstall changes (run 74 -> 75), and would make every stamp stale.
+static const char *stable_path(const char *path)
+{
+    const char *docs = strstr(path, "/Documents/");
+    return docs ? docs : path;
+}
+
 static void convert_shaders(const char *unity_dir, int first)
 {
     char dir[1100];
@@ -243,7 +252,7 @@ static void convert_shaders(const char *unity_dir, int first)
         char dst[1100], stamp[1110], want[1400], have[1400] = "";
         snprintf(dst, sizeof(dst), "%s/%s", dir, base);
         snprintf(stamp, sizeof(stamp), "%s.src", dst);
-        snprintf(want, sizeof(want), "v%d\t%s\t%llu\t%ld\t", ub_shader_import_version(), e->path,
+        snprintf(want, sizeof(want), "v%d\t%s\t%llu\t%ld\t", ub_shader_import_version(), stable_path(e->path),
                  (unsigned long long)e->size, e->mtime);
         char said[600] = "";  // the import's summary of this file, kept in the stamp's second line
         FILE *sf = fopen(stamp, "rb");
@@ -400,7 +409,7 @@ static char *inputs_text(void)
     char *t = malloc(cap);
     len = (size_t)snprintf(t, cap, "apk-format 2\n");  // bump when the APK's contents change for the same inputs
     for (int i = 0; i < g_nentries; i++)
-        len += (size_t)snprintf(t + len, cap - len, "%s\t%s\t%llu\t%ld\t%lld\n", g_entries[i].name, g_entries[i].path,
+        len += (size_t)snprintf(t + len, cap - len, "%s\t%s\t%llu\t%ld\t%lld\n", g_entries[i].name, stable_path(g_entries[i].path),
                                 (unsigned long long)g_entries[i].size, g_entries[i].mtime, (long long)g_entries[i].patch_at);
     return t;
 }
@@ -986,15 +995,41 @@ static bool start(const char *apk, const char *app_data, const char *frames)
 jobj *tl_hle_activity(void);
 static void unity6_init_jni(void)
 {
+    // RegisterNatives puts the table on UnityPlayer (run 75: nothing under the host class); either is looked at.
     static const char kHost[] = "com/unity3d/player/UnityPlayerForActivityOrService";
-    void *fn = tl_jni_native(kHost, "initJni", "(Landroid/content/Context;ILjava/lang/String;)V");
-    if (!fn) return;  // an older player: Husk calls its initJni
+    static const char kSig[] = "(Landroid/content/Context;ILjava/lang/String;)V";
+    static const char *const kClasses[] = { "com/unity3d/player/UnityPlayer", kHost, "com/unity3d/player/UnityPlayerForGameActivity" };
+    void *fn = NULL;
+    const char *where = NULL;
+    for (size_t i = 0; i < sizeof(kClasses) / sizeof(kClasses[0]) && !fn; i++) fn = tl_jni_native(where = kClasses[i], "initJni", kSig);
+    if (!fn) {
+        if (!tl_jni_native("com/unity3d/player/UnityPlayer", "initJni", "(Landroid/content/Context;)V") &&
+            !tl_jni_native("com/unity3d/player/UnityPlayer", "initJni", "(Landroid/content/Context;I)V")) {
+            // Neither form: say what the engine did register, so the next run can call it.
+            line("Unity 6: no initJni%s registered on any player class; what is registered:", kSig);
+            for (size_t i = 0; i < sizeof(kClasses) / sizeof(kClasses[0]); i++) {
+                tl_jclass *c = tl_jni_class(kClasses[i]);
+                char names[900];
+                size_t len = 0;
+                names[0] = 0;
+                for (int k = 0; k < c->nnatives && len + 2 < sizeof(names); k++) {
+                    const bool init = strstr(c->natives[k].name, "init") || strstr(c->natives[k].name, "Init");
+                    int n = snprintf(names + len, sizeof(names) - len, "%s%s%s", k ? " " : "", c->natives[k].name,
+                                     init ? c->natives[k].sig : "");
+                    if (n < 0) break;
+                    len += (size_t)n < sizeof(names) - len ? (size_t)n : sizeof(names) - len - 1;
+                }
+                line("  %s (super %s): %d natives: %s", kClasses[i], c->super ? c->super->name : "-", c->nnatives, names);
+            }
+        }
+        return;  // an older player: Husk calls its initJni
+    }
     tl_jni_declare(kHost, "com/unity3d/player/UnityPlayer");
     jobj *player = tl_jni_new_object(tl_jni_class(kHost));
     jobj *empty = tl_jni_new_string("");
     // Fixed arity: AAPCS64 code reads these from registers (env, this, context, int, String).
     ((void (*)(void *, void *, void *, uintptr_t, void *))fn)(tl_jni_env(), player, tl_hle_activity(), 0, empty);
-    line("Unity 6: %s.initJni(Context, 0, \"\") done%s", kHost, tl_jni_pending() ? " (an exception is pending)" : "");
+    line("Unity 6: initJni(Context, 0, \"\") (registered on %s) done%s", where, tl_jni_pending() ? " (an exception is pending)" : "");
     if (tl_jni_pending()) tl_jni_clear();
 }
 

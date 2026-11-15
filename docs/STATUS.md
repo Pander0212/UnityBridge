@@ -1322,4 +1322,12 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   initJni is registered, it is called on a new `UnityPlayerForActivityOrService` object (declared as a
   subclass of UnityPlayer) before `tl_unity_run`. `nativeInitWebRequest` no longer exists in Unity 6.
   Its "not registered" line is harmless.
+- **Run 75**: the call did not happen. Husk's RegisterNatives files each native under the class that
+  declares it (ART's rule), and `initJni` is declared `private final native` on **UnityPlayer**. The
+  lifecycle natives (nativeRender, ...) are declared on the host class. The 3-argument initJni is now
+  looked up on UnityPlayer, the host class and UnityPlayerForGameActivity. If none of them has it, the
+  log lists what each class has registered.
+- **Caches**: the shader stamps and the APK's `.inputs` stamp held absolute paths. Those include the data
+  container's UUID, which changed between installs, so every run converted again and rewrote the 808 MB
+  APK. Both now compare the path from `/Documents/` on.
 - Waiting for the next device log.

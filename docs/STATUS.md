@@ -1343,3 +1343,19 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   frame chain are written, symbolized through dladdr and Husk's loader (`UB_HANG`), at most 3 times. An
   atexit handler does the same for a host `exit()` (`UB_EXIT`). If neither appears, the whole process
   is stopped (for example on a trap under the debugger) or it was killed.
+
+- **Run 77** (four starts and one il2cpp probe run):
+  - The engine run ends at the same place every time, 20 s apart (conversion and APK write included).
+    There was no hang dump and no exit dump, so the process ended within a few seconds and without exit().
+  - Most likely cause: Husk starts UnityMain with the host's `pthread_create`. It is therefore not one of
+    the threads `ub_pthread_create` registers with MachFault, and under StikDebug a fault there ends the
+    app with no trace. Fix: HLE `executeMainThreadJobs` and `shouldSetGameState` (Unity 6 calls both on
+    UnityMain as it starts) register the calling thread on its first call. Both still do what Husk did
+    before, which was nothing.
+  - Cache: `Resources/unity default resources` and Unity's Android `unity default resources` shared a
+    stamp under `shaders/` and overwrote each other, so one file was converted again on every start and
+    the 808 MB APK was rewritten. Files in subfolders now get a folder of their own
+    (`shaders/Resources/`). The base name stays, because converted files name their `<base>.ub.resS`.
+  - **il2cpp probe with Unity 6's GameAssembly**: BRIDGE, ICALL and INTERCEPT checks all pass, and
+    `il2cpp_init` succeeds (metadata v39). Only two WinRT imports are unimplemented
+    (RoSetErrorReportingFlags, WindowsCreateStringReference). M6b, the il2cpp side, works.

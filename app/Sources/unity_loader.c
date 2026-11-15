@@ -250,7 +250,21 @@ static void convert_shaders(const char *unity_dir, int first)
         if (dot && strcmp(dot, ".assets") != 0) continue;
         if (!strncmp(e->name, "assets/bin/Data/Managed/", 24)) continue;
         char dst[1100], stamp[1110], want[1400], have[1400] = "";
-        snprintf(dst, sizeof(dst), "%s/%s", dir, base);
+        // Files in a subfolder get a folder of their own: Resources/unity default resources and the
+        // Android "unity default resources" share a name and would take turns overwriting one stamp
+        // (run 77: converted again on every start). The base name stays, since a converted file names
+        // its decoded texture data "<base>.ub.resS".
+        const char *rel = !strncmp(e->name, "assets/bin/Data/", 16) ? e->name + 16 : e->name;
+        if (base > rel) {
+            char sub[600];
+            snprintf(sub, sizeof(sub), "%.*s", (int)(base - 1 - rel), rel);
+            for (char *c = sub; *c; c++) if (*c == '/') *c = '_';
+            snprintf(dst, sizeof(dst), "%s/%s", dir, sub);
+            mkdir(dst, 0755);
+            snprintf(dst, sizeof(dst), "%s/%s/%s", dir, sub, base);
+        } else {
+            snprintf(dst, sizeof(dst), "%s/%s", dir, base);
+        }
         snprintf(stamp, sizeof(stamp), "%s.src", dst);
         snprintf(want, sizeof(want), "v%d\t%s\t%llu\t%ld\t", ub_shader_import_version(), stable_path(e->path),
                  (unsigned long long)e->size, e->mtime);
@@ -874,7 +888,29 @@ static void ub_Builder_show(tl_jcall *c)
     ub_Dialog_show(&(tl_jcall){.self = d});
     c->ret = jl(d);
 }
+// Husk starts UnityMain with the host's pthread_create, so it is not one of the threads that
+// ub_pthread_create registers for fault reports, and under StikDebug a fault there ends the app with no
+// trace (runs 74-77: the log stops a few seconds in, and no hang dump came). The Java methods the engine
+// calls on that thread as it starts register it on their first call. A second register is a no-op.
+// Their Java bodies are what Husk did before, which was nothing: the job queue is always empty here,
+// and there is no game-state manager.
+static void ub_register_caller(const char *what)
+{
+    static __thread int done;
+    if (done) return;
+    done = 1;
+    ub_unity_thread_enter();
+    char name[64] = "";
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    fprintf(stderr, "UB_UNITY thread '%s' registered for fault reports (first call: %s)\n", name, what);
+}
+static void ub_executeMainThreadJobs(tl_jcall *c) { (void)c; ub_register_caller("executeMainThreadJobs"); }
+static void ub_shouldSetGameState(tl_jcall *c) { ub_register_caller("shouldSetGameState"); c->ret.z = 0; }
 static const tl_jhle g_dialog_hle[] = {
+    {"com/unity3d/player/UnityPlayer", "executeMainThreadJobs", "()V", ub_executeMainThreadJobs},
+    {"com/unity3d/player/UnityPlayerForActivityOrService", "executeMainThreadJobs", "()V", ub_executeMainThreadJobs},
+    {"com/unity3d/player/UnityPlayer", "shouldSetGameState", "()Z", ub_shouldSetGameState},
+    {"com/unity3d/player/UnityPlayerForActivityOrService", "shouldSetGameState", "()Z", ub_shouldSetGameState},
     {"android/app/AlertDialog$Builder", "setPositiveButton",
      "(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;", ub_Builder_setPositive},
     {"android/app/AlertDialog$Builder", "create", "()Landroid/app/AlertDialog;", ub_Builder_create},

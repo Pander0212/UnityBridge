@@ -95,14 +95,14 @@ extern "C" const char* tl_ld_symbol_at(const void* addr, const char** lib_name, 
 
 // "addr = image!symbol+offset" for a host address: the app and system images through dladdr, the
 // Android libraries through Husk's loader.
-void DescribeAddress(const char* what, uint64_t addr) {
+void DescribeAddress(const char* what, uint64_t addr, const char* tag = "UB_FAULT") {
   char buf[512];
   Dl_info info {};
   if (addr && dladdr(reinterpret_cast<void*>(addr), &info) && info.dli_fname) {
     const char* image = std::strrchr(info.dli_fname, '/');
     image = image ? image + 1 : info.dli_fname;
     const uint64_t base = reinterpret_cast<uint64_t>(info.dli_saddr ? info.dli_saddr : info.dli_fbase);
-    std::snprintf(buf, sizeof(buf), "UB_FAULT %s %#llx = %s!%s+%#llx (image +%#llx)\n", what,
+    std::snprintf(buf, sizeof(buf), "%s %s %#llx = %s!%s+%#llx (image +%#llx)\n", tag, what,
                   static_cast<unsigned long long>(addr), image, info.dli_sname ? info.dli_sname : "?",
                   static_cast<unsigned long long>(addr - base),
                   static_cast<unsigned long long>(addr - reinterpret_cast<uint64_t>(info.dli_fbase)));
@@ -114,14 +114,14 @@ void DescribeAddress(const char* what, uint64_t addr) {
     const void* symAddr = nullptr;
     const char* sym = tl_ld_symbol_at(reinterpret_cast<const void*>(addr), &lib, &symAddr);
     if (lib) {
-      std::snprintf(buf, sizeof(buf), "UB_FAULT %s %#llx = %s!%s+%#llx\n", what, static_cast<unsigned long long>(addr),
+      std::snprintf(buf, sizeof(buf), "%s %s %#llx = %s!%s+%#llx\n", tag, what, static_cast<unsigned long long>(addr),
                     lib, sym ? sym : "?",
                     static_cast<unsigned long long>(addr - reinterpret_cast<uint64_t>(symAddr)));
       WriteStr(buf);
       return;
     }
   }
-  std::snprintf(buf, sizeof(buf), "UB_FAULT %s %#llx (no image)\n", what, static_cast<unsigned long long>(addr));
+  std::snprintf(buf, sizeof(buf), "%s %s %#llx (no image)\n", tag, what, static_cast<unsigned long long>(addr));
   WriteStr(buf);
 }
 
@@ -537,6 +537,64 @@ void NoteImport(std::string_view dll, std::string_view name) {
 
 void DumpMemory(const char* tag) { DumpMemoryImpl(tag ? tag : "UB_MEM"); }
 
+void DumpThreads(const char* tag) {
+  tag = tag ? tag : "UB_HANG";
+  thread_act_array_t threads = nullptr;
+  mach_msg_type_number_t count = 0;
+  if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return;
+  const mach_port_t self = mach_thread_self();
+  char buf[320];
+  std::snprintf(buf, sizeof(buf), "%s %u threads\n", tag, count);
+  WriteStr(buf);
+  for (mach_msg_type_number_t i = 0; i < count; ++i) {
+    if (threads[i] == self) continue;
+    char name[64] = "";
+    thread_extended_info_data_t ext {};
+    mach_msg_type_number_t extCount = THREAD_EXTENDED_INFO_COUNT;
+    if (thread_info(threads[i], THREAD_EXTENDED_INFO, reinterpret_cast<thread_info_t>(&ext), &extCount) == KERN_SUCCESS)
+      std::snprintf(name, sizeof(name), "%s", ext.pth_name);
+    // Stopped while read, so pc, lr and the frame chain belong together.
+    const bool suspended = thread_suspend(threads[i]) == KERN_SUCCESS;
+    arm_thread_state64_t ts {};
+    mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT;
+    const bool ok = thread_get_state(threads[i], ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&ts), &n) == KERN_SUCCESS;
+    uint64_t chain[16] = {};
+    int depth = 0;
+    uint64_t pc = 0, lr = 0;
+    if (ok) {
+      pc = (uint64_t)arm_thread_state64_get_pc(ts) & 0x0000ffffffffffffull;
+      lr = (uint64_t)arm_thread_state64_get_lr(ts) & 0x0000ffffffffffffull;
+      uint64_t frame = (uint64_t)arm_thread_state64_get_fp(ts);
+      for (; depth < 16 && frame && !(frame & 7); ++depth) {
+        uint64_t pair[2] = {};
+        vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(frame), sizeof(pair),
+                              reinterpret_cast<vm_address_t>(pair), &got) != KERN_SUCCESS || got != sizeof(pair))
+          break;
+        chain[depth] = pair[1] & 0x0000ffffffffffffull;
+        if (!chain[depth] || pair[0] <= frame) { ++depth; break; }
+        frame = pair[0];
+      }
+    }
+    if (suspended) thread_resume(threads[i]);
+    std::snprintf(buf, sizeof(buf), "%s thread %u '%s' run_state %d%s\n", tag, i, name, ext.pth_run_state,
+                  ok ? "" : " (no state)");
+    WriteStr(buf);
+    if (ok) {
+      DescribeAddress("  pc", pc, tag);
+      DescribeAddress("  lr", lr, tag);
+      for (int d = 0; d < depth && chain[d]; ++d) {
+        char what[16];
+        std::snprintf(what, sizeof(what), "  #%d", d);
+        DescribeAddress(what, chain[d], tag);
+      }
+    }
+  }
+  for (mach_msg_type_number_t i = 0; i < count; ++i) mach_port_deallocate(mach_task_self(), threads[i]);
+  mach_port_deallocate(mach_task_self(), self);
+  vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_act_t));
+}
+
 } // namespace UnityBridge::MachFault
 
 #else  // not Apple: no Mach exceptions; the host builds never run guest code on a device
@@ -547,6 +605,7 @@ void RegisterThisThread() {}
 void UnregisterThisThread() {}
 void NoteImport(std::string_view, std::string_view) {}
 void DumpMemory(const char*) {}
+void DumpThreads(const char*) {}
 
 } // namespace UnityBridge::MachFault
 

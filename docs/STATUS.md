@@ -1330,4 +1330,16 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
 - **Caches**: the shader stamps and the APK's `.inputs` stamp held absolute paths. Those include the data
   container's UUID, which changed between installs, so every run converted again and rewrote the 808 MB
   APK. Both now compare the path from `/Documents/` on.
-- Waiting for the next device log.
+- **Run 76**: `Unity 6: initJni(Context, 0, "") (registered on com/unity3d/player/UnityPlayer) done`,
+  and the engine logs `Context Type: ActivityOrService`. The NULL-class GetMethodID calls are gone.
+  `executeMainThreadJobs` and `shouldSetGameState` now reach Husk as unimplemented Java methods that
+  return 0. That is right for both: the job queue is empty and there is no game-state manager. The log
+  still ends at the same place, right after a guest thread's stack is mapped (`mmap ... 0x20122`). In
+  Fellworld the next step there is reading the APK through ZipFile. The engine thread's "after 1 s"
+  status line is missing too, so the process either froze completely or ended within about a second.
+  There is no `bionic: exit` or `abort` line.
+- **Hang watch** (`unity_loader.c`, `MachFault::DumpThreads`): probe.log is stderr, so its size shows
+  whether anything is still writing. After 10 s of silence, every thread's name, run state, pc, lr and
+  frame chain are written, symbolized through dladdr and Husk's loader (`UB_HANG`), at most 3 times. An
+  atexit handler does the same for a host `exit()` (`UB_EXIT`). If neither appears, the whole process
+  is stopped (for example on a trap under the debugger) or it was killed.

@@ -31,4 +31,9 @@ void NoteImport(std::string_view dll, std::string_view name);
 // VM tag. Also part of every fault report. Async-signal-unsafe only in that it formats with snprintf.
 void DumpMemory(const char* tag);
 
+// Writes every thread of the process (but the caller) to stderr, prefixed `tag`: its name, run state,
+// pc, lr and frame-pointer chain, each named by image and symbol (Android libraries through Husk's
+// loader). For a hang that leaves no fault: where each thread waits.
+void DumpThreads(const char* tag);
+
 } // namespace UnityBridge::MachFault

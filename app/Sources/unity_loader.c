@@ -987,6 +987,56 @@ static bool start(const char *apk, const char *app_data, const char *frames)
     return started && unity;
 }
 
+// M6: Milf Idle Life (runs 74-76) stopped after UnityMain started, with no fault report and not even
+// this thread's "after 1 s" line. Two causes leave no trace: a hang, or the engine ending the process.
+// probe.log is stderr itself (freopen), so its size says whether anything still writes. 10 s of silence
+// gets every thread's stack (at most 3 times, each after the log has moved again); an exit() gets the
+// stacks too, the exiting thread among them (it waits for the dump).
+void ub_thread_dump(const char *tag);
+static void *thread_dump_main(void *arg) { ub_thread_dump((const char *)arg); return NULL; }
+static void dump_threads_now(const char *tag)
+{
+    pthread_t t;
+    if (pthread_create(&t, NULL, thread_dump_main, (void *)tag) == 0) pthread_join(t, NULL);
+}
+static void on_exit_dump(void)
+{
+    fprintf(stderr, "UB_UNITY the process is exiting (exit() called); the threads:\n");
+    dump_threads_now("UB_EXIT");
+    fflush(stderr);
+}
+static void *hang_watch(void *arg)
+{
+    (void)arg;
+#ifdef __APPLE__
+    pthread_setname_np("UB hang watch");
+#endif
+    off_t last = -1;
+    int quiet = 0, dumps = 0;
+    while (dumps < 3) {
+        sleep(1);
+        fflush(stderr);
+        struct stat st;
+        if (fstat(2, &st) != 0) return NULL;
+        if (st.st_size != last) { last = st.st_size; quiet = 0; continue; }
+        if (++quiet < 10) continue;
+        fprintf(stderr, "UB_UNITY probe.log has been quiet for 10 s (%lu frames so far); the threads:\n", tl_unity_frames());
+        dump_threads_now("UB_HANG");
+        fflush(stderr);
+        dumps++;
+        fstat(2, &st);
+        last = st.st_size;
+        quiet = -50;  // still silent: the next dump after 60 s; once the log moves, after 10 s of silence again
+    }
+    return NULL;
+}
+static void start_hang_watch(void)
+{
+    atexit(on_exit_dump);
+    pthread_t t;
+    if (pthread_create(&t, NULL, hang_watch, NULL) == 0) pthread_detach(t);
+}
+
 // M6: Unity 6000.3 registers initJni as (Context, int contextType, String)V on
 // UnityPlayerForActivityOrService, where Husk's tl_unity_run looks for (Context)V or (Context, int)V on
 // UnityPlayer and so never calls it. The engine keeps the object initJni is called on and finds the
@@ -1093,6 +1143,7 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     line("tl_unity_run: initJni, then the UnityMain thread (surface, resume, nativeRender) ...");
     const bool running = tl_unity_run();
     line("tl_unity_run -> %s", running ? "UnityMain started" : "false");
+    if (running) start_hang_watch();
     char report[2048];
     for (int s = 1; running && s <= 60; s++) {
         sleep(1);

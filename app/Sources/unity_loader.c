@@ -978,6 +978,26 @@ static bool start(const char *apk, const char *app_data, const char *frames)
     return started && unity;
 }
 
+// M6: Unity 6000.3 registers initJni as (Context, int contextType, String)V on
+// UnityPlayerForActivityOrService, where Husk's tl_unity_run looks for (Context)V or (Context, int)V on
+// UnityPlayer and so never calls it. The engine keeps the object initJni is called on and finds the
+// player's Java methods (executeMainThreadJobs, initializeGoogleAr, ...) through its class; without the
+// call it holds no class at all. UnityPlayer.initialize calls it as initJni(context, 0 (ActivityOrService), "").
+jobj *tl_hle_activity(void);
+static void unity6_init_jni(void)
+{
+    static const char kHost[] = "com/unity3d/player/UnityPlayerForActivityOrService";
+    void *fn = tl_jni_native(kHost, "initJni", "(Landroid/content/Context;ILjava/lang/String;)V");
+    if (!fn) return;  // an older player: Husk calls its initJni
+    tl_jni_declare(kHost, "com/unity3d/player/UnityPlayer");
+    jobj *player = tl_jni_new_object(tl_jni_class(kHost));
+    jobj *empty = tl_jni_new_string("");
+    // Fixed arity: AAPCS64 code reads these from registers (env, this, context, int, String).
+    ((void (*)(void *, void *, void *, uintptr_t, void *))fn)(tl_jni_env(), player, tl_hle_activity(), 0, empty);
+    line("Unity 6: %s.initJni(Context, 0, \"\") done%s", kHost, tl_jni_pending() ? " (an exception is pending)" : "");
+    if (tl_jni_pending()) tl_jni_clear();
+}
+
 // M3d: after our own il2cpp_init and tests, the engine loaded up to NativeLoader.load.
 int ub_unity_probe_run(const char *unity_dir, const char *app_data, char *out, size_t capacity)
 {
@@ -1034,6 +1054,7 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     snprintf(frames, sizeof(frames), "%s/../Frames", unity_dir);
     if (!start(apk, app_data, frames)) { ub_unity_thread_leave(); line("UNITY: did not get through NativeLoader.load"); return 1; }
     ub_memory_dump("UB_MEM after NativeLoader.load:");
+    unity6_init_jni();
     line("tl_unity_run: initJni, then the UnityMain thread (surface, resume, nativeRender) ...");
     const bool running = tl_unity_run();
     line("tl_unity_run -> %s", running ? "UnityMain started" : "false");

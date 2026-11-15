@@ -1301,3 +1301,25 @@ scratchpad; none in the repository.
   package; the Windows NSIS installer did not open with 7-Zip): `libunity.so`, `libmain.so`,
   `unity default resources`; `classes.dex` made from the package's `classes.jar` with Google's D8
   (r8 8.5.35, `--min-api 23`, DEX 035). Handed to the user privately, not in the repository.
+
+### M6b: first device run (2026-11-15, Probe IPA run 74)
+
+The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
+
+- **Conversion OK**: graphics APIs `[18, 2] -> [OpenGLES3]`. In total 95 shaders and 1414 GLES3 programs
+  (7 Physics2D/URP debug shaders with UAVs not translated). 1 DXT1, 1 DXT5 and 4 BC7 textures decoded
+  to RGBA32. The APK is 808 MB.
+- libunity 6000.3 loads (484 constructors), NativeLoader.load works, UnityMain starts, and the
+  "Dynamic Heap" allocator comes up. Then the log stops with no fault report, right after a thread
+  stack is mapped.
+- **Cause found**: `unity: native UnityPlayer.initJni(Context;I)V was not registered`, so initJni was
+  never called. libunity 6000.3 registers it as `initJni(Context, int, String)V` on
+  `UnityPlayerForActivityOrService` (found in its JNINativeMethod table). `UnityPlayer.initialize` in
+  `classes.jar` calls it as `initJni(context, 0 /* ActivityOrService */, "")`. Without that call the
+  engine has no player class: `GetMethodID(NULL class, executeMainThreadJobs()V)`, and the same for
+  `initializeGoogleAr` and `shouldSetGameState`.
+- **Fix** (`unity6_init_jni` in `app/Sources/unity_loader.c`, Husk left unmodified): when the 3-argument
+  initJni is registered, it is called on a new `UnityPlayerForActivityOrService` object (declared as a
+  subclass of UnityPlayer) before `tl_unity_run`. `nativeInitWebRequest` no longer exists in Unity 6.
+  Its "not registered" line is harmless.
+- Waiting for the next device log.

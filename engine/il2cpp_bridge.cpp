@@ -7,6 +7,7 @@
 #include "engine/il2cpp_bridge.h"
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -24,6 +25,7 @@ struct Slot {
   uintptr_t target = 0;  // guest address of the export
   bool blocked = false;  // takes a host callback: refused (a Forwarder slot never is)
   bool forwarder = false;
+  bool nullGuard = false;  // a NULL first argument returns 0 without entering the guest (NullGuarded)
 };
 
 struct OverrideEntry {
@@ -54,6 +56,19 @@ constexpr std::string_view kHostCallbackApis[] = {
     "il2cpp_current_thread_walk_frame_stack",
 };
 
+// Functions whose first argument is the MethodInfo, class, field or property they work on. Android's
+// libunity looks up mobile-only managed methods (UnityEngine.AudioSettings/Mobile's
+// InvokeIsStopAudioOutputOnMuteEnabled, ...) that a Windows build's assemblies do not have, logs
+// "Unable to find method", and then still asks about the NULL it got: run 81 faulted in
+// il2cpp_method_get_param_count(NULL) (movzx eax, [rcx+0x52]). The engine treats a 0 answer as
+// "nothing there", which is what it is.
+bool NullGuarded(std::string_view name) {
+  for (const std::string_view prefix : {"il2cpp_method_", "il2cpp_class_", "il2cpp_field_", "il2cpp_property_"}) {
+    if (name.substr(0, prefix.size()) == prefix) return true;
+  }
+  return name == "il2cpp_runtime_invoke" || name == "il2cpp_runtime_invoke_convert_args";
+}
+
 std::mutex g_mutex;
 ExportLookup g_lookup;
 GuestCall g_caller = nullptr;
@@ -67,6 +82,13 @@ Word Forward(size_t index, const Word (&args)[8]) {
   if (slot.blocked || g_caller == nullptr) {
     std::fprintf(stderr, "UB_IL2CPP_BRIDGE %s: %s, returning 0\n", slot.name.c_str(),
                  slot.blocked ? "takes a host callback and has no override" : "no guest caller");
+    return 0;
+  }
+  if (slot.nullGuard && args[0] == 0) {
+    static std::atomic<int> logged {0};
+    if (logged.fetch_add(1) < 32)
+      std::fprintf(stderr, "UB_IL2CPP_BRIDGE %s(NULL, ...): returning 0 (the engine passed a NULL it got from a failed lookup)\n",
+                   slot.name.c_str());
     return 0;
   }
   return g_caller(slot.target, args);
@@ -116,7 +138,8 @@ void* ThunkFor(std::string_view name, bool forwarder) {
     std::fprintf(stderr, "UB_IL2CPP_BRIDGE no thunk left for %.*s\n", static_cast<int>(name.size()), name.data());
     return nullptr;
   }
-  g_slots[g_used] = {std::string(name), *target, !forwarder && TakesHostCallback(name), forwarder};
+  g_slots[g_used] = {std::string(name), *target, !forwarder && TakesHostCallback(name), forwarder,
+                     !forwarder && NullGuarded(name)};
   return reinterpret_cast<void*>(kThunks[g_used++]);
 }
 

@@ -48,6 +48,7 @@ std::map<std::string, uintptr_t> g_exports = {
     {"il2cpp_high_garbage", reinterpret_cast<uintptr_t>(&HighGarbage)},
     {"il2cpp_pointer", reinterpret_cast<uintptr_t>(&Pointer)},
     {"il2cpp_register_log_callback", reinterpret_cast<uintptr_t>(&Echo)},  // exported, but blocked
+    {"il2cpp_method_get_param_count", reinterpret_cast<uintptr_t>(&Echo)},  // NULL-guarded
 };
 
 std::optional<uintptr_t> Lookup(std::string_view name) {
@@ -72,6 +73,11 @@ int main() {
   Check(mulAdd && reinterpret_cast<void*>(mulAdd) != reinterpret_cast<void*>(weighted), "second function, own thunk");
   Check(mulAdd && mulAdd(6, 7, 8) == 50, "short signature (3 args) through the thunk");
 
+  auto* paramCount = reinterpret_cast<uint64_t (*)(uint64_t)>(Bridge::Symbol("il2cpp_method_get_param_count"));
+  const int guestBefore = g_guestCalls;
+  Check(paramCount && paramCount(0) == 0 && g_guestCalls == guestBefore, "NULL method: 0, guest not entered");
+  Check(paramCount && paramCount(1) == (1 ^ 0x5a5a) && g_guestCalls == guestBefore + 1, "non-NULL method reaches the guest");
+
   auto* narrow = reinterpret_cast<int32_t (*)()>(Bridge::Symbol("il2cpp_high_garbage"));
   Check(narrow && narrow() == 5, "int32 result: junk above it is ignored");
   auto* pointer = reinterpret_cast<void* (*)()>(Bridge::Symbol("il2cpp_pointer"));
@@ -91,7 +97,7 @@ int main() {
   for (size_t i = 0;; ++i) {
     const std::string name = "il2cpp_filler_" + std::to_string(i);
     if (Bridge::Symbol(name) == nullptr) {
-      allBound = i + 5 == Bridge::kMaxFunctions;  // the five bound above
+      allBound = i + 6 == Bridge::kMaxFunctions;  // the six bound above
       break;
     }
   }

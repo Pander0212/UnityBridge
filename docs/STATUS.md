@@ -1403,3 +1403,14 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     instruction. At 16 in a row it writes the full fault report (type and code, fault address, guest RIP
     and module offset, guest registers, code words) instead of resuming. An access FEX steps past resets
     the count.
+- **Run 81**: the loop guard fired: `the same pc 0x13e0f7f1c faulted 17 times in a row`. The report: a read
+  at 0x52, guest rip GameAssembly +0x313020 = `il2cpp_method_get_param_count` (a jmp to
+  `movzx eax, byte [rcx+0x52]; ret`) with rcx = 0. So libunity called it with a NULL MethodInfo. It had
+  logged `Unable to find method InvokeIsStopAudioOutputOnMuteEnabled / InvokeOnMuteStateChanged in
+  [UnityEngine.AudioModule.dll]UnityEngine.AudioSettings/Mobile`: Android's engine expects mobile-only
+  managed methods that the game's Windows assemblies do not have, and goes on with the NULL. (FEX's
+  alignment fixup "handled" the null read, which is why it looped instead of ending.)
+  - Fix: the bridge returns 0 without entering the guest when the first argument is NULL for
+    `il2cpp_method_*`, `il2cpp_class_*`, `il2cpp_field_*`, `il2cpp_property_*` and
+    `il2cpp_runtime_invoke(_convert_args)`. The first 32 such calls are logged. Covered by
+    il2cpp-bridge-test.

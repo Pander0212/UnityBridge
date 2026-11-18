@@ -452,6 +452,15 @@ public:
       FEXCore::Config::Load();
       FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
       FEXCore::Config::Set(FEXCore::Config::CONFIG_DISABLETELEMETRY, "1");
+      // UnityBridge (M6): x86's memory order for vector moves and REP MOVS/STOS too. FEX's defaults
+      // keep only scalar loads and stores ordered; MSVC initialises and copies objects with SSE moves
+      // and rep stos, so another core could see a freshly published object with fields still null
+      // (Unity 6, runs 83-84: Stack<T>._array null in URP's RenderGraph, at random). BACHATA_FEX_WEAK_VECTOR_TSO
+      // turns this off again, for comparison.
+      if (std::getenv("BACHATA_FEX_WEAK_VECTOR_TSO") == nullptr) {
+        FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
+        FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
+      }
       const bool traceEnabled = std::getenv("BACHATA_FEX_TRACE") != nullptr;
       FEXCore::Config::Set(FEXCore::Config::CONFIG_X86DISASSEMBLE,
                            traceEnabled ? "1" : "0");

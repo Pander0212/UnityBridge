@@ -2,9 +2,11 @@
 // M4d host checks without game data: the BuildSettings graphics-API rewrite on a synthetic object
 // (written and read back through the 2021.3 type tree) and the LZ4 helpers.
 #include "engine/shader_gles3.h"
+#include "engine/unity_bundle.h"
 #include "engine/unity_textures.h"
 #include "engine/unity_typetree.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -46,7 +48,73 @@ static std::vector<int64_t> Apis(const std::vector<uint8_t>& bytes) {
   return out;
 }
 
+// A UnityFS bundle (format 8) as Addressables builds it for Windows: one serialized file (format 22,
+// player 6000.3.15f1, build target 19) after `pad` bytes of other data, LZ4-compressed blocks info
+// at the end of the file, one LZ4 block.
+static std::vector<uint8_t> MakeBundle(uint32_t target) {
+  auto be = [](std::vector<uint8_t>& o, uint64_t v, int n) { for (int i = n - 1; i >= 0; --i) o.push_back(uint8_t(v >> (8 * i))); };
+  std::vector<uint8_t> file(48, 0);
+  file[11] = 22;  // format
+  const char version[] = "6000.3.15f1";
+  file.insert(file.end(), version, version + sizeof(version));
+  for (int i = 0; i < 4; ++i) file.push_back(uint8_t(target >> (8 * i)));  // little-endian
+  for (int i = 0; i < 100; ++i) file.push_back(uint8_t(i));
+  const auto block = ShaderGles3::Lz4Literals(file);
+  std::vector<uint8_t> info(16, 0xab);
+  be(info, 1, 4);
+  be(info, file.size(), 4); be(info, block.size(), 4); be(info, 3, 2);  // LZ4HC
+  be(info, 1, 4);
+  be(info, 0, 8); be(info, file.size(), 8); be(info, 4, 4);
+  const char path[] = "CAB-0123456789abcdef";
+  info.insert(info.end(), path, path + sizeof(path));
+  const auto packedInfo = ShaderGles3::Lz4Literals(info);
+  std::vector<uint8_t> b = {'U', 'n', 'i', 't', 'y', 'F', 'S', 0};
+  be(b, 8, 4);
+  for (const char* s : {"5.x.x", "6000.3.15f1"}) b.insert(b.end(), s, s + std::strlen(s) + 1);
+  const size_t sizeAt = b.size();
+  be(b, 0, 8);
+  be(b, packedInfo.size(), 4); be(b, info.size(), 4); be(b, 0x40 | 0x80 | 2, 4);
+  b.resize((b.size() + 15) / 16 * 16, 0);
+  b.insert(b.end(), block.begin(), block.end());
+  b.insert(b.end(), packedInfo.begin(), packedInfo.end());
+  for (int i = 0; i < 8; ++i) b[sizeAt + i] = uint8_t(uint64_t(b.size()) >> (56 - 8 * i));
+  return b;
+}
+
 int main() {
+  // M6: a Windows bundle comes back uncompressed, its serialized file retargeted to Android (13),
+  // everything else the same; a bundle that is Android's already is left alone.
+  {
+    const auto windows = MakeBundle(19);
+    UnityBundle::Stats bs;
+    std::string berror;
+    const auto out = UnityBundle::Retarget(windows.data(), windows.size(), &bs, &berror);
+    CHECK(out.has_value() && bs.nodes == 1 && bs.retargeted == 1);
+    if (out) {
+      const auto android = MakeBundle(13);
+      const auto expect = UnityBundle::Retarget(android.data(), android.size(), &bs, &berror);
+      CHECK(!expect && berror.empty());  // nothing to rewrite
+      if (expect || !berror.empty()) std::fprintf(stderr, "  android bundle: %s, error '%s'\n", expect ? "rewritten" : "left", berror.c_str());
+      // The file inside: found as one run of bytes, with target 13 where 19 was.
+      std::vector<uint8_t> file(48, 0);
+      file[11] = 22;
+      const char version[] = "6000.3.15f1";
+      file.insert(file.end(), version, version + sizeof(version));
+      for (uint8_t c : {13, 0, 0, 0}) file.push_back(c);
+      for (int i = 0; i < 100; ++i) file.push_back(uint8_t(i));
+      CHECK(std::search(out->begin(), out->end(), file.begin(), file.end()) != out->end());
+      // Uncompressed: the flags say so, and the file's size field matches.
+      uint64_t sizeField = 0;
+      const size_t sizeAt = 8 + 4 + sizeof("5.x.x") + sizeof("6000.3.15f1");
+      for (int i = 0; i < 8; ++i) sizeField = sizeField << 8 | (*out)[sizeAt + i];
+      CHECK(sizeField == out->size());
+      // Read again: still a bundle, nothing left to rewrite.
+      const auto again = UnityBundle::Retarget(out->data(), out->size(), &bs, &berror);
+      CHECK(!again && berror.empty() && bs.nodes == 1);
+      if (again || !berror.empty()) std::fprintf(stderr, "  re-read: %s, error '%s'\n", again ? "rewritten" : "left", berror.c_str());
+    }
+  }
+
   // A Windows build's list (Direct3D11) becomes [OpenGLES3]; the rest of the object stays.
   const auto windows = MakeSettings({2});
   CHECK(Apis(windows) == std::vector<int64_t>({2}));

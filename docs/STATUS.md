@@ -1449,3 +1449,26 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   - Seen, not acted on: `Curl error 60: Cert verify failed` (UnityTLS has no host interface:
     `il2cpp_unity_install_unitytls_interface` is blocked); `libswappywrapper` missing (frame pacing,
     harmless).
+- **Run 84** (one start, landscape: game view 2556x1179): still black. The same chain as starts 2-3
+  of run 83: `NullReferenceException` in `Stack<T>.Push` from `RenderGraphCompilationCache..ctor`, then
+  `Blitter is already initialized` every frame. Rotation was still refused ("Supported: portrait")
+  despite the app delegate. The game view was landscape anyway, because the phone was held that way.
+  - Addressables now finds `assets/aa/settings.json` and the catalog. The bundles are loaded from the
+    APK (the `aa\StandaloneWindows64\...` paths with backslashes resolve), but refused: "can't be loaded
+    because it was not built with the right version or build target". So the locales are missing
+    ("No Locales were available").
+  - **The NRE**: `Stack<T>._array` null right after `new Stack<T>()`, whose constructor stores
+    `Array.Empty<T>()`, which is never null. A value read before its store is visible is a memory-order
+    problem between cores. FEX ran with its defaults: TSO for scalar accesses, but
+    **`VectorTSOEnabled` and `MemcpySetTSOEnabled` off**. MSVC zeroes and copies objects with SSE moves
+    and `rep stos/movs`, so another core can see a published object whose fields are still stale. Start
+    1 of run 83 worked, which fits a race.
+  - Fix: FEX config sets `VECTORTSOENABLED` and `MEMCPYSETTSOENABLED` (environment
+    `BACHATA_FEX_WEAK_VECTOR_TSO` turns them off, for comparison). This costs some speed.
+  - **Bundles retargeted** (`engine/unity_bundle.{h,cpp}`, called from the import): UnityFS formats 6-8,
+    blocks info at the end or after the header, none/LZ4/LZ4HC (LZMA refused). Every serialized file's
+    build target 2/5/19/24 becomes 13, written back uncompressed. All 18 of the game's bundles
+    (localization tables and locales, monoscripts, unifiedraytracing): UnityPy reads the output with the
+    same objects, byte for byte, and target Android. A synthetic bundle in unity-assets-test covers it
+    (the test found that Stats were not reset per call). Import version 12, so all files are converted
+    again once.

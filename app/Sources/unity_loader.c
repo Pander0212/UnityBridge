@@ -248,7 +248,7 @@ static void convert_shaders(const char *unity_dir, int first)
         base = base ? base + 1 : e->name;
         // Serialized files: no extension (level0, globalgamemanagers, unity default resources) or .assets.
         const char *dot = strrchr(base, '.');
-        if (dot && strcmp(dot, ".assets") != 0) continue;
+        if (dot && strcmp(dot, ".assets") != 0 && strcmp(dot, ".bundle") != 0) continue;  // .bundle: M6, Addressables
         if (!strncmp(e->name, "assets/bin/Data/Managed/", 24)) continue;
         char dst[1100], stamp[1110], want[1400], have[1400] = "";
         // Files in a subfolder get a folder of their own: Resources/unity default resources and the

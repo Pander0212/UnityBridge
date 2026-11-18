@@ -13,6 +13,7 @@
 #include <string>
 
 #include "engine/shader_gles3.h"
+#include "engine/unity_bundle.h"
 #include "engine/unity_file.h"
 #include "engine/unity_textures.h"
 
@@ -59,8 +60,30 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
     Put(log, logcap, "cannot read");
     return 0;
   }
-  // The metadata alone says whether there is a Shader at all; the data is only read for those files.
   std::string error;
+  // M6: an asset bundle (Addressables' StreamingAssets/aa/...): its serialized files retargeted to
+  // Android, written back uncompressed.
+  if (UnityBundle::IsBundle(in.data, in.size)) {
+    UnityBundle::Stats bs;
+    const auto out = UnityBundle::Retarget(in.data, in.size, &bs, &error);
+    if (!out) {
+      Put(log, logcap, error.empty() ? "bundle: " + std::to_string(bs.nodes) + " files, none with a desktop build target"
+                                     : "bundle: " + error);
+      return 0;
+    }
+    const std::string tmp = std::string(dst) + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    const bool ok = f && std::fwrite(out->data(), 1, out->size(), f) == out->size();
+    if ((f && std::fclose(f) != 0) || !ok || std::rename(tmp.c_str(), dst) != 0) {
+      std::remove(tmp.c_str());
+      Put(log, logcap, "write failed");
+      return -1;
+    }
+    Put(log, logcap, "bundle: " + std::to_string(bs.nodes) + " files, " + std::to_string(bs.retargeted) +
+                         " retargeted to Android, written uncompressed");
+    return 1;
+  }
+  // The metadata alone says whether there is a Shader at all; the data is only read for those files.
   const auto file = UnityFile::Parse(in.data, in.size, &error);
   if (!file) {
     Put(log, logcap, error);
@@ -171,7 +194,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 11; }
+extern "C" int ub_shader_import_version(void) { return 12; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

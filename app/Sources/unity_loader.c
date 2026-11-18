@@ -1048,6 +1048,40 @@ static bool start(const char *apk, const char *app_data, const char *frames)
     return started && unity;
 }
 
+// M6: Unity 6 posts work to the Android UI thread through that thread's ALooper, which libunity's
+// JNI_OnLoad takes with ALooper_forThread. Husk's loopers are per thread and made by ALooper_prepare,
+// which nothing had called on the thread that loads the engine. That gave "Couldn't retrieve native
+// ALooper for UI thread", and run 79 faulted at libunity +0xabb708 posting to the null looper. This
+// thread stands in for the UI thread: it prepares a looper before the engine loads, and polls it (which
+// runs the posted callbacks) instead of sleeping, for as long as the engine runs.
+typedef void *(*alooper_prepare_fn)(int opts);
+typedef int (*alooper_poll_fn)(int timeout_ms, int *out_fd, int *out_events, void **out_data);
+static alooper_poll_fn g_ui_poll;
+static int g_unity6;  // the Unity 6 initJni was called: the engine posts to the UI thread's looper
+void *tl_bionic_find(const char *name);
+static void ui_looper_prepare(void)
+{
+    alooper_prepare_fn prepare = (alooper_prepare_fn)tl_bionic_find("ALooper_prepare");
+    g_ui_poll = (alooper_poll_fn)tl_bionic_find("ALooper_pollOnce");
+    void *looper = prepare ? prepare(0) : NULL;
+    line("UI thread: ALooper %p on this thread (ALooper_pollOnce %s)", looper, g_ui_poll ? "found" : "missing");
+}
+// Runs the UI thread's posted callbacks for `ms` milliseconds (or just sleeps, without a looper).
+static void ui_looper_run(int ms)
+{
+    if (!g_ui_poll) { usleep((useconds_t)ms * 1000); return; }
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        const long spent = (long)(t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000;
+        if (spent >= ms) return;
+        int fd, events;
+        void *data;
+        g_ui_poll((int)(ms - spent), &fd, &events, &data);
+    }
+}
+
 // M6: Milf Idle Life (runs 74-76) stopped after UnityMain started, with no fault report and not even
 // this thread's "after 1 s" line. Two causes leave no trace: a hang, or the engine ending the process.
 // probe.log is stderr itself (freopen), so its size says whether anything still writes. 10 s of silence
@@ -1135,6 +1169,7 @@ static void unity6_init_jni(void)
         }
         return;  // an older player: Husk calls its initJni
     }
+    g_unity6 = 1;
     tl_jni_declare(kHost, "com/unity3d/player/UnityPlayer");
     jobj *player = tl_jni_new_object(tl_jni_class(kHost));
     jobj *empty = tl_jni_new_string("");
@@ -1198,6 +1233,7 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     ub_memory_dump("UB_MEM before the engine:");
     char frames[1100];
     snprintf(frames, sizeof(frames), "%s/../Frames", unity_dir);
+    ui_looper_prepare();  // before libunity's JNI_OnLoad takes the UI thread's looper
     if (!start(apk, app_data, frames)) { ub_unity_thread_leave(); line("UNITY: did not get through NativeLoader.load"); return 1; }
     ub_memory_dump("UB_MEM after NativeLoader.load:");
     // M6: JNI lookups (FindClass, Get*MethodID, unanswered Java methods) for the first 10 s of Unity 6's start.
@@ -1209,7 +1245,7 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     if (running) start_hang_watch();
     char report[2048];
     for (int s = 1; running && s <= 60; s++) {
-        sleep(1);
+        ui_looper_run(1000);
         if (s == 10) tl_jni_set_trace(0);
         if (s == 1 || s == 5 || s == 10 || s == 30 || s == 60) {
             ub_il2cpp_engine_report(report, sizeof(report));
@@ -1221,6 +1257,11 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
         }
     }
     line("UNITY: %s, %lu frames", running ? "engine running" : "UnityMain did not start", tl_unity_frames());
+    if (running && g_unity6 && g_ui_poll) {
+        // Unity 6 keeps posting to the UI thread for as long as it runs: this thread goes on serving it.
+        line("UI thread: serving the engine's looper from here on");
+        for (;;) ui_looper_run(60000);
+    }
     ub_unity_thread_leave();
     return running ? 0 : 1;
 }

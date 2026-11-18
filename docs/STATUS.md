@@ -1374,3 +1374,15 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   - Cache: the two Resources/ files were converted once more (expected, since their stamps moved to
     `shaders/Resources/`), and the APK was rewritten for that reason. From the next start on, both should
     come from the cache.
+- **Run 79**: big step. With `Class.forName(String, boolean, ClassLoader)` answered, the engine got
+  through its JNI set-up (display, configuration, orientation), printed `Company Name: Bosom` and
+  `Product Name: Milf Idle Life`, created its EGL context on ANGLE (ES 3.1 and 3.2 refused, 3.0 taken:
+  `GL_VERSION = OpenGL ES 3.0 (ANGLE ...)`, Apple A16) and resolved the GL functions. Then:
+  `loadLibrary("libswappywrapper")` (Java, unanswered, returns false). The dlopen fails as expected, and
+  the engine faults at libunity +0xabb708: `ldrb w8, [x0, #0xe8]` with x0 = 0. That function belongs to
+  the object that posts work to the Android UI thread (mutex, condition, pipe), and the null is the UI
+  thread's ALooper, which the engine never got ("Couldn't retrieve native ALooper for UI thread" at
+  JNI_OnLoad).
+  - Fix: the engine-run thread stands in for the UI thread. It calls Husk's `ALooper_prepare` before
+    libunity's JNI_OnLoad and polls the looper (`ALooper_pollOnce`, which runs the posted callbacks)
+    instead of sleeping. For Unity 6 it keeps doing that after the 60 s status loop.

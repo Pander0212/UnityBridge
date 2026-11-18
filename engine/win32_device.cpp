@@ -424,6 +424,20 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   if (!missingOk) report.Line("  rax=%#llx, recorded as unimplemented: %s", static_cast<unsigned long long>(m.rax), logged ? "yes" : "no");
   report.Line("%-40s %s", "unimplemented import returns 0", missingOk ? "ok" : "FAIL");
 
+  // M6: VirtualQuery on the DLL's own pages (the GC's root search), and the nonvolatile registers at an
+  // __except after an unwind, here through FEX and the bridge's resume (the host test covers the
+  // unwinder alone; run 86 found r14 wrong after a catch in GameAssembly).
+  if (const auto vq = image.Export("ub_test_vquery")) {
+    const auto v = CallWindows(guest, report, *vq, {});
+    const auto vbits = static_cast<uint32_t>(v.rax);
+    const bool vqOk = v.ok && (vbits & 0x7f) == 0x7f;
+    const bool nvOk = v.ok && (vbits & 0x80);
+    failures += !vqOk + !nvOk;
+    report.Line("%-40s %s", "VirtualQuery: image pages by section", vqOk ? "ok" : "FAIL");
+    report.Line("%-40s %s", "SEH: nonvolatile registers at __except", nvOk ? "ok" : "FAIL");
+    if (!nvOk) report.Line("  wrong (rbx rsi rdi r12 r13 r14 r15 xmm6 xmm15): %#x", vbits >> 8);
+  }
+
   RunTlsCallbacksOn(guest, Win32::DLL_PROCESS_DETACH);
   MachFault::UnregisterThisThread();
   Win32::FreeThreadTls(guest.tls);

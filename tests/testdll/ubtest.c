@@ -166,6 +166,49 @@ __declspec(noinline) static void SehMiddle(void) {
   __try { SehInnermost(); } __finally { g_finallyRan = 1; }
 }
 
+// Nonvolatile registers across an exception (M6, run 86: r14 wrong after a catch in GameAssembly).
+// The raising frame saves rbx, rsi, rdi, r12-r15 and xmm6-xmm15 in its prologue (the clobbers make
+// the compiler do so, with unwind codes), overwrites them and raises; the unwind to the __except
+// frame must give them back as they were at the call.
+__declspec(noinline) void SehClobberAndRaise(void) {  // external: called by name from asm
+  __asm__ volatile(
+      "mov $0x0bad0001, %%rbx\n mov $0x0bad0002, %%rsi\n mov $0x0bad0003, %%rdi\n"
+      "mov $0x0bad0004, %%r12\n mov $0x0bad0005, %%r13\n mov $0x0bad0006, %%r14\n mov $0x0bad0007, %%r15\n"
+      "pcmpeqd %%xmm6, %%xmm6\n pcmpeqd %%xmm7, %%xmm7\n pcmpeqd %%xmm8, %%xmm8\n pcmpeqd %%xmm9, %%xmm9\n"
+      "pcmpeqd %%xmm10, %%xmm10\n pcmpeqd %%xmm11, %%xmm11\n pcmpeqd %%xmm12, %%xmm12\n"
+      "pcmpeqd %%xmm13, %%xmm13\n pcmpeqd %%xmm14, %%xmm14\n pcmpeqd %%xmm15, %%xmm15\n" ::
+          : "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
+            "xmm12", "xmm13", "xmm14", "xmm15");
+  RaiseException(0xE0004444u, 0, 0, 0);
+}
+// Sets known values in the nonvolatile registers, calls the raiser inside __try and reads them back
+// in the __except block; 0 if all came back, else a bit per wrong register.
+__declspec(noinline) static int SehNonvolatiles(void) {
+  unsigned long long got[7] = {0};
+  unsigned long long x6 = 0, x15 = 0;
+  __try {
+    __asm__ volatile(
+        "mov $0x1001, %%rbx\n mov $0x1002, %%rsi\n mov $0x1003, %%rdi\n mov $0x1004, %%r12\n"
+        "mov $0x1005, %%r13\n mov $0x1006, %%r14\n mov $0x1007, %%r15\n"
+        "mov $0x6006, %%eax\n movq %%rax, %%xmm6\n mov $0xf00f, %%eax\n movq %%rax, %%xmm15\n" ::
+            : "rax", "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15", "xmm6", "xmm15");
+    SehClobberAndRaise();  // a call the compiler sees, so the __except stays reachable
+  } __except (GetExceptionCode() == 0xE0004444u ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+    __asm__ volatile(
+        "mov %%rbx, 0(%0)\n mov %%rsi, 8(%0)\n mov %%rdi, 16(%0)\n mov %%r12, 24(%0)\n"
+        "mov %%r13, 32(%0)\n mov %%r14, 40(%0)\n mov %%r15, 48(%0)\n" ::"r"(got)
+        : "memory");
+    __asm__ volatile("movq %%xmm6, %0\n movq %%xmm15, %1\n" : "=r"(x6), "=r"(x15));
+  }
+  int bad = 0;  // a bit per register that came back wrong: rbx rsi rdi r12 r13 r14 r15 xmm6 xmm15
+  // rsi is left out: the compiler keeps its own value there across the call (the asm told it rsi is
+  // free), so what the __except block finds in it is the compiler's, not the test's.
+  for (int i = 0; i < 7; ++i) if (i != 1 && got[i] != 0x1001ull + (unsigned)i) bad |= 1 << i;
+  if (x6 != 0x6006) bad |= 1 << 7;
+  if (x15 != 0xf00f) bad |= 1 << 8;
+  return bad;
+}
+
 static int Append(WCHAR* to, int at, const char* text) {
   while (*text) to[at++] = (WCHAR)*text++;
   to[at] = 0;
@@ -686,6 +729,9 @@ __declspec(dllexport) int ub_test_vquery(void) {
     ok |= 16;
   if (VirtualQuery(&__ImageBase - 0x1000, mbi, 48) == 48 && *(char**)(mbi + 8) == 0) ok |= 32;  // below the image
   if (VirtualQuery((const void*)&g_vqBss, mbi, 48) == 48 && *(DWORD*)(mbi + 36) == 0x04) ok |= 64;
+  const int nv = SehNonvolatiles();
+  if (nv == 0) ok |= 128;
+  ok |= nv << 8;  // which ones, for the report
   return ok;
 }
 

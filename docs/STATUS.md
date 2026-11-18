@@ -1506,3 +1506,14 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   - Next diagnosis: the SEH trace (now the first 8 C++ exceptions) prints each exception's frame
     chain as module offsets (`UB_SEH  frames: +... +...`, unwound with the module's .pdata). That gives
     the il2cpp method and the null check that throws, to disassemble in GameAssembly.
+- **Crash 2 of run 86, analysed**: +0x4a60a6 is a catch continuation (code right after a C++ catch).
+  Just before it, `test byte [rax+0x135], 1` with rax = [[r14+0x38]+0x18] read at 0x135, so r14 (a
+  nonvolatile register) was wrong after the catch. Is the resume's nonvolatile state wrong?
+  - New test-DLL check (`SehNonvolatiles`, in `ub_test_vquery`): a frame sets rbx, rdi, r12-r15,
+    xmm6, xmm15. A deeper frame saves (unwind codes), overwrites and raises, and the `__except` reads
+    them back. On the host, through the unwinder and the guest `__C_specific_handler`: **all
+    correct** (rsi is left out, because the compiler keeps its own value in it). A first version was
+    invalid: clang dropped the `__except` because asm cannot throw, which the test now avoids.
+  - The device resume path differs: FEX's HLE return with `frame.gpr`. The Windows DLL test on the
+    iPhone ("Run Windows DLL test") now runs the same check, so it shows whether FEX keeps nonvolatile
+    registers that the bridge changed on a resume.

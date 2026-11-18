@@ -729,6 +729,17 @@ __declspec(dllexport) int ub_test_vquery(void) {
     ok |= 16;
   if (VirtualQuery(&__ImageBase - 0x1000, mbi, 48) == 48 && *(char**)(mbi + 8) == 0) ok |= 32;  // below the image
   if (VirtualQuery((const void*)&g_vqBss, mbi, 48) == 48 && *(DWORD*)(mbi + 36) == 0x04) ok |= 64;
+  // A stack address, as Boehm GC's GC_get_stack_base asks: committed, writable, and the region
+  // reaching from the page up past this frame (BaseAddress + RegionSize is taken as the stack top).
+  {
+    volatile int local = 1;
+    if (VirtualQuery((const void*)&local, mbi, 48) == 48) {
+      char* base = *(char**)mbi;
+      unsigned long long size = *(unsigned long long*)(mbi + 24);
+      DWORD state = *(DWORD*)(mbi + 32), protect = *(DWORD*)(mbi + 36);
+      if (state == 0x1000 && protect == 0x04 && base <= (char*)&local && base + size > (char*)&local + 64) ok |= 1 << 20;
+    }
+  }
   const int nv = SehNonvolatiles();
   if (nv == 0) ok |= 128;
   ok |= nv << 8;  // which ones, for the report

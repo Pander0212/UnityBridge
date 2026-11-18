@@ -1522,3 +1522,20 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   (no minute limit). The workflow now runs on `macos-latest` (a manual dispatch can name another label)
   and picks the newest Xcode 26 on the image itself instead of a fixed `Xcode_26.6.app`. The ANGLE
   and ccache caches are keyed independently of the image.
+- **Run 89 (frame chain): found it.** The NRE is thrown at GameAssembly +0x7f6a25. That is
+  `Stack<T>.Push` (reference T): `_array` at `this+0x10` is null. It is called from
+  `RenderGraphCompilationCache..ctor` (+0x199bd23), on the second pool's first Push. Both Stacks were
+  just built by the same shared constructor (+0x6ed530), which stores `EmptyArray<T>.Value` from
+  the class's static fields. The object had been zeroed under the constructor's feet.
+  **The cause is the GC again, this time the stacks**: BDWGC's Windows `GC_get_stack_base` takes a
+  thread's stack top from `VirtualQuery(sp)` (BaseAddress + RegionSize, if committed and writable).
+  Our VirtualQuery answered MEM_FREE/PAGE_NOACCESS for everything not VirtualAlloc'd, every stack
+  included, so the GC took each stack as 0 bytes and never scanned one. Objects only a stack held (a
+  new RenderGraphCompilationCache and its pools) were collected at the first collection and reused
+  zeroed. That happens at the same allocation count every run, so it is deterministic. Run 83's one
+  good start just collected at a different moment.
+  - Fix: VirtualQuery asks the host for memory it did not VirtualAlloc (`vm_region_64` on iOS,
+    `/proc/self/maps` on Linux). A mapped region is MEM_COMMIT (or MEM_RESERVE if PROT_NONE) with its
+    real start and end and its protections as Windows flags. Unmapped is MEM_FREE up to the next
+    mapping. The test DLL checks a stack local: committed, PAGE_READWRITE, the region reaching past
+    the frame. It also runs in the device's Windows DLL test.

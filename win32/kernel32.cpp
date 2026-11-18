@@ -12,11 +12,15 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <thread>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <pthread.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
 #else
@@ -192,6 +196,57 @@ uint64_t VirtualProtect(CallContext& c) {
   return kTrue;
 }
 
+// The host mapping at or after `address`: [start, end) and its protection; nullopt if nothing is
+// mapped at or above it. Used by VirtualQuery for memory the guest did not VirtualAlloc: thread
+// stacks above all.
+struct HostRegionInfo {
+  uintptr_t start = 0, end = 0;
+  int prot = 0;
+};
+std::optional<HostRegionInfo> HostRegionAtOrAfter(uintptr_t address) {
+#if defined(__APPLE__)
+  vm_address_t start = static_cast<vm_address_t>(address);
+  vm_size_t size = 0;
+  vm_region_basic_info_data_64_t info {};
+  mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object = MACH_PORT_NULL;
+  if (vm_region_64(mach_task_self(), &start, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info),
+                   &count, &object) != KERN_SUCCESS)
+    return std::nullopt;
+  if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+  int prot = 0;
+  if (info.protection & VM_PROT_READ) prot |= PROT_READ;
+  if (info.protection & VM_PROT_WRITE) prot |= PROT_WRITE;
+  if (info.protection & VM_PROT_EXECUTE) prot |= PROT_EXEC;
+  return HostRegionInfo {start, start + size, prot};
+#else
+  FILE* maps = std::fopen("/proc/self/maps", "r");
+  if (!maps) return std::nullopt;
+  std::optional<HostRegionInfo> found;
+  char line[512];
+  while (std::fgets(line, sizeof(line), maps)) {
+    unsigned long long a = 0, b = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%llx-%llx %7s", &a, &b, perms) != 3 || b <= address) continue;
+    int prot = 0;
+    if (perms[0] == 'r') prot |= PROT_READ;
+    if (perms[1] == 'w') prot |= PROT_WRITE;
+    if (perms[2] == 'x') prot |= PROT_EXEC;
+    found = HostRegionInfo {static_cast<uintptr_t>(a), static_cast<uintptr_t>(b), prot};
+    break;
+  }
+  std::fclose(maps);
+  return found;
+#endif
+}
+
+DWORD WindowsProtection(int prot) {
+  if (prot & PROT_EXEC) return (prot & PROT_WRITE) ? PAGE_EXECUTE_READWRITE : (prot & PROT_READ) ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
+  if (prot & PROT_WRITE) return PAGE_READWRITE;
+  if (prot & PROT_READ) return PAGE_READONLY;
+  return PAGE_NOACCESS;
+}
+
 uint64_t VirtualQuery(CallContext& c) {
   // MEMORY_BASIC_INFORMATION (48 bytes): BaseAddress, AllocationBase, AllocationProtect(4),
   // PartitionId(2)+pad, RegionSize, State(4), Protect(4), Type(4).
@@ -228,10 +283,26 @@ uint64_t VirtualQuery(CallContext& c) {
   const auto it = FindReservation(address);
   const uintptr_t page = address & ~(pageSize - 1);
   if (it == g_reservations.end()) {
-    // Not ours (host memory, a guest stack): one free page, as before. Larger answers would change
-    // what callers derive from it (stack bounds from BaseAddress + RegionSize).
+    // Not VirtualAlloc'd (thread stacks, the host's heap): what the host has mapped there. Boehm GC
+    // takes a thread's stack top from this, GC_get_stack_base: VirtualQuery(sp) and BaseAddress +
+    // RegionSize when the page is committed and writable. Answering MEM_FREE (as this did) made
+    // every stack 0 bytes, so the GC never scanned a stack and freed objects only a stack referred
+    // to: URP's RenderGraphCompilationCache lost its fields right after construction (Stack<T>._array
+    // null, runs 83-89).
+    const auto host = HostRegionAtOrAfter(page);
+    if (host && host->start <= page) {
+      Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
+      Store<uint64_t>(reinterpret_cast<uint64_t>(info + 8), host->start);
+      Store<DWORD>(reinterpret_cast<uint64_t>(info + 16), WindowsProtection(host->prot ? host->prot : PROT_READ | PROT_WRITE));
+      Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), host->end - page);
+      Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), host->prot ? MEM_COMMIT : MEM_RESERVE);
+      Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), host->prot ? WindowsProtection(host->prot) : 0);
+      Store<DWORD>(reinterpret_cast<uint64_t>(info + 40), MEM_PRIVATE);
+      return 48;
+    }
+    // Nothing mapped here: free up to the next mapping.
     Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
-    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), pageSize);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), host && host->start > page ? host->start - page : pageSize);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_FREE);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), PAGE_NOACCESS);
     return 48;

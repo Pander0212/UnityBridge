@@ -186,6 +186,7 @@ int main(int argc, char** argv) {
     const int v = reinterpret_cast<AllFn>(*vq)();
     Check((v & 0x7f) == 0x7f, "VirtualQuery: image pages MEM_IMAGE, committed, by section");
     if ((v & 0x7f) != 0x7f) std::printf("  VirtualQuery bits %#x\n", v);
+    Check(v & (1 << 20), "VirtualQuery: a stack address is committed, RW, up to the stack top");
     Check(v & 0x80, "SEH: nonvolatile GPRs and xmm6-15 restored at the __except");
     if (!(v & 0x80)) std::printf("  wrong after the unwind (rbx rsi rdi r12 r13 r14 r15 xmm6 xmm15): %#x\n", v >> 8);
   } else {

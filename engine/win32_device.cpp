@@ -430,10 +430,11 @@ extern "C" int ub_win32_device_run(const char* dllPath, const char* profileDir, 
   if (const auto vq = image.Export("ub_test_vquery")) {
     const auto v = CallWindows(guest, report, *vq, {});
     const auto vbits = static_cast<uint32_t>(v.rax);
-    const bool vqOk = v.ok && (vbits & 0x7f) == 0x7f;
+    const bool vqOk = v.ok && (vbits & 0x7f) == 0x7f && (vbits & (1u << 20));
     const bool nvOk = v.ok && (vbits & 0x80);
     failures += !vqOk + !nvOk;
-    report.Line("%-40s %s", "VirtualQuery: image pages by section", vqOk ? "ok" : "FAIL");
+    report.Line("%-40s %s", "VirtualQuery: image by section, stack", vqOk ? "ok" : "FAIL");
+    if (!vqOk) report.Line("  VirtualQuery bits %#x (0x7f image, 0x100000 stack)", vbits & 0x10007f);
     report.Line("%-40s %s", "SEH: nonvolatile registers at __except", nvOk ? "ok" : "FAIL");
     if (!nvOk) report.Line("  wrong (rbx rsi rdi r12 r13 r14 r15 xmm6 xmm15): %#x", vbits >> 8);
   }

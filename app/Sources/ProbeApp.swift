@@ -9,10 +9,21 @@ import UIKit
 /// app asks StikDebug itself, passing its process ID and the debugger script (madeira-jit.js).
 @main
 struct ProbeApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     init() { ProbeLog.redirectStderr() }
 
     var body: some Scene {
         WindowGroup { ProbeView() }
+    }
+}
+
+/// The orientations the app allows right now (Orientation.request changes them): iOS asks the app
+/// delegate, and without one the game screen stayed in portrait ("Supported: portrait", run 83).
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    static var orientations: UIInterfaceOrientationMask = .allButUpsideDown
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        AppDelegate.orientations
     }
 }
 

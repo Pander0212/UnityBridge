@@ -1423,3 +1423,29 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     il2cpp's own `ArgumentNullException("method")`, made by the guest export
     `il2cpp_get_exception_argument_null`. The engine then takes its error path. Covered by
     il2cpp-bridge-test.
+- **Run 83: Milf Idle Life renders on the iPhone.** First start: 67 frames after 5 s, 211 after 10 s,
+  526 when the hang watch looked, all presented through ANGLE/Metal. The user saw the game's picture and
+  the game loading, in portrait, because the rotation request was refused ("Supported: portrait"). Unity 6
+  is the second engine version running under UnityBridge.
+  - Start 2 (phone held landscape, game view 2556x1179) and start 3 (portrait): the URP pipeline
+    constructor threw `NullReferenceException` in `Stack<T>.Push` (RenderGraphCompilationCache..ctor,
+    RenderGraph.cs:649). Every later frame then threw `Blitter is already initialized` (1332 times), so
+    nothing was drawn. Start 1 did not hit this: its managed exception at the same moment was an
+    `IndexOutOfRangeException` elsewhere, and rendering came up. Nondeterministic. Open: a race (memory
+    ordering, class init) is the leading suspect.
+  - Start 2 ended with the loop guard: a write (`stlur`, code 2 = protection) to 0x12b366000, a
+    page-aligned buffer being zeroed, in no traced mmap. Fault reports now print the VM region that holds
+    the fault address (range, protections, tag).
+  - **Rotation fixed**: an app delegate supplies the allowed orientations
+    (`application(_:supportedInterfaceOrientationsFor:)`). The game screen allows only landscape and tells
+    the view controllers on screen to ask again before requesting the rotation. Closing the game allows
+    all orientations but upside down again.
+  - **StreamingAssets → APK `assets/`**: Addressables asked for
+    `jar:file://.../base.apk!/assets/aa/settings.json` and got 404, then "No Locale could be selected".
+    On Android `Application.streamingAssetsPath` is the APK's `assets/`, so `<Game>_Data/StreamingAssets`
+    now goes there (and no longer under assets/bin/Data). The bundles (`aa/StandaloneWindows64/*.bundle`,
+    localization tables, ...) are Windows builds: text loads, but D3D shaders or BC textures inside
+    bundles are not converted yet (UnityFS bundles are a next step).
+  - Seen, not acted on: `Curl error 60: Cert verify failed` (UnityTLS has no host interface:
+    `il2cpp_unity_install_unitytls_interface` is blocked); `libswappywrapper` missing (frame pacing,
+    harmless).

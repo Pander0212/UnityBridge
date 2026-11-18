@@ -449,9 +449,15 @@ static bool make_apk(const char *unity_dir, const char *game_data, char *apk, si
         if (!add_entry(name, p)) { line("missing %s", p); return false; }
     }
     if (game_data) {
-        static const char *const skip[] = {"il2cpp_data", "Plugins", NULL};
+        static const char *const skip[] = {"il2cpp_data", "Plugins", "StreamingAssets", NULL};
         const int before = g_nentries;
         add_tree(game_data, "assets/bin/Data", skip, 0);
+        // StreamingAssets: <Game>_Data/StreamingAssets on Windows, the APK's assets/ itself on Android
+        // (Application.streamingAssetsPath = jar:file://<apk>!/assets). Addressables reads
+        // {streamingAssetsPath}/aa/settings.json and its catalog and bundles from there (run 83: 404 for
+        // assets/aa/settings.json, then "No Locale could be selected").
+        snprintf(p, sizeof(p), "%s/StreamingAssets", game_data);
+        add_tree(p, "assets", NULL, 0);
         // il2cpp's data (Metadata/, Resources/): <Game>_Data/il2cpp_data on Windows, assets/bin/Data/Managed
         // on Android, which the engine copies to files/il2cpp before it starts il2cpp ("Not enough
         // storage space to install required resources" when it is missing).

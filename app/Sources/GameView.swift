@@ -104,14 +104,25 @@ struct GameScreen: View {
         .background(Color.black)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .onAppear { Orientation.request(.landscapeRight) }
+        .onAppear { Orientation.request(.landscape) }
+        .onDisappear { Orientation.request(.allButUpsideDown) }
     }
 }
 
 enum Orientation {
+    /// Allows only `mask` and turns the screen to it: the app delegate's answer changes first, then
+    /// every view controller on screen is told to ask again, then the scene is asked to rotate.
     static func request(_ mask: UIInterfaceOrientationMask) {
         guard let scene = UIApplication.shared.connectedScenes.first(where: { $0 is UIWindowScene }) as? UIWindowScene
         else { return }
+        AppDelegate.orientations = mask
+        for window in scene.windows {
+            var controller = window.rootViewController
+            while let current = controller {
+                current.setNeedsUpdateOfSupportedInterfaceOrientations()
+                controller = current.presentedViewController
+            }
+        }
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
             ProbeLog.write("orientation request refused: \(error.localizedDescription)")
         }

@@ -341,6 +341,22 @@ struct ExcReply {
     WriteStr(buf);
     WriteStr("\n");
   }
+  // Which mapping holds the fault address (run 83: a write to 0x12b366000, code 2 = protection, that no
+  // traced mmap named): its range, protections and VM tag.
+  if (slot->faultAddr) {
+    vm_address_t start = static_cast<vm_address_t>(slot->faultAddr);
+    vm_size_t size = 0;
+    natural_t depth = 0;
+    vm_region_submap_info_data_64_t info {};
+    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+    if (vm_region_recurse_64(mach_task_self(), &start, &size, &depth, reinterpret_cast<vm_region_recurse_info_t>(&info),
+                             &count) == KERN_SUCCESS) {
+      std::snprintf(buf, sizeof(buf), "UB_FAULT fault address in region %#llx-%#llx prot %d max %d tag %u%s\n",
+                    static_cast<unsigned long long>(start), static_cast<unsigned long long>(start + size), info.protection,
+                    info.max_protection, info.user_tag, start > slot->faultAddr ? " (no region contains it; next one shown)" : "");
+      WriteStr(buf);
+    }
+  }
   WriteStr("UB_FAULT ==== end of fault report; exiting ====\n");
   _exit(70);
 }

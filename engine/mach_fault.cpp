@@ -66,6 +66,8 @@ struct Slot {
   int type = 0;
   volatile sig_atomic_t resumeReady = 0;   // the trampoline's next fault is the resume request
   volatile sig_atomic_t inTrampoline = 0;  // a fault inside the trampoline itself goes to the report
+  uint64_t lastPc = 0;                     // the previous fault's host pc on this thread
+  unsigned repeats = 0;                    // how many faults in a row were at lastPc
 };
 
 struct FixedSite {
@@ -357,6 +359,18 @@ struct ExcReply {
 
   auto& ss = slot->mc.__ss;
   const auto pc = (uint64_t)(arm_thread_state64_get_pc(ss));  // uint64 (arm64) or void* (arm64e)
+  // A fixed-up site does not fault again. One that keeps faulting was not an access FEX's fixup
+  // removes (run 80: UnityMain spun on one JIT pc for minutes, a black screen and no report): after
+  // 16 in a row it gets the report instead of another resume.
+  slot->repeats = pc == slot->lastPc ? slot->repeats + 1 : 0;
+  slot->lastPc = pc;
+  if (slot->repeats >= 16) {
+    char note[160];
+    std::snprintf(note, sizeof(note), "\nUB_FAULT the same pc %#llx faulted %u times in a row: a fault loop, not a fixable access\n",
+                  static_cast<unsigned long long>(pc), slot->repeats + 1);
+    WriteStr(note);
+    Report(slot);
+  }
   bool fixed = false;
   {
     std::lock_guard lock {g_fixMutex};
@@ -385,6 +399,9 @@ struct ExcReply {
     }
   }
   if (!fixed) Report(slot);
+  // An access FEX emulated and stepped past (resume after pc) may fault again legitimately, the next
+  // time a guest loop comes by: only re-runs of the same instruction count as a loop.
+  if ((uint64_t)(arm_thread_state64_get_pc(ss)) > pc) { slot->repeats = 0; slot->lastPc = 0; }
 
   // Hand the fixed-up state to the service thread, which loads it into this thread when the
   // deliberate fault below arrives.

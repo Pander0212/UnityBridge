@@ -1386,3 +1386,20 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   - Fix: the engine-run thread stands in for the UI thread. It calls Husk's `ALooper_prepare` before
     libunity's JNI_OnLoad and polls the looper (`ALooper_pollOnce`, which runs the posted callbacks)
     instead of sleeping. For Unity 6 it keeps doing that after the 60 s status loop.
+- **Run 80: the engine runs**. No crash for 1-2 minutes. The UI-thread looper works:
+  `ALooper 0x... on this thread`, and the engine got past the former fault. Unity's start-up banner:
+  `Built from '6000.3/staging' branch, Version '6000.3.15f1'`, `Device Model 'Google Pixel 8'`,
+  `ApplicationInfo ... Target API Level '36'`. il2cpp started inside the engine: 1862 InternalCalls
+  registered, 10 callbacks wrapped, 236 il2cpp dlsym. Only three WinRT imports are unimplemented
+  (RoSetErrorReportingFlags, WindowsCreateStringReference, RoGetActivationFactory). 23-27 threads.
+  **2 frames, 0 presented, a black screen.**
+  - Hang dumps (3 of them, 10 s and 60 s apart): every worker waits in its futex, as expected for an
+    idle engine. **UnityMain is RUNNING at one fixed pc** (0x127a17aac) inside FEX's 16 MiB code buffer
+    (translated GameAssembly code), with lr in FEX's dispatcher. In one dump it sits in
+    `MachFault::Trampoline`, and the Mach service thread is busy with `thread_set_state`. That is a
+    fault loop: an access faults, the handler finds the site in its "already fixed" table and re-runs
+    it, and it faults again, without end.
+  - Fix (diagnosis): a slot counts faults in a row at the same host pc whose resume re-runs the same
+    instruction. At 16 in a row it writes the full fault report (type and code, fault address, guest RIP
+    and module offset, guest registers, code words) instead of resuming. An access FEX steps past resets
+    the count.

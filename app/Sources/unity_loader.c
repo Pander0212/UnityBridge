@@ -586,7 +586,13 @@ static mmap_fn g_bionic_mmap;
 static munmap_fn g_bionic_munmap;
 static mprotect_fn g_bionic_mprotect;
 static madvise_fn g_bionic_madvise;
-#define UB_REGION_HEAD ((size_t)64 << 20)
+// How much of a window is reserved up front. The whole window (M8): the rest used to be mapped on demand
+// by ub_mprotect, which can fail once another mapping has landed behind the head ("no room to commit",
+// run 94: a 64 MiB allocation at start-up, as soon as mprotect was really interposed). The head was 64
+// MiB when the app's address space was a few GB (M3f). It now has about 63 GB with 50+ GB free, and a
+// reservation without access costs no memory. Should a full window not fit, Husk's own mmap reserves
+// the whole request anyway.
+#define UB_REGION_HEAD ((size_t)1 << 40)  /* no limit: the window itself */
 #define UB_REGION_STEP ((uintptr_t)16 << 20)
 #define UB_MAX_REGIONS 256
 // base..base+size: what the engine believes it owns (window plus Baselib's tail); base..mapped_end: mapped.

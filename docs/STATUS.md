@@ -1608,3 +1608,11 @@ that its host checks are done).
 - **Size**: decoding every BC texture to RGBA32 multiplies it by 4 to 8, several GB for this game. The
   app now logs at start whether the GPU samples BC textures (`MTLDevice.supportsBCTextureCompression`).
   If it does, the converter can keep BC instead of decoding it.
+- **Run 94** (Milf Idle Life with mprotect/madvise really interposed): worse. Out of memory right at
+  start: `region at 0x420000000: no room to commit up to +64 MiB (something else is mapped there)` for a
+  64 MiB allocation ("Manager"). With growth active, the windows grow on demand behind their 64 MiB
+  head, and another mapping had already taken that space.
+  - Fix: windows are reserved **whole** up front (256 MiB, no access, `UB_REGION_HEAD` unlimited). The head
+    dates from when the app's address space was a few GB (M3f). The logs now show about 63 GB with 50+ GB
+    free, and a reservation costs no memory. If a full window does not fit, Husk's own mmap reserves the
+    whole request, as before.

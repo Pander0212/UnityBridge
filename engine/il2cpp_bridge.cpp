@@ -72,6 +72,7 @@ bool NullGuarded(std::string_view name) {
 std::mutex g_mutex;
 ExportLookup g_lookup;
 GuestCall g_caller = nullptr;
+uintptr_t g_argumentNull = 0;  // il2cpp_get_exception_argument_null, for a NULL invoke's exception
 Slot g_slots[kMaxFunctions];
 size_t g_used = 0;
 std::vector<OverrideEntry> g_overrides;
@@ -89,6 +90,15 @@ Word Forward(size_t index, const Word (&args)[8]) {
     if (logged.fetch_add(1) < 32)
       std::fprintf(stderr, "UB_IL2CPP_BRIDGE %s(NULL, ...): returning 0 (the engine passed a NULL it got from a failed lookup)\n",
                    slot.name.c_str());
+    // An invoke must also report an exception: Unity's invocation helper reads the result object
+    // (+0x10) unless one is set, and a NULL result without one faulted there (run 82). The exception
+    // is il2cpp's own ArgumentNullException("method"), made by the guest export.
+    const int excArg = slot.name == "il2cpp_runtime_invoke" ? 3 : slot.name == "il2cpp_runtime_invoke_convert_args" ? 4 : -1;
+    if (excArg >= 0 && args[excArg] != 0 && g_argumentNull != 0) {
+      static const char kParam[] = "method";
+      const Word exArgs[8] = {reinterpret_cast<Word>(kParam)};
+      *reinterpret_cast<Word*>(args[excArg]) = g_caller(g_argumentNull, exArgs);
+    }
     return 0;
   }
   return g_caller(slot.target, args);
@@ -120,6 +130,7 @@ void Init(ExportLookup lookup, GuestCall caller) {
   std::scoped_lock lock {g_mutex};
   g_lookup = std::move(lookup);
   g_caller = caller;
+  g_argumentNull = g_lookup ? g_lookup("il2cpp_get_exception_argument_null").value_or(0) : 0;
   for (size_t i = 0; i < g_used; ++i) g_slots[i] = {};
   g_used = 0;
   g_overrides.clear();

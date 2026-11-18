@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 
@@ -32,6 +33,7 @@ MS uint64_t MulAdd3(uint64_t a, uint64_t b, uint64_t c) { return a * b + c; }
 MS uint64_t HighGarbage() { return 0xdeadbeef00000005ull; }  // an int32 result with junk above it
 MS uint64_t Pointer() { return 0x0000123456789abcull; }
 MS uint64_t Echo(uint64_t a) { return a ^ 0x5a5a; }
+MS uint64_t FakeArgumentNull(uint64_t name) { return std::strcmp(reinterpret_cast<const char*>(name), "method") == 0 ? 0xe0e0 : 1; }
 
 // A native replacement for a host-callback API (what engine/il2cpp_intercept installs).
 uint64_t ReplacementLog(void*) { return 77; }
@@ -49,6 +51,8 @@ std::map<std::string, uintptr_t> g_exports = {
     {"il2cpp_pointer", reinterpret_cast<uintptr_t>(&Pointer)},
     {"il2cpp_register_log_callback", reinterpret_cast<uintptr_t>(&Echo)},  // exported, but blocked
     {"il2cpp_method_get_param_count", reinterpret_cast<uintptr_t>(&Echo)},  // NULL-guarded
+    {"il2cpp_runtime_invoke", reinterpret_cast<uintptr_t>(&Echo)},
+    {"il2cpp_get_exception_argument_null", reinterpret_cast<uintptr_t>(&FakeArgumentNull)},
 };
 
 std::optional<uintptr_t> Lookup(std::string_view name) {
@@ -78,6 +82,11 @@ int main() {
   Check(paramCount && paramCount(0) == 0 && g_guestCalls == guestBefore, "NULL method: 0, guest not entered");
   Check(paramCount && paramCount(1) == (1 ^ 0x5a5a) && g_guestCalls == guestBefore + 1, "non-NULL method reaches the guest");
 
+  using Invoke = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t*);
+  auto* invoke = reinterpret_cast<Invoke>(Bridge::Symbol("il2cpp_runtime_invoke"));
+  uint64_t exc = 0;
+  Check(invoke && invoke(0, 0, 0, &exc) == 0 && exc == 0xe0e0, "NULL invoke: 0 and an ArgumentNullException");
+
   auto* narrow = reinterpret_cast<int32_t (*)()>(Bridge::Symbol("il2cpp_high_garbage"));
   Check(narrow && narrow() == 5, "int32 result: junk above it is ignored");
   auto* pointer = reinterpret_cast<void* (*)()>(Bridge::Symbol("il2cpp_pointer"));
@@ -97,7 +106,7 @@ int main() {
   for (size_t i = 0;; ++i) {
     const std::string name = "il2cpp_filler_" + std::to_string(i);
     if (Bridge::Symbol(name) == nullptr) {
-      allBound = i + 6 == Bridge::kMaxFunctions;  // the six bound above
+      allBound = i + 7 == Bridge::kMaxFunctions;  // the seven bound above
       break;
     }
   }

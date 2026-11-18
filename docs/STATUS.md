@@ -1414,3 +1414,12 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     `il2cpp_method_*`, `il2cpp_class_*`, `il2cpp_field_*`, `il2cpp_property_*` and
     `il2cpp_runtime_invoke(_convert_args)`. The first 32 such calls are logged. Covered by
     il2cpp-bridge-test.
+- **Run 82**: the guard caught both NULL calls (`il2cpp_method_get_param_count(NULL)`,
+  `il2cpp_runtime_invoke(NULL)`). Next fault: libunity +0xa31930, `ldrb w8, [x0, #0x10]` with x0 = 0.
+  That is Unity's typed invocation helper (Invoke<bool>): it calls runtime_invoke, and unless the
+  exception slot is set it unboxes the result object at +0x10. A NULL result with no exception
+  faults.
+  - Fix: a NULL `il2cpp_runtime_invoke` / `_convert_args` also stores an exception in the caller's slot:
+    il2cpp's own `ArgumentNullException("method")`, made by the guest export
+    `il2cpp_get_exception_argument_null`. The engine then takes its error path. Covered by
+    il2cpp-bridge-test.

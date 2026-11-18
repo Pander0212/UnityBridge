@@ -1517,3 +1517,8 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   - The device resume path differs: FEX's HLE return with `frame.gpr`. The Windows DLL test on the
     iPhone ("Run Windows DLL test") now runs the same check, so it shows whether FEX keeps nonvolatile
     registers that the bridge changed on a resume.
+- **CI**: run 88 (the commit with the device register test) got no `macos-26` runner. It was queued for
+  15 minutes twice, then cancelled, with no runner assigned, no GitHub incident, and a public repository
+  (no minute limit). The workflow now runs on `macos-latest` (a manual dispatch can name another label)
+  and picks the newest Xcode 26 on the image itself instead of a fixed `Xcode_26.6.app`. The ANGLE
+  and ccache caches are keyed independently of the image.

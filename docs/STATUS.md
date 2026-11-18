@@ -1549,3 +1549,11 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     `[limit, base)` as MEM_COMMIT/PAGE_READWRITE for a page inside one, while the host still maps it
     writable. Everything else outside reservations and images is one free page again. The device's
     Windows DLL test and the host test note their stacks as well.
+- **Run 91**: the same crash as run 90, so host regions were not the cause. The fault is at stack top +
+  0x210, in the 16 KiB guard region just above a guest stack, as soon as the GC scans. Boehm's
+  `GC_get_stack_base` computes the top as `trunc_sp + RegionSize`, with sp truncated to **4 KiB**
+  (our GetSystemInfo page size). VirtualQuery gave BaseAddress and RegionSize from the host's
+  **16 KiB** page, so the sum overshot the stack by up to 12 KiB.
+  - Fix: VirtualQuery works in 4 KiB pages throughout (BaseAddress, RegionSize, the free page). The
+    test DLL now also checks that a stack address's BaseAddress is its own 4 KiB page. The host has 4
+    KiB pages, so only the device's Windows DLL test can catch a regression there.

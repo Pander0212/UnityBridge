@@ -246,7 +246,6 @@ uint64_t VirtualQuery(CallContext& c) {
   const auto address = static_cast<uintptr_t>(c.Arg(0));
   auto* info = c.Ptr<uint8_t>(1);
   if (c.Arg(2) < 48 || info == nullptr) return SetError(ERROR_INSUFFICIENT_BUFFER, 0);
-  const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
   std::memset(info, 0, 48);
   // A loaded image (M6): what Windows reports for it, MEM_IMAGE and committed, protections from the
   // section flags. il2cpp's Boehm GC finds its roots this way: GC_register_root_section walks the
@@ -274,7 +273,11 @@ uint64_t VirtualQuery(CallContext& c) {
   }
   std::scoped_lock lock {g_vmMutex};
   const auto it = FindReservation(address);
-  const uintptr_t page = address & ~(pageSize - 1);
+  // In the guest's pages, 4 KiB (GetSystemInfo's dwPageSize), not the host's 16 KiB: callers add
+  // RegionSize to their own 4 KiB-truncated address. Boehm's GC_get_stack_base does exactly that for a
+  // thread's stack top, and with a 16 KiB BaseAddress the sum overshot the stack by up to 12 KiB into
+  // the guard page above it (runs 90-91: a fault at stack top + 0x210 as soon as the GC scanned).
+  const uintptr_t page = address & ~uintptr_t {0xfff};
   if (it == g_reservations.end()) {
     // A guest thread's stack: committed and writable, from its limit to its base. Boehm GC takes a
     // thread's stack top from this, GC_get_stack_base: VirtualQuery(sp), BaseAddress + RegionSize when
@@ -300,7 +303,7 @@ uint64_t VirtualQuery(CallContext& c) {
     // Anything else not VirtualAlloc'd (the host's own memory): one free page, as Windows would show
     // memory outside the process's view.
     Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
-    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), pageSize);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), 0x1000);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_FREE);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), PAGE_NOACCESS);
     return 48;

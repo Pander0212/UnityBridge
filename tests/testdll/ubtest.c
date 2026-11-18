@@ -737,7 +737,11 @@ __declspec(dllexport) int ub_test_vquery(void) {
       char* base = *(char**)mbi;
       unsigned long long size = *(unsigned long long*)(mbi + 24);
       DWORD state = *(DWORD*)(mbi + 32), protect = *(DWORD*)(mbi + 36);
-      if (state == 0x1000 && protect == 0x04 && base <= (char*)&local && base + size > (char*)&local + 64) ok |= 1 << 20;
+      // BaseAddress is the 4 KiB page of the address (the guest's page size), not a larger host page:
+      // the GC adds RegionSize to its own 4 KiB-truncated sp.
+      if (state == 0x1000 && protect == 0x04 && base <= (char*)&local && base + size > (char*)&local + 64 &&
+          ((unsigned long long)base & 0xfff) == 0 && (char*)&local - base < 0x1000)
+        ok |= 1 << 20;
     }
   }
   const int nv = SehNonvolatiles();

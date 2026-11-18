@@ -1584,6 +1584,10 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     dlsym. None imports mmap64 or android_dlopen_ext, so those two are dropped. That leaves exactly 8,
     and the loader logs a warning if it ever asks for more than Husk keeps.
 
+- **Run 96: Milf Idle Life is stable.** Played for about 12 minutes (20,400+ frames) without a crash;
+  footprint steady near 1.35 GB with 2.7 GB more available. The whole-window reservation holds.
+  **M6 reached [i]** (the intro video aside: deferred, see M8).
+
 ## M8: Snapshot! (Unity 2022.3.62f3) (2026-11-18, in progress)
 
 The user's next game. **il2cpp, not Mono** (GameAssembly.dll 25 MB, global-metadata.dat), Unity

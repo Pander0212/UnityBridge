@@ -1571,3 +1571,15 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     for a 4 KiB-granular range, which could wipe live neighbours.
   - Fix: commit makes every host page the range touches accessible and returns the 4 KiB page.
     Decommit releases only host pages wholly inside the range and leaves partial ones committed.
+- **Run 93** (the commit fix): the game ran well for about 2.5 minutes (4200+ frames), then
+  `Could not allocate memory: System out of memory!` (a 10 MB FMOD sample), although iOS still offered
+  2.7 GB. The commit before it, `mprotect(0x3d3e5c000, 0xa1c000)`, failed with ENOMEM: it reached past
+  the first 64 MiB of a 256 MiB region window, the part reserved up front.
+  - **The cause, older than M6**: Husk keeps at most 8 interposed names (`MAX_INTERPOSE 8` in
+    husk-tl-ld.c) and drops the rest silently. The loader asked for 10, so the last two, **mprotect and
+    madvise, were never in effect**. A region never grew past its head ("0 grown" in every status line),
+    and MADV_DONTNEED inside regions never zeroed.
+  - Fix: the libraries' actual imports (llvm-nm): libunity 6000.3 and 2021.3 import dlopen, dlsym, mmap,
+    munmap, mprotect, madvise, pthread_create; 2021.3 also sched_getaffinity; libmain imports dlopen and
+    dlsym. None imports mmap64 or android_dlopen_ext, so those two are dropped. That leaves exactly 8,
+    and the loader logs a warning if it ever asks for more than Husk keeps.

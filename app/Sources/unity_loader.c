@@ -13,7 +13,7 @@
 // libil2cpp.so is ours: dlopen("libil2cpp.so") from Android code returns a handle of our own, and
 // dlsym on it returns the il2cpp bridge's ARM64 entry points into GameAssembly.dll (ub_il2cpp_symbol).
 // Everything else goes on to Husk's bionic. The interposition uses Husk's tl_ld_interpose, so every
-// import of dlopen/dlsym/android_dlopen_ext the Android libraries make binds to the functions here.
+// import of dlopen/dlsym the Android libraries make binds to the functions here.
 //
 // This step runs the Unity driver's startup up to NativeLoader.load (libmain's JNI_OnLoad, libunity
 // loaded, relocated, initialised, its JNI_OnLoad): no graphics yet, and not the engine's own start
@@ -83,11 +83,9 @@ static void line(const char *fmt, ...)
 // ---- the virtual libil2cpp.so ------------------------------------------------------------------
 
 typedef void *(*dlopen_fn)(const char *, int);
-typedef void *(*dlopen_ext_fn)(const char *, int, const void *);
 typedef void *(*dlsym_fn)(void *, const char *);
 
 static dlopen_fn g_bionic_dlopen;
-static dlopen_ext_fn g_bionic_dlopen_ext;
 static dlsym_fn g_bionic_dlsym;
 static int g_il2cpp_handle;  // its address is the handle
 static int g_il2cpp_opens, g_il2cpp_syms, g_il2cpp_missing;
@@ -106,12 +104,6 @@ static void *ub_dlopen(const char *path, int flags)
         return &g_il2cpp_handle;
     }
     return g_bionic_dlopen ? g_bionic_dlopen(path, flags) : NULL;
-}
-
-static void *ub_android_dlopen_ext(const char *path, int flags, const void *info)
-{
-    if (is_il2cpp(path)) return ub_dlopen(path, flags);
-    return g_bionic_dlopen_ext ? g_bionic_dlopen_ext(path, flags, info) : NULL;
 }
 
 static void *ub_dlsym(void *handle, const char *name)
@@ -959,7 +951,6 @@ int ub_unity_probe_ran(void) { return g_ran; }
 static bool interpose(void)
 {
     g_bionic_dlopen = (dlopen_fn)tl_bionic_find("dlopen");
-    g_bionic_dlopen_ext = (dlopen_ext_fn)tl_bionic_find("android_dlopen_ext");
     g_bionic_dlsym = (dlsym_fn)tl_bionic_find("dlsym");
     g_bionic_pthread_create = (pthread_create_fn)tl_bionic_find("pthread_create");
     g_bionic_mmap = (mmap_fn)tl_bionic_find("mmap");
@@ -967,18 +958,27 @@ static bool interpose(void)
     g_bionic_mprotect = (mprotect_fn)tl_bionic_find("mprotect");
     g_bionic_madvise = (madvise_fn)tl_bionic_find("madvise");
     if (!g_bionic_dlopen || !g_bionic_dlsym) { line("FAIL Husk's bionic has no dlopen/dlsym"); return false; }
-    tl_ld_interpose("dlopen", (void *)&ub_dlopen);
-    tl_ld_interpose("android_dlopen_ext", (void *)&ub_android_dlopen_ext);
-    tl_ld_interpose("dlsym", (void *)&ub_dlsym);
-    if (g_bionic_pthread_create) tl_ld_interpose("pthread_create", (void *)&ub_pthread_create);
-    tl_ld_interpose("sched_getaffinity", (void *)&ub_sched_getaffinity);
+    // Husk keeps at most 8 interposed names (MAX_INTERPOSE in husk-tl-ld.c) and drops the rest without a
+    // word. With 10 asked for, mprotect and madvise, the last two, were never in effect: a region never
+    // grew past its first 64 MiB, and Unity 6 ran out of memory there after a few minutes of play (run
+    // 93: "Could not allocate memory", FMOD samples, mprotect ENOMEM at a window's head). These are the
+    // names the Android libraries import (libunity 6000.3 and 2021.3: dlopen, dlsym, mmap, munmap,
+    // mprotect, madvise, pthread_create; 2021.3 also sched_getaffinity; libmain: dlopen, dlsym). Neither
+    // imports mmap64 or android_dlopen_ext, so those two are left out.
+    enum { kHuskMaxInterpose = 8 };
+    int asked = 0;
+    tl_ld_interpose("dlopen", (void *)&ub_dlopen), ++asked;
+    tl_ld_interpose("dlsym", (void *)&ub_dlsym), ++asked;
     if (g_bionic_mmap && g_bionic_munmap && g_bionic_mprotect && g_bionic_madvise) {
-        tl_ld_interpose("mmap", (void *)&ub_mmap);
-        tl_ld_interpose("mmap64", (void *)&ub_mmap);
-        tl_ld_interpose("munmap", (void *)&ub_munmap);
-        tl_ld_interpose("mprotect", (void *)&ub_mprotect);
-        tl_ld_interpose("madvise", (void *)&ub_madvise);
+        tl_ld_interpose("mmap", (void *)&ub_mmap), ++asked;
+        tl_ld_interpose("munmap", (void *)&ub_munmap), ++asked;
+        tl_ld_interpose("mprotect", (void *)&ub_mprotect), ++asked;
+        tl_ld_interpose("madvise", (void *)&ub_madvise), ++asked;
     }
+    if (g_bionic_pthread_create) tl_ld_interpose("pthread_create", (void *)&ub_pthread_create), ++asked;
+    tl_ld_interpose("sched_getaffinity", (void *)&ub_sched_getaffinity), ++asked;
+    if (asked > kHuskMaxInterpose)
+        line("WARNING: %d functions interposed, Husk keeps only %d: the last ones are not in effect", asked, kHuskMaxInterpose);
     tl_ld_set_verbosity(1);
     return true;
 }

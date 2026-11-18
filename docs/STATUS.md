@@ -1472,3 +1472,27 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     same objects, byte for byte, and target Android. A synthetic bundle in unity-assets-test covers it
     (the test found that Stats were not reset per call). Import version 12, so all files are converted
     again once.
+- **Run 85** (one full start, then a second one): the bundles now load as far as their checksum:
+  `CRC Mismatch. Provided 618df254, calculated fd44dc93`. The NullReferenceException in
+  `Stack<T>.Push` came back even with vector and REP TSO, so memory order was not its cause. Later
+  another NRE fired while an exception's stack trace was being built ("Couldn't extract exception
+  string"), and libunity faulted in strlen(NULL) on the missing message.
+  - **The cause: the GC never scanned GameAssembly's globals.** `VirtualQuery` answered MEM_FREE for every
+    address outside VirtualAlloc reservations, the loaded image included. il2cpp's Boehm GC registers
+    its roots on Windows with `GC_register_root_section`: it walks the module that holds the GC with
+    VirtualQuery and adds every committed writable run. With MEM_FREE it found nothing, so `.data` and
+    `.bss` (il2cpp's globals, static fields, metadata caches) were not roots. Objects only they referred
+    to were collected and their memory reused. That fits fields read back null right after being set,
+    and a different exception from run to run.
+  - Fix: `Win32::Module` carries the image's size and sections, filled where GameAssembly (and the test
+    DLL) is registered. VirtualQuery reports image pages as Windows does: MEM_IMAGE, MEM_COMMIT,
+    AllocationBase the image, AllocationProtect PAGE_EXECUTE_WRITECOPY, the region one section (4 KiB
+    granularity), the protection from the section flags. Unknown memory stays one free page (stack
+    bounds derived from it must not change). New test-DLL export `ub_test_vquery` (a real MinGW PE)
+    checks `.data`, `.bss`, `.text` and the page below the image in win32-host-test.
+  - **Bundle CRC kept**: the catalog's value is the CRC-32 of the uncompressed blocks (checked:
+    618df254 is exactly that of the original locales bundle). After retargeting, four forged bytes after
+    the last file (in no directory entry, appended to the last block) restore it. On the game's bundles
+    the original CRCs come out again and UnityPy reads the same objects. `BlocksCrc` plus a check in
+    unity-assets-test. Import version 13.
+  - Vector/REP TSO stays on for now (correct, somewhat slower start).

@@ -942,6 +942,8 @@ extern "C" int ub_il2cpp_probe_run(const char* dllPath, const char* dataDir, con
   module.path = u"C:\\Game\\GameAssembly.dll";
   module.base = reinterpret_cast<uintptr_t>(image.base);
   module.lookup = [&image](std::string_view name) { return image.Export(name); };
+  module.size = image.size;
+  for (const auto& sec : image.sections) module.sections.push_back({sec.rva, sec.virtualSize, sec.characteristics});
   Win32::RegisterModule(std::move(module), true);
   if (image.tls) Win32::RegisterTlsImage(reinterpret_cast<uintptr_t>(image.base), *image.tls);
   Win32::RegisterUnwindImage(reinterpret_cast<uintptr_t>(image.base),

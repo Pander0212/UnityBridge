@@ -18,6 +18,7 @@ QueryPerformanceFrequency
 GetModuleHandleW
 GetProcAddress
 VirtualAlloc
+VirtualQuery
 VirtualFree
 UnityBridgeTestMissingFunction
 CreateEventW

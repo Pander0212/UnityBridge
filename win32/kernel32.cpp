@@ -200,10 +200,36 @@ uint64_t VirtualQuery(CallContext& c) {
   if (c.Arg(2) < 48 || info == nullptr) return SetError(ERROR_INSUFFICIENT_BUFFER, 0);
   const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
   std::memset(info, 0, 48);
+  // A loaded image (M6): what Windows reports for it, MEM_IMAGE and committed, protections from the
+  // section flags. il2cpp's Boehm GC finds its roots this way: GC_register_root_section walks the
+  // module that holds the GC with VirtualQuery and adds every writable committed run as a root.
+  // These addresses used to come back MEM_FREE, so GameAssembly's .data and .bss (il2cpp's globals,
+  // static fields, metadata caches) were never scanned and live objects were collected: managed
+  // fields that were just set read back null (Unity 6, runs 83-85).
+  if (const auto region = ImageRegionAt(address)) {
+    constexpr uint32_t kExecute = 0x20000000, kRead = 0x40000000, kWrite = 0x80000000;
+    constexpr DWORD MEM_IMAGE = 0x1000000, PAGE_EXECUTE_WRITECOPY = 0x80;
+    const uint32_t ch = region->characteristics;
+    DWORD protect = PAGE_READONLY;  // headers and gaps
+    if (ch & kExecute) protect = (ch & kWrite) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+    else if (ch & kWrite) protect = PAGE_READWRITE;
+    else if (!(ch & kRead) && ch != 0) protect = PAGE_NOACCESS;
+    const uintptr_t page = address & ~uintptr_t {0xfff};
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 8), region->allocationBase);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 16), PAGE_EXECUTE_WRITECOPY);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), region->end - page);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_COMMIT);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), protect);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 40), MEM_IMAGE);
+    return 48;
+  }
   std::scoped_lock lock {g_vmMutex};
   const auto it = FindReservation(address);
   const uintptr_t page = address & ~(pageSize - 1);
   if (it == g_reservations.end()) {
+    // Not ours (host memory, a guest stack): one free page, as before. Larger answers would change
+    // what callers derive from it (stack bounds from BaseAddress + RegionSize).
     Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
     Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), pageSize);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_FREE);

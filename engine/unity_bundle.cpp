@@ -85,9 +85,114 @@ bool RetargetSerialized(uint8_t* f, size_t n) {
   return true;
 }
 
+// CRC-32 (zlib's: reflected, polynomial 0xEDB88320, inverted in and out).
+struct Crc32 {
+  uint32_t table[256];
+  uint8_t byTop[256];  // the index whose table entry has this top byte
+  Crc32() {
+    for (uint32_t i = 0; i < 256; ++i) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+      table[i] = c;
+      byTop[c >> 24] = uint8_t(i);
+    }
+  }
+  uint32_t Of(const uint8_t* p, size_t n, uint32_t crc = 0) const {
+    uint32_t r = ~crc;
+    for (size_t i = 0; i < n; ++i) r = table[(r ^ p[i]) & 0xff] ^ (r >> 8);
+    return ~r;
+  }
+  // Four bytes that, appended to data whose CRC is `crc`, give `want`: the table indices are found
+  // walking back from the wanted register, the bytes walking forward from the current one.
+  void Forge(uint32_t crc, uint32_t want, uint8_t out[4]) const {
+    uint8_t index[4];
+    uint32_t r = ~want;
+    for (int k = 3; k >= 0; --k) {
+      index[k] = byTop[r >> 24];
+      r = (r ^ table[index[k]]) << 8;
+    }
+    r = ~crc;
+    for (int k = 0; k < 4; ++k) {
+      out[k] = uint8_t((r ^ index[k]) & 0xff);
+      r = table[index[k]] ^ (r >> 8);
+    }
+  }
+};
+
+const Crc32& Crc() {
+  static const Crc32 crc;
+  return crc;
+}
+
 } // namespace
 
 bool IsBundle(const uint8_t* data, size_t size) { return size >= 8 && std::memcmp(data, "UnityFS", 8) == 0; }
+
+namespace {
+
+struct Block { uint32_t size, packed; uint16_t flags; };
+struct Node { int64_t offset, size; uint32_t flags; std::string path; };
+struct Unpacked {
+  uint32_t format = 0, flags = 0;
+  std::string playerVersion, engineVersion;
+  std::vector<Block> blocks;
+  std::vector<Node> nodes;
+  std::vector<uint8_t> payload;  // the blocks, uncompressed and concatenated
+};
+
+std::optional<Unpacked> Unpack(const uint8_t* data, size_t size, std::string& err) {
+  if (!IsBundle(data, size)) { err = "not a UnityFS bundle"; return std::nullopt; }
+  Unpacked u;
+  Reader r {data, size};
+  r.at = 8;
+  u.format = uint32_t(r.Be(4));
+  u.playerVersion = r.Str();
+  u.engineVersion = r.Str();
+  r.Be(8);  // file size
+  const uint32_t infoPacked = uint32_t(r.Be(4)), infoSize = uint32_t(r.Be(4));
+  u.flags = uint32_t(r.Be(4));
+  if (!r.ok || u.format < 6 || u.format > 8) { err = "bundle format " + std::to_string(u.format) + " not read"; return std::nullopt; }
+  if (u.format >= 7) r.Align(16);
+  const size_t infoAt = (u.flags & kInfoAtEnd) ? size - infoPacked : r.at;
+  if (infoPacked > size || infoAt + infoPacked > size) { err = "blocks info out of range"; return std::nullopt; }
+  auto info = Decompress(data + infoAt, infoPacked, infoSize, u.flags & kCompressionMask, &err);
+  if (!info) return std::nullopt;
+  size_t blocksAt = (u.flags & kInfoAtEnd) ? r.at : infoAt + infoPacked;
+  if (u.flags & kPadBeforeBlocks) blocksAt = (blocksAt + 15) / 16 * 16;
+  Reader ir {info->data(), info->size()};
+  ir.at = 16;  // hash
+  u.blocks.resize(size_t(std::min<uint64_t>(ir.Be(4), 1u << 20)));
+  for (auto& b : u.blocks) b = {uint32_t(ir.Be(4)), uint32_t(ir.Be(4)), uint16_t(ir.Be(2))};
+  u.nodes.resize(size_t(std::min<uint64_t>(ir.Be(4), 1u << 20)));
+  for (auto& nd : u.nodes) nd = {int64_t(ir.Be(8)), int64_t(ir.Be(8)), uint32_t(ir.Be(4)), ir.Str()};
+  if (!ir.ok) { err = "malformed blocks info"; return std::nullopt; }
+  size_t at = blocksAt;
+  for (const auto& b : u.blocks) {
+    if (at + b.packed > size) { err = "block out of range"; return std::nullopt; }
+    auto plain = Decompress(data + at, b.packed, b.size, b.flags & kCompressionMask, &err);
+    if (!plain) return std::nullopt;
+    u.payload.insert(u.payload.end(), plain->begin(), plain->end());
+    at += b.packed;
+  }
+  for (const auto& nd : u.nodes) {
+    if (nd.offset < 0 || nd.size < 0 || uint64_t(nd.offset + nd.size) > u.payload.size()) {
+      err = "directory entry out of range";
+      return std::nullopt;
+    }
+  }
+  return u;
+}
+
+} // namespace
+
+std::optional<uint32_t> BlocksCrc(const uint8_t* data, size_t size, std::string* error) {
+  std::string scratch;
+  std::string& err = error ? *error : scratch;
+  err.clear();
+  const auto u = Unpack(data, size, err);
+  if (!u) return std::nullopt;
+  return Crc().Of(u->payload.data(), u->payload.size());
+}
 
 std::optional<std::vector<uint8_t>> Retarget(const uint8_t* data, size_t size, Stats* stats, std::string* error) {
   Stats local;
@@ -96,50 +201,29 @@ std::optional<std::vector<uint8_t>> Retarget(const uint8_t* data, size_t size, S
   std::string scratch;
   std::string& err = error ? *error : scratch;
   err.clear();
-  if (!IsBundle(data, size)) { err = "not a UnityFS bundle"; return std::nullopt; }
-  Reader r {data, size};
-  r.at = 8;
-  const uint32_t format = uint32_t(r.Be(4));
-  const std::string playerVersion = r.Str(), engineVersion = r.Str();
-  r.Be(8);  // file size
-  const uint32_t infoPacked = uint32_t(r.Be(4)), infoSize = uint32_t(r.Be(4)), flags = uint32_t(r.Be(4));
-  if (!r.ok || format < 6 || format > 8) { err = "bundle format " + std::to_string(format) + " not read"; return std::nullopt; }
-  if (format >= 7) r.Align(16);
-  const size_t infoAt = (flags & kInfoAtEnd) ? size - infoPacked : r.at;
-  if (infoAt + infoPacked > size) { err = "blocks info out of range"; return std::nullopt; }
-  auto info = Decompress(data + infoAt, infoPacked, infoSize, flags & kCompressionMask, &err);
-  if (!info) return std::nullopt;
-  size_t blocksAt = (flags & kInfoAtEnd) ? r.at : infoAt + infoPacked;
-  if (flags & kPadBeforeBlocks) blocksAt = (blocksAt + 15) / 16 * 16;
-
-  struct Block { uint32_t size, packed; uint16_t flags; };
-  struct Node { int64_t offset, size; uint32_t flags; std::string path; };
-  Reader ir {info->data(), info->size()};
-  ir.at = 16;  // hash
-  std::vector<Block> blocks(size_t(std::min<uint64_t>(ir.Be(4), 1u << 20)));
-  for (auto& b : blocks) b = {uint32_t(ir.Be(4)), uint32_t(ir.Be(4)), uint16_t(ir.Be(2))};
-  std::vector<Node> nodes(size_t(std::min<uint64_t>(ir.Be(4), 1u << 20)));
-  for (auto& nd : nodes) nd = {int64_t(ir.Be(8)), int64_t(ir.Be(8)), uint32_t(ir.Be(4)), ir.Str()};
-  if (!ir.ok) { err = "malformed blocks info"; return std::nullopt; }
-
-  std::vector<uint8_t> payload;
-  size_t at = blocksAt;
-  for (const auto& b : blocks) {
-    if (at + b.packed > size) { err = "block out of range"; return std::nullopt; }
-    auto plain = Decompress(data + at, b.packed, b.size, b.flags & kCompressionMask, &err);
-    if (!plain) return std::nullopt;
-    payload.insert(payload.end(), plain->begin(), plain->end());
-    at += b.packed;
-  }
+  auto unpacked = Unpack(data, size, err);
+  if (!unpacked) return std::nullopt;
+  const uint32_t format = unpacked->format, flags = unpacked->flags;
+  const std::string& playerVersion = unpacked->playerVersion;
+  const std::string& engineVersion = unpacked->engineVersion;
+  auto& blocks = unpacked->blocks;
+  const auto& nodes = unpacked->nodes;
+  auto& payload = unpacked->payload;
+  const uint32_t crcBefore = Crc().Of(payload.data(), payload.size());
   st.nodes = int(nodes.size());
   for (const auto& nd : nodes) {
-    if (nd.offset < 0 || nd.size < 0 || uint64_t(nd.offset + nd.size) > payload.size()) {
-      err = "directory entry out of range";
-      return std::nullopt;
-    }
     if (RetargetSerialized(payload.data() + nd.offset, size_t(nd.size))) ++st.retargeted;
   }
   if (!st.retargeted) return std::nullopt;
+  // Addressables' catalog holds each bundle's CRC-32 over its uncompressed blocks, and the engine
+  // refuses a bundle that does not match ("CRC Mismatch", run 85). Four bytes after the last file,
+  // in no directory entry, bring it back to the original value.
+  if (!blocks.empty()) {
+    uint8_t tail[4];
+    Crc().Forge(Crc().Of(payload.data(), payload.size()), crcBefore, tail);
+    payload.insert(payload.end(), tail, tail + 4);
+    blocks.back().size += 4;
+  }
 
   // Written back: the same header, info right after it (uncompressed), the blocks uncompressed.
   std::vector<uint8_t> out;

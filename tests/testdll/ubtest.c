@@ -35,6 +35,7 @@ IMPORT BOOL QueryPerformanceFrequency(LONGLONG*);
 IMPORT HANDLE GetModuleHandleW(const WCHAR*);
 IMPORT void* GetProcAddress(HANDLE, const char*);
 IMPORT void* VirtualAlloc(void*, unsigned long long, DWORD, DWORD);
+IMPORT unsigned long long VirtualQuery(const void*, void*, unsigned long long);
 IMPORT BOOL VirtualFree(void*, unsigned long long, DWORD);
 IMPORT DWORD UnityBridgeTestMissingFunction(DWORD);  // deliberately not implemented
 IMPORT HANDLE CreateEventW(void*, BOOL, BOOL, const WCHAR*);
@@ -660,6 +661,33 @@ __declspec(dllexport) int ub_test_all(void) {
 
 // Returns through xmm0; arguments in xmm0/xmm1.
 __declspec(dllexport) double ub_test_float(double a, double b) { return a * b + 0.5; }
+
+// VirtualQuery on this DLL's own pages, as Boehm GC's GC_register_root_section does to find a
+// module's writable data (M6): MEM_IMAGE, committed, AllocationBase the image, protections by
+// section. Each check sets one bit.
+extern char __ImageBase;
+static volatile int g_vqData = 5;  // .data
+static volatile int g_vqBss;       // .bss
+__declspec(dllexport) int ub_test_vquery(void) {
+  unsigned char mbi[48];
+  int ok = 0;
+  g_vqBss = g_vqData;
+  if (VirtualQuery((const void*)&g_vqData, mbi, 48) == 48) {
+    char* base = *(char**)mbi;
+    char* allocation = *(char**)(mbi + 8);
+    unsigned long long size = *(unsigned long long*)(mbi + 24);
+    DWORD state = *(DWORD*)(mbi + 32), protect = *(DWORD*)(mbi + 36), type = *(DWORD*)(mbi + 40);
+    if (allocation == &__ImageBase) ok |= 1;
+    if (state == 0x1000 /* MEM_COMMIT */ && type == 0x1000000 /* MEM_IMAGE */) ok |= 2;
+    if (protect == 0x04 /* PAGE_READWRITE */) ok |= 4;
+    if (base <= (char*)&g_vqData && base + size > (char*)&g_vqData) ok |= 8;
+  }
+  if (VirtualQuery((const void*)&ub_test_vquery, mbi, 48) == 48 && *(DWORD*)(mbi + 36) == 0x20 /* PAGE_EXECUTE_READ */)
+    ok |= 16;
+  if (VirtualQuery(&__ImageBase - 0x1000, mbi, 48) == 48 && *(char**)(mbi + 8) == 0) ok |= 32;  // below the image
+  if (VirtualQuery((const void*)&g_vqBss, mbi, 48) == 48 && *(DWORD*)(mbi + 36) == 0x04) ok |= 64;
+  return ok;
+}
 
 // Calls an import that UnityBridge does not implement: must return 0, not crash.
 __declspec(dllexport) DWORD ub_test_missing(void) { return UnityBridgeTestMissingFunction(5); }

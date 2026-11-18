@@ -130,13 +130,15 @@ int main(int argc, char** argv) {
   }
   auto& image = *loaded.image;
   Check(loaded.unresolved.empty(), "every import bound to a stub");
-  Check(image.imports.size() == 93, "93 imports");
+  Check(image.imports.size() == 94, "94 imports");
 
   Win32::Module module;
   module.name = "ubtest.dll";
   module.path = u"C:\\UnityBridge\\ubtest.dll";
   module.base = reinterpret_cast<uintptr_t>(image.base);
   module.lookup = [&image](std::string_view name) { return image.Export(name); };
+  module.size = image.size;
+  for (const auto& sec : image.sections) module.sections.push_back({sec.rva, sec.virtualSize, sec.characteristics});
   Win32::RegisterModule(std::move(module), true);
 
   // Implicit TLS: register the DLL's TLS directory, give this thread a TEB with gs:[0x58] pointing
@@ -179,6 +181,14 @@ int main(int argc, char** argv) {
   for (int i = 0; i < 30; ++i) Check(bits & (1 << i), names[i]);
 
   Check(reinterpret_cast<FloatFn>(*fl)(3.0, 4.0) == 12.5, "double arguments and xmm0 return");
+
+  if (const auto vq = image.Export("ub_test_vquery")) {
+    const int v = reinterpret_cast<AllFn>(*vq)();
+    Check((v & 0x7f) == 0x7f, "VirtualQuery: image pages MEM_IMAGE, committed, by section");
+    if ((v & 0x7f) != 0x7f) std::printf("  VirtualQuery bits %#x\n", v);
+  } else {
+    Check(false, "VirtualQuery: export found");
+  }
 
   Check(reinterpret_cast<MissingFn>(*missing)() == 0, "unimplemented import returns 0");
   const auto calls = runtime.UnimplementedCalls();

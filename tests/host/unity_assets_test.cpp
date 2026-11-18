@@ -108,6 +108,10 @@ int main() {
       const size_t sizeAt = 8 + 4 + sizeof("5.x.x") + sizeof("6000.3.15f1");
       for (int i = 0; i < 8; ++i) sizeField = sizeField << 8 | (*out)[sizeAt + i];
       CHECK(sizeField == out->size());
+      // The catalog's CRC still holds: the blocks' CRC-32 is the original one.
+      const auto crcIn = UnityBundle::BlocksCrc(windows.data(), windows.size(), &berror);
+      const auto crcOut = UnityBundle::BlocksCrc(out->data(), out->size(), &berror);
+      CHECK(crcIn && crcOut && *crcIn == *crcOut);
       // Read again: still a bundle, nothing left to rewrite.
       const auto again = UnityBundle::Retarget(out->data(), out->size(), &bs, &berror);
       CHECK(!again && berror.empty() && bs.nodes == 1);

@@ -3,7 +3,8 @@
 // player (M6). Android's engine refuses a bundle whose serialized files name a desktop build target
 // ("can't be loaded because it was not built with the right version or build target"). Retarget
 // decompresses the bundle (none or LZ4/LZ4HC blocks), rewrites the build target in the header of
-// every serialized file inside it to Android (13), and writes the bundle back uncompressed.
+// every serialized file inside it to Android (13), and writes the bundle back uncompressed, with four
+// bytes after the files that keep the CRC-32 of its blocks what Addressables' catalog expects.
 #pragma once
 #include <cstdint>
 #include <optional>
@@ -19,6 +20,9 @@ struct Stats {
   int nodes = 0;       // files in the bundle
   int retargeted = 0;  // serialized files whose build target was rewritten
 };
+
+// CRC-32 (zlib's) of the uncompressed blocks: what the catalog stores and the engine checks.
+std::optional<uint32_t> BlocksCrc(const uint8_t* data, size_t size, std::string* error);
 
 // The bundle with its serialized files' desktop build targets (2, 5, 19, 24) rewritten to Android,
 // uncompressed. Nullopt and `error` if it is not a bundle this reads (LZMA blocks are not), or if no

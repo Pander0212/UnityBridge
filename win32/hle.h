@@ -130,8 +130,23 @@ struct Module {
   std::u16string path;           // what GetModuleFileNameW reports
   uintptr_t base {};             // HMODULE; for built-in DLLs a pseudo handle
   std::function<std::optional<uintptr_t>(std::string_view)> lookup;  // export by name
+  // A loaded PE image's extent and sections (VirtualQuery reports them as MEM_IMAGE); empty for the
+  // built-in DLLs.
+  struct Section {
+    uint32_t rva = 0, size = 0, characteristics = 0;
+  };
+  size_t size = 0;
+  std::vector<Section> sections;
 };
 void RegisterModule(Module module, bool isMainModule = false);
+
+// The run of pages of a loaded image that holds `address`, as VirtualQuery reports it: the headers,
+// one section, or a gap between sections (4 KiB granularity, PE section alignment).
+struct ImageRegion {
+  uintptr_t allocationBase = 0, start = 0, end = 0;
+  uint32_t characteristics = 0;  // the section's IMAGE_SCN_* flags; 0 for headers and gaps
+};
+std::optional<ImageRegion> ImageRegionAt(uintptr_t address);
 const Module* FindModuleByName(std::string_view name);   // "kernel32", "KERNEL32.dll", ...
 const Module* FindModuleByHandle(uintptr_t handle);
 const Module* MainModule();

@@ -55,6 +55,25 @@ const Module* FindModuleByHandle(uintptr_t handle) {
   return nullptr;
 }
 
+std::optional<ImageRegion> ImageRegionAt(uintptr_t address) {
+  constexpr uintptr_t kPage = 0x1000;
+  std::scoped_lock lock {g_modulesMutex};
+  for (const auto& m : Modules()) {
+    if (m.size == 0 || address < m.base || address >= m.base + m.size) continue;
+    const uintptr_t rva = address - m.base;
+    uintptr_t from = 0, to = m.size;  // headers or gap: between the neighbouring sections
+    for (const auto& sec : m.sections) {
+      const uintptr_t begin = sec.rva & ~(kPage - 1);
+      const uintptr_t end = (uintptr_t(sec.rva) + sec.size + kPage - 1) & ~(kPage - 1);
+      if (rva >= begin && rva < end) return ImageRegion {m.base, m.base + begin, m.base + end, sec.characteristics};
+      if (end <= rva && end > from) from = end;
+      if (begin > rva && begin < to) to = begin;
+    }
+    return ImageRegion {m.base, m.base + from, m.base + to, 0};
+  }
+  return std::nullopt;
+}
+
 const Module* MainModule() {
   std::scoped_lock lock {g_modulesMutex};
   return g_main < Modules().size() ? &Modules()[g_main] : nullptr;

@@ -137,11 +137,17 @@ uint64_t VirtualAlloc(CallContext& c) {
   if (size == 0) return SetError(ERROR_INVALID_PARAMETER, 0);
   std::scoped_lock lock {g_vmMutex};
   if (address && !(type & MEM_RESERVE)) {
-    // Commit inside an existing reservation.
+    // Commit inside an existing reservation. The guest works in 4 KiB pages, the host in 16 KiB ones:
+    // every host page the range touches is made accessible (committing a little more is harmless),
+    // and the answer is the 4 KiB page, as Windows gives it. Rounding only the start down, with the
+    // length taken from the original address, left the end of the range inaccessible: Boehm GC's heap
+    // growth (GC_remap) zeroed a block whose last pages were still PROT_NONE (run 92).
     if (FindReservation(address) == g_reservations.end()) return SetError(ERROR_INVALID_PARAMETER, 0);
     const uintptr_t start = address & ~(pageSize - 1);
-    if (mprotect(reinterpret_cast<void*>(start), size, HostProtection(protect)) != 0) return SetError(ERROR_NOT_ENOUGH_MEMORY, 0);
-    return start;
+    const uintptr_t end = (address + c.Arg(1) + pageSize - 1) & ~(pageSize - 1);
+    if (mprotect(reinterpret_cast<void*>(start), end - start, HostProtection(protect)) != 0)
+      return SetError(ERROR_NOT_ENOUGH_MEMORY, 0);
+    return address & ~uintptr_t {0xfff};
   }
   const int prot = (type & MEM_COMMIT) ? HostProtection(protect) : PROT_NONE;
   void* hint = reinterpret_cast<void*>(address);
@@ -172,8 +178,16 @@ uint64_t VirtualFree(CallContext& c) {
     return kTrue;
   }
   if (type & MEM_DECOMMIT) {
-    const size_t span = size ? size : it->second.size;
-    mmap(reinterpret_cast<void*>(address), span, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    // Only host pages wholly inside the range are released (fresh, zero, inaccessible). One the guest
+    // decommits only part of (its 4 KiB pages within the host's 16 KiB) stays committed, since the
+    // rest of it may be live: Windows' own result for those pages, zero and inaccessible, is not
+    // something the guest may rely on.
+    const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const uintptr_t from = size ? address : it->first;
+    const uintptr_t to = size ? address + size : it->first + it->second.size;
+    const uintptr_t start = (from + pageSize - 1) & ~(pageSize - 1), end = to & ~(pageSize - 1);
+    if (end > start)
+      mmap(reinterpret_cast<void*>(start), end - start, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
     return kTrue;
   }
   return SetError(ERROR_INVALID_PARAMETER, kFalse);

@@ -1557,3 +1557,17 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   - Fix: VirtualQuery works in 4 KiB pages throughout (BaseAddress, RegionSize, the free page). The
     test DLL now also checks that a stack address's BaseAddress is its own 4 KiB page. The host has 4
     KiB pages, so only the device's Windows DLL test can catch a regression there.
+- **Run 92: the game is playable.** The start screen, the menu, then the game. The user played for a
+  while; 1700+ frames at about 28 fps, and the GC scans stacks without faults now. Two problems:
+  - **Black screen after the menu** = the intro video, which the user could skip. Three things are
+    missing: Android's `Hidden/VideoDecodeAndroid` shader (not in the game's Windows
+    `unity_builtin_extra`), the `trailer.mp4` path, which the game builds with a backslash
+    (`...apk!/assets\trailer.mp4`, "Vídeo não encontrado"), and MediaCodec decoding. **Deferred** (a
+    separate piece of work: video on Android under Husk).
+  - **The crash**: a store loop (zeroing) at 0x14b995000, `prot 0`, while the GC grew its heap. Our
+    `VirtualAlloc(MEM_COMMIT)` into a reservation rounded the start down to the 16 KiB host page but took
+    the length from the original address, so with a start aligned to 4 KiB but not to 16 KiB, the end
+    of the range stayed PROT_NONE. `VirtualFree(MEM_DECOMMIT)` also replaced whole 16 KiB host pages
+    for a 4 KiB-granular range, which could wipe live neighbours.
+  - Fix: commit makes every host page the range touches accessible and returns the 4 KiB page.
+    Decommit releases only host pages wholly inside the range and leaves partial ones committed.

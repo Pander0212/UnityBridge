@@ -1496,3 +1496,13 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     the original CRCs come out again and UnityPy reads the same objects. `BlocksCrc` plus a check in
     unity-assets-test. Import version 13.
   - Vector/REP TSO stays on for now (correct, somewhat slower start).
+- **Run 86** (two starts): the bundles load now, with no CRC or locale errors, so localization comes
+  up. Rendering is still black. The NullReferenceException in `Stack<T>.Push` (RenderGraph) comes in
+  both starts at the same moment, right after our injected `ArgumentNullException` for the missing
+  AudioSettings.Mobile method. So it is **deterministic**: neither the GC roots nor memory order caused
+  it. Both starts then crashed: one with `sp=0` in host code (a broken resume or context), one in a
+  fault loop reading `[x20]` with x20 = 0x135 at GameAssembly +0x4a60a6 while an exception was in
+  flight (r10 = 0xe06d7363).
+  - Next diagnosis: the SEH trace (now the first 8 C++ exceptions) prints each exception's frame
+    chain as module offsets (`UB_SEH  frames: +... +...`, unwound with the module's .pdata). That gives
+    the il2cpp method and the null check that throws, to disassemble in GameAssembly.

@@ -233,13 +233,34 @@ void UnwindEx(void* endFrame, void* targetIp, ExceptionRecord* rec, void* retval
 bool DispatchException(ExceptionRecord* rec, Context* orig_context) {
   DispatchScope dispatchScope;  // marks the HLE-call depth to resume at (see t_resumeRootDepth)
   const bool outerTrace = t_trace;
-  t_trace = rec->ExceptionCode == 0xe06d7363 && g_traced < 4;
+  t_trace = rec->ExceptionCode == 0xe06d7363 && g_traced < 8;
   if (t_trace) {
     ++g_traced;
     t_traceResumes = 64;
     std::fprintf(stderr, "UB_SEH dispatch %#x at +%#llx, %u parameters, magic %#llx\n", rec->ExceptionCode,
                  static_cast<unsigned long long>(ModuleOffset(orig_context->Rip)), rec->NumberParameters,
                  static_cast<unsigned long long>(rec->NumberParameters ? rec->ExceptionInformation[0] : 0));
+    // M6: where it was thrown from, frame by frame (module offsets), so the throwing il2cpp method
+    // and the null check that fired can be found in GameAssembly (run 86: a NullReferenceException
+    // in URP's RenderGraph whose managed trace ends at Stack<T>.Push).
+    Context walk = *orig_context;
+    char line[512];
+    int n = std::snprintf(line, sizeof(line), "UB_SEH  frames:");
+    for (int depth = 0; depth < 16 && walk.Rip && n < int(sizeof(line)) - 24; ++depth) {
+      n += std::snprintf(line + n, sizeof(line) - size_t(n), " +%#llx", static_cast<unsigned long long>(ModuleOffset(walk.Rip)));
+      if (PcToFileHeader(walk.Rip) == 0) break;  // not in a known image: the walk ends here
+      uint64_t base = 0;
+      RuntimeFunction* fn = LookupFunctionEntry(walk.Rip, &base);
+      if (fn) {
+        uint64_t frame = 0;
+        void* data = nullptr;
+        VirtualUnwind(UNW_FLAG_NHANDLER, base, walk.Rip, fn, &walk, &data, &frame);
+      } else {  // a leaf: the return address is at rsp
+        walk.Rip = *reinterpret_cast<const uint64_t*>(walk.Rsp);
+        walk.Rsp += 8;
+      }
+    }
+    std::fprintf(stderr, "%s\n", line);
   }
   struct Restore {
     bool v;

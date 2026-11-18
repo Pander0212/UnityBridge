@@ -1649,11 +1649,17 @@ that its host checks are done).
   38.6 dB, worst 31.9 dB.
 - **IPA run 98** (9e61e8f: ETC2 plus bundle conversion) built successfully.
 - **IPA run 99** (6141143: crunched textures too) built successfully.
-- **Instancing structs (M8e, in progress)**: the parameter records' struct parameters (USCSandbox's
+- **Instancing structs (M8e)**: the parameter records' struct parameters (USCSandbox's
   StructParameter: name, offset, array size, element size, members) are now read instead of refused, as are
   the program's shared `m_StructParams`. Example from Snapshot!'s Standard shader: UnityInstancing_PerDraw0
   holds `unity_Builtins0Array[2]` (stride 128) with unity_ObjectToWorldArray/unity_WorldToObjectArray. The
   RDEF builder writes them as fxc does: a struct variable (class struct, member table, member types), so
   HLSLcc recognises the flexible instancing buffer and emits `UNITY_RUNTIME_INSTANCING_ARRAY_SIZE`. The
   stand-in check counts struct ranges as covered, both stages get the union, and the GLES3 record carries the
-  structs with the D3D11 layout. Host tests are green; the measurement on Snapshot!'s shaders is still running.
+  structs with the D3D11 layout. Host tests are green.
+  - Snapshot! on the host: **16,286 GLES3 programs, 15 not translated** (before: about 4,500 failed).
+    sharedassets0 5,189/0, sharedassets1 9,381/7, sharedassets2 1,452/0, resources.assets 264/8. The 15
+    remaining use UAVs or buffer resources, which GLES3 does not map. The GLSL looks like Unity's own: struct
+    `unity_Builtins0Array_Type`, `unity_Builtins0Array[UNITY_RUNTIME_INSTANCING_ARRAY_SIZE]` in the uniform
+    block, indexed per instance (`[u_xlati0 / 8]`, 128-byte stride).
+- **IPA run 100** (9981855: instancing structs too) built successfully.

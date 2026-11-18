@@ -1539,3 +1539,13 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     real start and end and its protections as Windows flags. Unmapped is MEM_FREE up to the next
     mapping. The test DLL checks a stack local: committed, PAGE_READWRITE, the region reaching past
     the frame. It also runs in the device's Windows DLL test.
+- **Run 90**: the GC now scans, and that showed the change was too broad. Right after the first guest
+  thread started (GameAssembly +0x3023c0), a GC loop read 0x14d6cc210, in a 16 KiB host region with
+  `prot 0 max 7`. VirtualQuery had answered MEM_COMMIT/MEM_PRIVATE for **all** host memory, so the GC
+  took the host's own regions (iOS, FEX, Husk) as roots (`GC_register_dynamic_libraries`), and one of
+  them was inaccessible by the time it was scanned.
+  - Fix: only noted guest stacks are reported committed. `NoteGuestStack` now also keeps a
+    process-wide list (a new stack over an old one's memory replaces it). VirtualQuery answers
+    `[limit, base)` as MEM_COMMIT/PAGE_READWRITE for a page inside one, while the host still maps it
+    writable. Everything else outside reservations and images is one free page again. The device's
+    Windows DLL test and the host test note their stacks as well.

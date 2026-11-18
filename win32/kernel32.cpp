@@ -240,13 +240,6 @@ std::optional<HostRegionInfo> HostRegionAtOrAfter(uintptr_t address) {
 #endif
 }
 
-DWORD WindowsProtection(int prot) {
-  if (prot & PROT_EXEC) return (prot & PROT_WRITE) ? PAGE_EXECUTE_READWRITE : (prot & PROT_READ) ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
-  if (prot & PROT_WRITE) return PAGE_READWRITE;
-  if (prot & PROT_READ) return PAGE_READONLY;
-  return PAGE_NOACCESS;
-}
-
 uint64_t VirtualQuery(CallContext& c) {
   // MEMORY_BASIC_INFORMATION (48 bytes): BaseAddress, AllocationBase, AllocationProtect(4),
   // PartitionId(2)+pad, RegionSize, State(4), Protect(4), Type(4).
@@ -283,26 +276,31 @@ uint64_t VirtualQuery(CallContext& c) {
   const auto it = FindReservation(address);
   const uintptr_t page = address & ~(pageSize - 1);
   if (it == g_reservations.end()) {
-    // Not VirtualAlloc'd (thread stacks, the host's heap): what the host has mapped there. Boehm GC
-    // takes a thread's stack top from this, GC_get_stack_base: VirtualQuery(sp) and BaseAddress +
-    // RegionSize when the page is committed and writable. Answering MEM_FREE (as this did) made
-    // every stack 0 bytes, so the GC never scanned a stack and freed objects only a stack referred
-    // to: URP's RenderGraphCompilationCache lost its fields right after construction (Stack<T>._array
-    // null, runs 83-89).
-    const auto host = HostRegionAtOrAfter(page);
-    if (host && host->start <= page) {
-      Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
-      Store<uint64_t>(reinterpret_cast<uint64_t>(info + 8), host->start);
-      Store<DWORD>(reinterpret_cast<uint64_t>(info + 16), WindowsProtection(host->prot ? host->prot : PROT_READ | PROT_WRITE));
-      Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), host->end - page);
-      Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), host->prot ? MEM_COMMIT : MEM_RESERVE);
-      Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), host->prot ? WindowsProtection(host->prot) : 0);
-      Store<DWORD>(reinterpret_cast<uint64_t>(info + 40), MEM_PRIVATE);
-      return 48;
+    // A guest thread's stack: committed and writable, from its limit to its base. Boehm GC takes a
+    // thread's stack top from this, GC_get_stack_base: VirtualQuery(sp), BaseAddress + RegionSize when
+    // the page is committed and writable. Answering MEM_FREE for stacks (as this did) made every stack
+    // 0 bytes, so the GC never scanned one and freed objects only a stack referred to: URP's
+    // RenderGraphCompilationCache lost its fields right after construction (Stack<T>._array null,
+    // runs 83-89). Only noted guest stacks, and only while the host still has them mapped writable:
+    // reporting all host memory as committed (run 90) let the GC take the host's own regions as roots
+    // (GC_register_dynamic_libraries) and fault on one that became inaccessible.
+    if (const auto stack = GuestStackContaining(page)) {
+      const auto host = HostRegionAtOrAfter(page);
+      if (host && host->start <= page && (host->prot & PROT_WRITE)) {
+        Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
+        Store<uint64_t>(reinterpret_cast<uint64_t>(info + 8), stack->first);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 16), PAGE_READWRITE);
+        Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), stack->second - page);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_COMMIT);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), PAGE_READWRITE);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 40), MEM_PRIVATE);
+        return 48;
+      }
     }
-    // Nothing mapped here: free up to the next mapping.
+    // Anything else not VirtualAlloc'd (the host's own memory): one free page, as Windows would show
+    // memory outside the process's view.
     Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
-    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), host && host->start > page ? host->start - page : pageSize);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), pageSize);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_FREE);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), PAGE_NOACCESS);
     return 48;

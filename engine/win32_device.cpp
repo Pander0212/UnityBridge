@@ -179,6 +179,7 @@ struct GuestThread {
     tls = Win32::AllocThreadTls();
     std::memcpy(t + 0x08, &stackBase, 8);
     std::memcpy(t + 0x10, &stackLimit, 8);
+    Win32::NoteGuestStack(stackBase, stackLimit);  // VirtualQuery reports it committed (the GC's stack top)
     std::memcpy(t + 0x30, &self, 8);
     std::memcpy(t + 0x40, &pid, 8);
     std::memcpy(t + 0x48, &tid, 8);

@@ -211,6 +211,9 @@ void GuestReturning();
 void GuestEntering();
 void GuestExited();
 void NoteGuestStack(uint64_t base, uint64_t limit);
+// The guest stack [limit, base) that holds `address`, from every NoteGuestStack so far (any thread):
+// VirtualQuery reports these as committed, so Boehm GC finds each thread's stack top.
+std::optional<std::pair<uint64_t, uint64_t>> GuestStackContaining(uint64_t address);
 
 // ---- implicit TLS and the thread environment block (win32/tls.cpp) -----------------------
 // A loaded PE module can carry a TLS directory (__declspec(thread) data and TLS callbacks). Each

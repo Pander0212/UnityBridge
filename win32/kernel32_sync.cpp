@@ -465,10 +465,32 @@ void GuestEntering() { EnterGuestCode(*CurrentState()); }
 
 void GuestExited() { CurrentState()->inGuest.store(false); }
 
+namespace {
+std::mutex g_stacksMutex;
+std::map<uint64_t, uint64_t> g_guestStacks;  // limit -> base, every guest stack noted
+}
+
 void NoteGuestStack(uint64_t base, uint64_t limit) {
   ThreadState& s = *CurrentState();
   s.stackBase.store(base);
   s.stackLimit.store(limit);
+  if (base <= limit) return;
+  std::scoped_lock lock {g_stacksMutex};
+  // A new stack where an old one was (memory reused after a thread ended) replaces it.
+  for (auto it = g_guestStacks.begin(); it != g_guestStacks.end();) {
+    if (it->first < base && limit < it->second) it = g_guestStacks.erase(it);
+    else ++it;
+  }
+  g_guestStacks[limit] = base;
+}
+
+std::optional<std::pair<uint64_t, uint64_t>> GuestStackContaining(uint64_t address) {
+  std::scoped_lock lock {g_stacksMutex};
+  auto it = g_guestStacks.upper_bound(address);
+  if (it == g_guestStacks.begin()) return std::nullopt;
+  --it;
+  if (address >= it->second) return std::nullopt;
+  return std::make_pair(it->first, it->second);
 }
 
 void RegisterKernel32Sync(std::vector<Function>& out) {

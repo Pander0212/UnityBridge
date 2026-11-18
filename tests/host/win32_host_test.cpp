@@ -149,6 +149,17 @@ int main(int argc, char** argv) {
                              reinterpret_cast<uintptr_t>(image.base) + image.size,
                              reinterpret_cast<uintptr_t>(image.base) + image.pdataRva, image.pdataSize);
   const GuestTeb mainTeb = SetupGuestTeb();
+  {
+    // The DLL runs on this thread's own stack here: note it, as the device notes each guest stack.
+    pthread_attr_t attr;
+    void* low = nullptr;
+    size_t size = 0;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+      pthread_attr_getstack(&attr, &low, &size);
+      pthread_attr_destroy(&attr);
+      Win32::NoteGuestStack(reinterpret_cast<uint64_t>(low) + size, reinterpret_cast<uint64_t>(low));
+    }
+  }
   Win32::RunTlsCallbacks(Win32::DLL_PROCESS_ATTACH);
 
   using AllFn = int (__attribute__((ms_abi)) *)();

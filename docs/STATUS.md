@@ -1648,3 +1648,12 @@ that its host checks are done).
   ones among them). UnityPy: all 930 decode (758 ETC2_RGB, 153 ETC2_RGBA8, 18 RGBA32, 1 RGB24), median
   38.6 dB, worst 31.9 dB.
 - **IPA run 98** (9e61e8f: ETC2 plus bundle conversion) built successfully.
+- **IPA run 99** (6141143: crunched textures too) built successfully.
+- **Instancing structs (M8e, in progress)**: the parameter records' struct parameters (USCSandbox's
+  StructParameter: name, offset, array size, element size, members) are now read instead of refused, as are
+  the program's shared `m_StructParams`. Example from Snapshot!'s Standard shader: UnityInstancing_PerDraw0
+  holds `unity_Builtins0Array[2]` (stride 128) with unity_ObjectToWorldArray/unity_WorldToObjectArray. The
+  RDEF builder writes them as fxc does: a struct variable (class struct, member table, member types), so
+  HLSLcc recognises the flexible instancing buffer and emits `UNITY_RUNTIME_INSTANCING_ARRAY_SIZE`. The
+  stand-in check counts struct ranges as covered, both stages get the union, and the GLES3 record carries the
+  structs with the D3D11 layout. Host tests are green; the measurement on Snapshot!'s shaders is still running.

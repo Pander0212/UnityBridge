@@ -29,11 +29,23 @@ struct Variable {  // a member of a constant buffer, as Unity's parameter table 
   int offset = 0;     // bytes from the start of the buffer
 };
 
+// A struct member of a constant buffer (M8): GPU instancing's per-instance arrays, such as
+// UnityInstancing_PerDraw0's unity_Builtins0Array (two float4x4 per instance). Member offsets are
+// from the start of one element.
+struct Struct {
+  std::string name;
+  int offset = 0;     // bytes from the start of the buffer
+  int arraySize = 0;  // 0: not an array
+  int size = 0;       // bytes of one element
+  std::vector<Variable> members;
+};
+
 struct ConstantBuffer {
   std::string name;
   int bindPoint = 0;  // register b<n>
   int size = 0;       // bytes
   std::vector<Variable> variables;
+  std::vector<Struct> structs;
 };
 
 // Unity's TextureDimension.

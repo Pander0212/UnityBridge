@@ -99,10 +99,16 @@ struct Var {
   std::string name;
   int32_t type, rows, columns, matrix, arraySize, offset;
 };
+struct StructVar {  // a struct member of a cbuffer (M8: GPU instancing arrays)
+  std::string name;
+  int32_t offset = 0, arraySize = 0, size = 0;
+  std::vector<Var> members;
+};
 struct CBuffer {
   std::string name;
   int32_t size = 0;
   std::vector<Var> vars;
+  std::vector<StructVar> structs;
 };
 struct Binding {
   int32_t kind = 0;  // 0 texture, 1 cbuffer, 2 buffer, 3 UAV, 4 sampler
@@ -123,7 +129,7 @@ std::optional<Params> ReadParams(const std::string& rec, std::string* error) {
     CBuffer cb;
     cb.name = r.Bytes();
     cb.size = r.I32();
-    for (int32_t k = 0, m = r.Count(); k < m && r.ok; ++k) {
+    const auto var = [&] {
       Var v;
       v.name = r.Bytes();
       v.type = r.I32();
@@ -132,11 +138,18 @@ std::optional<Params> ReadParams(const std::string& rec, std::string* error) {
       v.matrix = r.I32();
       v.arraySize = r.I32();
       v.offset = r.I32();
-      cb.vars.push_back(v);
-    }
-    if (r.I32() != 0) {
-      *error = "struct parameters in cbuffer " + cb.name;
-      return std::nullopt;
+      return v;
+    };
+    for (int32_t k = 0, m = r.Count(); k < m && r.ok; ++k) cb.vars.push_back(var());
+    // Struct parameters (USCSandbox's StructParameter): name, offset, array size, element size, members.
+    for (int32_t k = 0, m = r.Count(); k < m && r.ok; ++k) {
+      StructVar st;
+      st.name = r.Bytes();
+      st.offset = r.I32();
+      st.arraySize = r.I32();
+      st.size = r.I32();
+      for (int32_t j = 0, n = r.Count(); j < n && r.ok; ++j) st.members.push_back(var());
+      cb.structs.push_back(st);
     }
     p.cbuffers.push_back(cb);
   }
@@ -177,6 +190,7 @@ struct Ubo {
   int32_t size;
   std::vector<Var> vars;
   int binding;
+  std::vector<StructVar> structs;
 };
 
 std::string ParamsRecordBytes(const std::vector<Var>& globals, int32_t globalsSize, const std::vector<Ubo>& ubos,
@@ -184,19 +198,28 @@ std::string ParamsRecordBytes(const std::vector<Var>& globals, int32_t globalsSi
   Out o;
   o.I32(kRecordVersion);
   o.I32(static_cast<int32_t>(2 + ubos.size()));
-  const auto cbuffer = [&](const std::string& name, int32_t size, const std::vector<Var>& vars) {
-    o.Bytes(name);
-    o.I32(size);
-    o.I32(static_cast<int32_t>(vars.size()));
-    for (const auto& v : vars) {
+  const auto vars = [&](const std::vector<Var>& list) {
+    o.I32(static_cast<int32_t>(list.size()));
+    for (const auto& v : list) {
       o.Bytes(v.name);
       for (const int32_t x : {v.type, v.rows, v.columns, v.matrix, v.arraySize, v.offset}) o.I32(x);
     }
-    o.I32(0);  // no struct parameters
   };
-  cbuffer("", 0, {});
-  cbuffer("$Globals", globalsSize, globals);
-  for (const auto& u : ubos) cbuffer(u.name, u.size, u.vars);
+  const auto cbuffer = [&](const std::string& name, int32_t size, const std::vector<Var>& list,
+                           const std::vector<StructVar>& structs) {
+    o.Bytes(name);
+    o.I32(size);
+    vars(list);
+    o.I32(static_cast<int32_t>(structs.size()));
+    for (const auto& st : structs) {
+      o.Bytes(st.name);
+      for (const int32_t x : {st.offset, st.arraySize, st.size}) o.I32(x);
+      vars(st.members);
+    }
+  };
+  cbuffer("", 0, {}, {});
+  cbuffer("$Globals", globalsSize, globals, {});
+  for (const auto& u : ubos) cbuffer(u.name, u.size, u.vars, u.structs);
   o.I32(static_cast<int32_t>(textures.size() + ubos.size()));
   for (const auto& t : textures) {
     o.Bytes(t.name);
@@ -335,6 +358,28 @@ std::vector<uint64_t> Keywords(const Value& sp) {
   return k;
 }
 
+ShaderXlat::Variable ToVariable(const Var& v) {
+  ShaderXlat::Variable x;
+  x.name = v.name;
+  x.type = static_cast<ShaderXlat::ParamType>(v.type);
+  x.rows = v.rows;
+  x.columns = v.columns;
+  x.isMatrix = v.matrix > 0;
+  x.arraySize = v.arraySize;
+  x.offset = v.offset;
+  return x;
+}
+
+ShaderXlat::Struct ToStruct(const StructVar& st) {
+  ShaderXlat::Struct x {st.name, st.offset, st.arraySize, st.size, {}};
+  for (const auto& m : st.members) x.members.push_back(ToVariable(m));
+  return x;
+}
+
+Var FromVariable(const ShaderXlat::Variable& v) {
+  return Var {v.name, static_cast<int32_t>(v.type), v.rows, v.columns, v.isMatrix ? 1 : 0, v.arraySize, v.offset};
+}
+
 // Unity's tables for one D3D11 program, as the Reflection BuildRdef takes.
 ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
                                     const std::map<int64_t, std::string>& names) {
@@ -370,6 +415,7 @@ ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
       x.offset = v.offset;
       c.variables.push_back(x);
     }
+    for (const auto& st : cb.structs) c.structs.push_back(ToStruct(st));
     r.constantBuffers.push_back(c);
   }
   const auto texture = [&](std::string name, int64_t reg, int64_t sampler, int64_t dim, bool ms) {
@@ -429,9 +475,47 @@ ShaderXlat::Reflection ReflectionOf(const Params& params, const Value& program,
           x.offset = int(v.Field("m_Index")->Int());
           c.variables.push_back(x);
         }
+      if (const Value* structs = b.Field("m_StructParams"))
+        for (const auto& st : structs->items) {
+          ShaderXlat::Struct x;
+          x.name = nameOf(st, "s");
+          x.offset = int(st.Field("m_Index")->Int());
+          x.arraySize = int(st.Field("m_ArraySize")->Int());
+          x.size = int(st.Field("m_StructSize")->Int());
+          if (const Value* vectors = st.Field("m_VectorMembers"))
+            for (const auto& v : vectors->items) {
+              ShaderXlat::Variable m;
+              m.name = nameOf(v, "v");
+              m.type = static_cast<ShaderXlat::ParamType>(v.Field("m_Type")->Int());
+              m.columns = int(v.Field("m_Dim")->Int());
+              m.arraySize = int(v.Field("m_ArraySize")->Int());
+              m.offset = int(v.Field("m_Index")->Int());
+              x.members.push_back(m);
+            }
+          if (const Value* matrices = st.Field("m_MatrixMembers"))
+            for (const auto& v : matrices->items) {
+              ShaderXlat::Variable m;
+              m.name = nameOf(v, "m");
+              m.type = static_cast<ShaderXlat::ParamType>(v.Field("m_Type")->Int());
+              m.rows = int(v.Field("m_RowCount")->Int());
+              m.columns = 4;
+              m.isMatrix = true;
+              m.arraySize = int(v.Field("m_ArraySize")->Int());
+              m.offset = int(v.Field("m_Index")->Int());
+              x.members.push_back(m);
+            }
+          std::stable_sort(x.members.begin(), x.members.end(),
+                           [](const auto& a, const auto& b) { return a.offset < b.offset; });
+          c.structs.push_back(x);
+        }
       if (!own) {
         r.constantBuffers.push_back(c);
         continue;
+      }
+      for (const auto& st : c.structs) {
+        bool have = false;
+        for (const auto& x : own->structs) have = have || x.name == st.name;
+        if (!have) own->structs.push_back(st);
       }
       own->size = std::max(own->size, c.size);
       for (const auto& v : c.variables) {
@@ -494,6 +578,12 @@ std::optional<Pair> TranslatePair(const Segments& dx, uint64_t vsCode, uint64_t 
         for (size_t k = 0; k < a.size(); ++k) if (a[k].name != b[k].name) return false;
         return true;
       };
+      for (auto* pair : {&vcb, &pcb})
+        for (const auto& st : (pair == &vcb ? pcb : vcb).structs) {
+          bool have = false;
+          for (const auto& x : pair->structs) have = have || x.name == st.name;
+          if (!have) pair->structs.push_back(st);
+        }
       if (sameNames(vcb.variables, pcb.variables)) continue;  // the same members in the same order already
       std::stable_sort(all.begin(), all.end(),
                        [](const ShaderXlat::Variable& a, const ShaderXlat::Variable& b) { return a.offset < b.offset; });
@@ -519,6 +609,7 @@ std::optional<Pair> TranslatePair(const Segments& dx, uint64_t vsCode, uint64_t 
   struct Merged {
     int32_t size = 0;
     std::vector<Var> vars;
+    std::vector<StructVar> structs;
   };
   std::map<std::string, Merged> dxBuffers;
   for (const auto& t : tables)
@@ -529,6 +620,13 @@ std::optional<Pair> TranslatePair(const Segments& dx, uint64_t vsCode, uint64_t 
         const Var x {v.name, static_cast<int32_t>(v.type), v.rows, v.columns, v.isMatrix ? 1 : 0, v.arraySize, v.offset};
         auto it = std::find_if(m.vars.begin(), m.vars.end(), [&](const Var& y) { return y.name == v.name; });
         if (it == m.vars.end()) m.vars.push_back(x);
+        else *it = x;
+      }
+      for (const auto& st : cb.structs) {
+        StructVar x {st.name, st.offset, st.arraySize, st.size, {}};
+        for (const auto& mem : st.members) x.members.push_back(FromVariable(mem));
+        auto it = std::find_if(m.structs.begin(), m.structs.end(), [&](const StructVar& y) { return y.name == st.name; });
+        if (it == m.structs.end()) m.structs.push_back(x);
         else *it = x;
       }
     }
@@ -542,7 +640,7 @@ std::optional<Pair> TranslatePair(const Segments& dx, uint64_t vsCode, uint64_t 
       globals = src.vars;
       globalsSize = src.size;
     } else {
-      ubos.push_back({b.name, src.size, src.vars, b.binding});
+      ubos.push_back({b.name, src.size, src.vars, b.binding, src.structs});
     }
   }
   return Pair {CodeRecordBytes(program->source, *vsRecord), ParamsRecordBytes(globals, globalsSize, ubos,

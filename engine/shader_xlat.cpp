@@ -74,6 +74,12 @@ uint32_t VariableSize(const Variable& v) {
   return (n - 1) * regs * 16 + last;
 }
 
+// Bytes a struct member occupies: its elements 16-byte aligned, the last one unpadded.
+uint32_t StructSize(const Struct& s) {
+  const uint32_t n = s.arraySize > 0 ? uint32_t(s.arraySize) : 1;
+  return (n - 1) * ((uint32_t(s.size) + 15) & ~15u) + uint32_t(s.size);
+}
+
 // D3D_SRV_DIMENSION for a Unity texture dimension.
 uint32_t SrvDimension(const Texture& t) {
   switch (t.dim) {
@@ -126,13 +132,21 @@ std::vector<uint8_t> BuildRdef(const Reflection& r, int major, int minor) {
   }
   w.Set(bindCount, bindings);
 
-  // Constant buffer descriptors, their variables and each variable's type.
+  // Constant buffer descriptors, their variables and each variable's type. A buffer's members in
+  // offset order: its variables (-1 - i) and its structs (i).
+  const auto members = [](const ConstantBuffer& cb) {
+    std::vector<std::pair<int, int>> m;  // offset, index
+    for (size_t i = 0; i < cb.variables.size(); ++i) m.push_back({cb.variables[i].offset, -1 - int(i)});
+    for (size_t i = 0; i < cb.structs.size(); ++i) m.push_back({cb.structs[i].offset, int(i)});
+    std::stable_sort(m.begin(), m.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    return m;
+  };
   w.Set(cbCount, static_cast<uint32_t>(r.constantBuffers.size()));
   w.Set(cbOffset, static_cast<uint32_t>(w.Here()));
   std::vector<size_t> varOffsetWord;
   for (const auto& cb : r.constantBuffers) {
     w.PutString(cb.name);
-    w.Put(static_cast<uint32_t>(cb.variables.size()));
+    w.Put(static_cast<uint32_t>(cb.variables.size() + cb.structs.size()));
     varOffsetWord.push_back(w.Put(0));
     w.Put(static_cast<uint32_t>((cb.size + 15) & ~15));
     w.Put(0);  // flags
@@ -140,26 +154,60 @@ std::vector<uint8_t> BuildRdef(const Reflection& r, int major, int minor) {
   }
   std::vector<std::vector<size_t>> typeOffsetWord(r.constantBuffers.size());
   for (size_t c = 0; c < r.constantBuffers.size(); ++c) {
+    const auto& cb = r.constantBuffers[c];
     w.Set(varOffsetWord[c], static_cast<uint32_t>(w.Here()));
-    for (const auto& v : r.constantBuffers[c].variables) {
-      w.PutString(v.name);
-      w.Put(static_cast<uint32_t>(v.offset));
-      w.Put(VariableSize(v));
+    for (const auto& [offset, index] : members(cb)) {
+      if (index < 0) {
+        const auto& v = cb.variables[size_t(-1 - index)];
+        w.PutString(v.name);
+        w.Put(static_cast<uint32_t>(v.offset));
+        w.Put(VariableSize(v));
+      } else {
+        const auto& st = cb.structs[size_t(index)];
+        w.PutString(st.name);
+        w.Put(static_cast<uint32_t>(st.offset));
+        w.Put(StructSize(st));
+      }
       w.Put(2);  // D3D_SVF_USED
       typeOffsetWord[c].push_back(w.Put(0));
       w.Put(0);  // no default value
       if (major >= 5) { w.Put(0xffffffffu); w.Put(0); w.Put(0xffffffffu); w.Put(0); }
     }
   }
+  const auto variableType = [&](const Variable& v) {
+    const uint16_t cls = v.isMatrix ? SVC_MATRIX_COLUMNS : (v.columns == 1 && v.rows == 1 ? SVC_SCALAR : SVC_VECTOR);
+    w.PutHalves(cls, VariableType(v.type));
+    w.PutHalves(static_cast<uint16_t>(v.rows), static_cast<uint16_t>(v.columns));
+    w.PutHalves(static_cast<uint16_t>(v.arraySize), 0);  // elements, members
+    w.Put(0);                                             // member offset
+  };
   for (size_t c = 0; c < r.constantBuffers.size(); ++c) {
-    for (size_t i = 0; i < r.constantBuffers[c].variables.size(); ++i) {
-      const auto& v = r.constantBuffers[c].variables[i];
-      w.Set(typeOffsetWord[c][i], static_cast<uint32_t>(w.Here()));
-      const uint16_t cls = v.isMatrix ? SVC_MATRIX_COLUMNS : (v.columns == 1 && v.rows == 1 ? SVC_SCALAR : SVC_VECTOR);
-      w.PutHalves(cls, VariableType(v.type));
-      w.PutHalves(static_cast<uint16_t>(v.rows), static_cast<uint16_t>(v.columns));
-      w.PutHalves(static_cast<uint16_t>(v.arraySize), 0);  // elements, members
-      w.Put(0);                                             // member offset
+    const auto& cb = r.constantBuffers[c];
+    size_t k = 0;
+    for (const auto& [offset, index] : members(cb)) {
+      w.Set(typeOffsetWord[c][k++], static_cast<uint32_t>(w.Here()));
+      if (index < 0) {
+        variableType(cb.variables[size_t(-1 - index)]);
+        continue;
+      }
+      // A struct: its type (class struct, one row of size/4 columns as fxc writes it), then its
+      // member table (name, type, offset), then the members' types.
+      const auto& st = cb.structs[size_t(index)];
+      w.PutHalves(SVC_STRUCT, SVT_VOID);
+      w.PutHalves(1, static_cast<uint16_t>(st.size / 4));
+      w.PutHalves(static_cast<uint16_t>(st.arraySize), static_cast<uint16_t>(st.members.size()));
+      const size_t table = w.Put(0);
+      w.Set(table, static_cast<uint32_t>(w.Here()));
+      std::vector<size_t> memberType;
+      for (const auto& m : st.members) {
+        w.PutString(m.name);
+        memberType.push_back(w.Put(0));
+        w.Put(static_cast<uint32_t>(m.offset));
+      }
+      for (size_t i = 0; i < st.members.size(); ++i) {
+        w.Set(memberType[i], static_cast<uint32_t>(w.Here()));
+        variableType(st.members[i]);
+      }
     }
   }
   return w.Finish();
@@ -299,7 +347,7 @@ bool CompleteReflection(Reflection& r, const std::vector<uint8_t>& dxbc, std::st
     Variable all;  // the whole buffer as one float4 array, so every offset has a variable
     all.name = "UnityBridge_cb" + std::to_string(reg) + "_data";
     all.arraySize = size > 1 ? size : 0;
-    r.constantBuffers.push_back({"UnityBridge_cb" + std::to_string(reg), reg, size * 16, {all}});
+    r.constantBuffers.push_back({"UnityBridge_cb" + std::to_string(reg), reg, size * 16, {all}, {}});
     if (notes) *notes += "constant buffer cb" + std::to_string(reg) + " added\n";
   }
   // Every component the program reads needs a variable HLSLcc finds at its offset (by HLSLcc's own
@@ -310,6 +358,8 @@ bool CompleteReflection(Reflection& r, const std::vector<uint8_t>& dxbc, std::st
       const uint32_t span = v.arraySize ? ((size + 15) / 16) * 16 * uint32_t(v.arraySize - 1) + size : size;
       if (byte >= uint32_t(v.offset) && byte < uint32_t(v.offset) + span) return true;
     }
+    for (const auto& st : cb.structs)
+      if (byte >= uint32_t(st.offset) && byte < uint32_t(st.offset) + StructSize(st)) return true;
     return false;
   };
   for (auto& cb : r.constantBuffers) {

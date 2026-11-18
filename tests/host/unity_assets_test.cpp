@@ -119,6 +119,42 @@ int main() {
     }
   }
 
+  // M8: a file added to a bundle (a serialized file's new "<CAB>.ub.resS") is read back after the
+  // others, at its own offset, and the blocks' CRC-32 stays the original.
+  {
+    const auto windows = MakeBundle(19);
+    std::string berror;
+    const std::vector<uint8_t> extra = {1, 2, 3, 4, 5, 6, 7};
+    const auto out = UnityBundle::Transform(
+        windows.data(), windows.size(),
+        [&](std::vector<UnityBundle::File>& files) {
+          CHECK(files.size() == 1 && files[0].path == "CAB-0123456789abcdef" && files[0].flags == 4);
+          CHECK(UnityBundle::IsSerializedFile(files[0].data.data(), files[0].data.size()));
+          CHECK(UnityBundle::RetargetFile(files[0].data) && !UnityBundle::RetargetFile(files[0].data));
+          files.push_back({files[0].path + ".ub.resS", 0, extra});
+          return true;
+        },
+        &berror);
+    CHECK(out.has_value());
+    if (out) {
+      std::vector<std::string> paths;
+      std::vector<uint8_t> got;
+      const auto again = UnityBundle::Transform(
+          out->data(), out->size(),
+          [&](std::vector<UnityBundle::File>& files) {
+            for (const auto& f : files) paths.push_back(f.path);
+            if (files.size() == 2) got = files[1].data;
+            return false;
+          },
+          &berror);
+      CHECK(!again && berror.empty());
+      CHECK(paths == std::vector<std::string>({"CAB-0123456789abcdef", "CAB-0123456789abcdef.ub.resS"}) && got == extra);
+      const auto crcIn = UnityBundle::BlocksCrc(windows.data(), windows.size(), &berror);
+      const auto crcOut = UnityBundle::BlocksCrc(out->data(), out->size(), &berror);
+      CHECK(crcIn && crcOut && *crcIn == *crcOut);
+    }
+  }
+
   // A Windows build's list (Direct3D11) becomes [OpenGLES3]; the rest of the object stays.
   const auto windows = MakeSettings({2});
   CHECK(Apis(windows) == std::vector<int64_t>({2}));

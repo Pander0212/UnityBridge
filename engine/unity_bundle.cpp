@@ -194,72 +194,98 @@ std::optional<uint32_t> BlocksCrc(const uint8_t* data, size_t size, std::string*
   return Crc().Of(u->payload.data(), u->payload.size());
 }
 
-std::optional<std::vector<uint8_t>> Retarget(const uint8_t* data, size_t size, Stats* stats, std::string* error) {
-  Stats local;
-  Stats& st = stats ? *stats : local;
-  st = Stats {};  // counts of this call only: "nothing to rewrite" is decided from them
-  std::string scratch;
-  std::string& err = error ? *error : scratch;
-  err.clear();
-  auto unpacked = Unpack(data, size, err);
-  if (!unpacked) return std::nullopt;
-  const uint32_t format = unpacked->format, flags = unpacked->flags;
-  const std::string& playerVersion = unpacked->playerVersion;
-  const std::string& engineVersion = unpacked->engineVersion;
-  auto& blocks = unpacked->blocks;
-  const auto& nodes = unpacked->nodes;
-  auto& payload = unpacked->payload;
-  const uint32_t crcBefore = Crc().Of(payload.data(), payload.size());
-  st.nodes = int(nodes.size());
-  for (const auto& nd : nodes) {
-    if (RetargetSerialized(payload.data() + nd.offset, size_t(nd.size))) ++st.retargeted;
-  }
-  if (!st.retargeted) return std::nullopt;
-  // Addressables' catalog holds each bundle's CRC-32 over its uncompressed blocks, and the engine
-  // refuses a bundle that does not match ("CRC Mismatch", run 85). Four bytes after the last file,
-  // in no directory entry, bring it back to the original value.
-  if (!blocks.empty()) {
-    uint8_t tail[4];
-    Crc().Forge(Crc().Of(payload.data(), payload.size()), crcBefore, tail);
-    payload.insert(payload.end(), tail, tail + 4);
-    blocks.back().size += 4;
-  }
+namespace {
 
-  // Written back: the same header, info right after it (uncompressed), the blocks uncompressed.
-  std::vector<uint8_t> out;
-  out.insert(out.end(), data, data + 8);
-  PutBe(out, format, 4);
-  out.insert(out.end(), playerVersion.begin(), playerVersion.end());
+// The bundle written back: the header of `u`, its blocks info right after the header (uncompressed),
+// then `files` concatenated, uncompressed, in blocks of at most 1 MiB, and four bytes after the files
+// (in no directory entry) that make the blocks' CRC-32 `crc`. Addressables' catalog holds each
+// bundle's CRC-32 over its uncompressed blocks, and the engine refuses one that does not match ("CRC
+// Mismatch", run 85).
+std::vector<uint8_t> Pack(const Unpacked& u, const uint8_t* signature, const std::vector<File>& files, uint32_t crc) {
+  std::vector<uint8_t> payload;
+  std::vector<Node> nodes;
+  for (const auto& f : files) {
+    nodes.push_back({int64_t(payload.size()), int64_t(f.data.size()), f.flags, f.path});
+    payload.insert(payload.end(), f.data.begin(), f.data.end());
+  }
+  uint8_t tail[4];
+  Crc().Forge(Crc().Of(payload.data(), payload.size()), crc, tail);
+  payload.insert(payload.end(), tail, tail + 4);
+  constexpr size_t kBlock = size_t {1} << 20;
+  std::vector<uint8_t> info(16, 0);
+  const size_t blockCount = (payload.size() + kBlock - 1) / kBlock;
+  PutBe(info, blockCount, 4);
+  for (size_t i = 0; i < blockCount; ++i) {
+    const size_t n = std::min(kBlock, payload.size() - i * kBlock);
+    PutBe(info, n, 4);
+    PutBe(info, n, 4);
+    PutBe(info, 0, 2);  // uncompressed
+  }
+  PutBe(info, nodes.size(), 4);
+  for (const auto& nd : nodes) {
+    PutBe(info, uint64_t(nd.offset), 8);
+    PutBe(info, uint64_t(nd.size), 8);
+    PutBe(info, nd.flags, 4);
+    info.insert(info.end(), nd.path.begin(), nd.path.end());
+    info.push_back(0);
+  }
+  std::vector<uint8_t> out(signature, signature + 8);
+  PutBe(out, u.format, 4);
+  out.insert(out.end(), u.playerVersion.begin(), u.playerVersion.end());
   out.push_back(0);
-  out.insert(out.end(), engineVersion.begin(), engineVersion.end());
+  out.insert(out.end(), u.engineVersion.begin(), u.engineVersion.end());
   out.push_back(0);
   const size_t sizeAt = out.size();
   PutBe(out, 0, 8);
-  std::vector<uint8_t> newInfo(16, 0);
-  PutBe(newInfo, blocks.size(), 4);
-  for (const auto& b : blocks) {
-    PutBe(newInfo, b.size, 4);
-    PutBe(newInfo, b.size, 4);
-    PutBe(newInfo, b.flags & ~kCompressionMask, 2);
-  }
-  PutBe(newInfo, nodes.size(), 4);
-  for (const auto& nd : nodes) {
-    PutBe(newInfo, uint64_t(nd.offset), 8);
-    PutBe(newInfo, uint64_t(nd.size), 8);
-    PutBe(newInfo, nd.flags, 4);
-    newInfo.insert(newInfo.end(), nd.path.begin(), nd.path.end());
-    newInfo.push_back(0);
-  }
-  const uint32_t newFlags = (flags & ~(kCompressionMask | kInfoAtEnd)) | kPadBeforeBlocks;
-  PutBe(out, newInfo.size(), 4);
-  PutBe(out, newInfo.size(), 4);
-  PutBe(out, newFlags, 4);
-  if (format >= 7) out.resize((out.size() + 15) / 16 * 16, 0);
-  out.insert(out.end(), newInfo.begin(), newInfo.end());
+  PutBe(out, info.size(), 4);
+  PutBe(out, info.size(), 4);
+  PutBe(out, (u.flags & ~(kCompressionMask | kInfoAtEnd)) | kPadBeforeBlocks, 4);
+  if (u.format >= 7) out.resize((out.size() + 15) / 16 * 16, 0);
+  out.insert(out.end(), info.begin(), info.end());
   out.resize((out.size() + 15) / 16 * 16, 0);
   out.insert(out.end(), payload.begin(), payload.end());
   for (int i = 0; i < 8; ++i) out[sizeAt + i] = uint8_t(uint64_t(out.size()) >> (56 - 8 * i));
   return out;
+}
+
+} // namespace
+
+bool RetargetFile(std::vector<uint8_t>& file) { return RetargetSerialized(file.data(), file.size()); }
+
+bool IsSerializedFile(const uint8_t* data, size_t size) {
+  if (size < 48) return false;
+  const uint32_t version = uint32_t(data[8]) << 24 | uint32_t(data[9]) << 16 | uint32_t(data[10]) << 8 | data[11];
+  return version >= 9 && version <= 30 && (data[16] == 0 || data[16] == 1);
+}
+
+std::optional<std::vector<uint8_t>> Transform(const uint8_t* data, size_t size, const Edit& edit, std::string* error) {
+  std::string scratch;
+  std::string& err = error ? *error : scratch;
+  err.clear();
+  auto u = Unpack(data, size, err);
+  if (!u) return std::nullopt;
+  const uint32_t crc = Crc().Of(u->payload.data(), u->payload.size());
+  std::vector<File> files;
+  for (const auto& nd : u->nodes)
+    files.push_back({nd.path, nd.flags,
+                     std::vector<uint8_t>(u->payload.begin() + nd.offset, u->payload.begin() + nd.offset + nd.size)});
+  if (!edit(files)) return std::nullopt;
+  return Pack(*u, data, files, crc);
+}
+
+std::optional<std::vector<uint8_t>> Retarget(const uint8_t* data, size_t size, Stats* stats, std::string* error) {
+  Stats local;
+  Stats& st = stats ? *stats : local;
+  st = Stats {};  // counts of this call only: "nothing to rewrite" is decided from them
+  return Transform(
+      data, size,
+      [&](std::vector<File>& files) {
+        st.nodes = int(files.size());
+        for (auto& f : files)
+          if (RetargetSerialized(f.data.data(), f.data.size())) ++st.retargeted;
+        return st.retargeted > 0;
+      },
+      error);
 }
 
 } // namespace UnityBridge::UnityBundle

@@ -79,14 +79,29 @@ std::optional<File> Parse(const uint8_t* data, size_t size, std::string* error) 
   Reader r(data, metaEnd, kHeaderSize);
   f.unityVersion = r.CString();
   f.platform = r.Get<int32_t>();
-  if (r.Get<uint8_t>() != 0) return fail("the file has type trees (not a player file)");
+  // Player files carry no type trees; the files inside asset bundles do (M8). Both are read here: a
+  // type's tree is skipped (this reader uses its own built-in trees) and kept in metaHead as bytes.
+  f.typeTrees = r.Get<uint8_t>() != 0;
   const auto typeCount = r.Get<int32_t>();
   if (!r.ok || typeCount < 0 || typeCount > 100000) return fail("bad type table");
   for (int32_t i = 0; i < typeCount && r.ok; ++i) {
     const auto classId = r.Get<int32_t>();
-    r.Skip(1 + 2);                  // stripped, script type index
-    if (classId == 114) r.Skip(16);  // script id
-    r.Skip(16);                      // old type hash
+    r.Skip(1);                                  // stripped
+    const auto scriptTypeIndex = r.Get<int16_t>();
+    (void)scriptTypeIndex;
+    if (classId == 114) r.Skip(16);             // script id (MonoBehaviour)
+    r.Skip(16);                                 // old type hash
+    if (f.typeTrees) {
+      // The tree blob: node count, string buffer size, 32-byte nodes (format >= 19), the strings;
+      // then (format >= 21) the type dependencies, a count and that many ints.
+      const auto nodes = r.Get<int32_t>();
+      const auto strings = r.Get<int32_t>();
+      if (!r.ok || nodes < 0 || strings < 0) return fail("bad type tree");
+      r.Skip(size_t(nodes) * 32 + size_t(strings));
+      const auto deps = r.Get<int32_t>();
+      if (!r.ok || deps < 0) return fail("bad type dependencies");
+      r.Skip(size_t(deps) * 4);
+    }
     f.typeClassIds.push_back(classId);
   }
   const auto objectCount = r.Get<int32_t>();

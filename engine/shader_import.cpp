@@ -63,11 +63,57 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   std::string error;
   // M6: an asset bundle (Addressables' StreamingAssets/aa/...): its serialized files retargeted to
   // Android, written back uncompressed.
+  // M8: their textures converted (DXT -> ETC2, BC7 -> RGBA32) and shaders given GLES3 programs too,
+  // each serialized file's new streamed pixels in a new file of the bundle, "<CAB>.ub.resS".
   if (UnityBundle::IsBundle(in.data, in.size)) {
-    UnityBundle::Stats bs;
-    const auto out = UnityBundle::Retarget(in.data, in.size, &bs, &error);
+    int nodes = 0, retargeted = 0, converted = 0, textures = 0, textureErrors = 0, programs = 0;
+    std::string firstError;
+    const auto out = UnityBundle::Transform(
+        in.data, in.size,
+        [&](std::vector<UnityBundle::File>& files) {
+          nodes = int(files.size());
+          const size_t original = files.size();
+          for (size_t i = 0; i < original; ++i) {
+            if (!(files[i].flags & 4) || !UnityBundle::IsSerializedFile(files[i].data.data(), files[i].data.size()))
+              continue;
+            if (UnityBundle::RetargetFile(files[i].data)) ++retargeted;
+            const std::string cab = files[i].path;
+            std::vector<uint8_t> res;
+            UnityTextures::TextureIO io;
+            io.path = "archive:/" + cab + "/" + cab + ".ub.resS";
+            io.read = [&](const std::string& path, uint64_t offset, uint32_t bytes) -> std::optional<std::vector<uint8_t>> {
+              // "archive:/CAB-<hash>/CAB-<hash>.resS": a file of this bundle.
+              const size_t slash = path.find_last_of('/');
+              const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+              for (size_t k = 0; k < original; ++k)
+                if (files[k].path == name && offset + bytes <= files[k].data.size())
+                  return std::vector<uint8_t>(files[k].data.begin() + offset, files[k].data.begin() + offset + bytes);
+              return std::nullopt;
+            };
+            io.write = [&](const uint8_t* bytes, size_t n) {
+              res.insert(res.end(), bytes, bytes + n);
+              return true;
+            };
+            ShaderGles3::Stats stats;
+            std::string why;
+            auto conv = ShaderGles3::ConvertFile(files[i].data.data(), files[i].data.size(), false, &stats, &why, &io);
+            textures += stats.textures;
+            textureErrors += stats.textureErrors;
+            programs += stats.programs;
+            if (!conv) {
+              if (why != "nothing to convert" && firstError.empty()) firstError = cab + ": " + why;
+              continue;
+            }
+            files[i].data = std::move(*conv);
+            ++converted;
+            if (!res.empty()) files.push_back({cab + ".ub.resS", 0, std::move(res)});
+          }
+          return retargeted > 0 || converted > 0;
+        },
+        &error);
     if (!out) {
-      Put(log, logcap, error.empty() ? "bundle: " + std::to_string(bs.nodes) + " files, none with a desktop build target"
+      Put(log, logcap, error.empty() ? "bundle: " + std::to_string(nodes) + " files, nothing to rewrite" +
+                                           (firstError.empty() ? "" : "; " + firstError)
                                      : "bundle: " + error);
       return 0;
     }
@@ -79,8 +125,11 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
       Put(log, logcap, "write failed");
       return -1;
     }
-    Put(log, logcap, "bundle: " + std::to_string(bs.nodes) + " files, " + std::to_string(bs.retargeted) +
-                         " retargeted to Android, written uncompressed");
+    Put(log, logcap, "bundle: " + std::to_string(nodes) + " files, " + std::to_string(retargeted) +
+                         " retargeted to Android, " + std::to_string(textures) + " textures converted" +
+                         (textureErrors ? " (" + std::to_string(textureErrors) + " not)" : "") +
+                         (programs ? ", " + std::to_string(programs) + " GLES3 programs" : "") +
+                         (firstError.empty() ? "" : "; " + firstError) + ", written uncompressed");
     return 1;
   }
   // The metadata alone says whether there is a Shader at all; the data is only read for those files.
@@ -194,7 +243,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 14; }
+extern "C" int ub_shader_import_version(void) { return 15; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

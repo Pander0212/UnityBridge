@@ -1627,3 +1627,16 @@ that its host checks are done).
   independently with UnityPy against the DXT originals: median 39.2 dB PSNR, worst 32.8 dB (33 textures),
   so the channel order is right. A synthetic DXT1/DXT5 texture (two mips) in unity-assets-test checks
   formats and sizes. Import version 14: everything is converted once more, Milf Idle Life included.
+- **Texturen in Bundles (M8c)**: `UnityBundle::Transform` packs a bundle out into its files
+  (path, flags, bytes), lets an edit step change them or add new ones, and packs it back uncompressed
+  (1 MiB blocks). The blocks' CRC-32 stays the original one: four bytes after the last file. Retarget is
+  now just one such step. The import (version 15) retargets every serialized file in a bundle and runs
+  `ConvertFile` on it (shaders, BuildSettings, textures, as for the data files). Streamed pixels from
+  `archive:/CAB-x/CAB-x.resS` are read from the bundle's own files, and the new ones go into a new file
+  `CAB-x.ub.resS` in the same bundle. `UnityFile::Parse` now also reads files with type trees (as in
+  bundles), skipping the trees. Host test: an added file is read back, CRC unchanged.
+  - On the host with all 113 Snapshot! bundles (4 min): **830 textures converted, none failed**. UnityPy
+    reads every converted bundle again; all 930 Texture2D decode (661 ETC2_RGB, 153 ETC2_RGBA8,
+    18 RGBA32 from BC7, 97 DXT1Crunched untouched, 1 RGB24), against the originals median 38.9 dB PSNR,
+    worst 34.7 dB.
+  - Still open: crunched textures, instancing cbuffers, video.

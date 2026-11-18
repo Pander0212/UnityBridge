@@ -24,6 +24,7 @@ struct File {
   uint32_t version = 0;
   std::string unityVersion;
   int32_t platform = 0;
+  bool typeTrees = false;  // the file carries type trees (a file inside an asset bundle, M8)
   std::vector<int32_t> typeClassIds;
   std::vector<Object> objects;  // in table order
 
@@ -34,8 +35,8 @@ struct File {
   uint64_t dataOffset = 0;
 };
 
-// Parses `data` (a whole serialized file). Nullopt and `error` if it is not a format 22 file without
-// type trees, the format 2021.3 players use.
+// Parses `data` (a whole serialized file). Nullopt and `error` if it is not a format 22 file (with or
+// without type trees: player files have none, bundles' files have them).
 std::optional<File> Parse(const uint8_t* data, size_t size, std::string* error);
 
 // One object's new data, by its index in File::objects.

@@ -66,6 +66,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
   add_test(NAME il2cpp-intercept-test COMMAND il2cpp-intercept-test)
 endif()
 
+# M8: etcpak (scripts/fetch-etcpak.sh into build/etcpak, BSD-3-Clause): ETC2 encoding of desktop textures.
+set(ETCPAK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/build/etcpak)
+if(EXISTS ${ETCPAK_DIR}/ProcessRGB.cpp)
+  add_library(etcpak STATIC ${ETCPAK_DIR}/ProcessRGB.cpp ${ETCPAK_DIR}/Tables.cpp ${ETCPAK_DIR}/Dither.cpp)
+  target_include_directories(etcpak SYSTEM PUBLIC ${ETCPAK_DIR})
+  target_compile_options(etcpak PRIVATE -w)
+endif()
+
 # M4: HLSLcc (fetched by scripts/fetch-hlslcc.sh into build/hlslcc, MIT) and the D3D11 -> GLSL ES 3.0
 # translation around it; ub-shader-xlat runs it on a case exported from Unity's own shaders.
 set(HLSLCC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/build/hlslcc)
@@ -87,14 +95,14 @@ if(EXISTS ${HLSLCC_DIR}/src/HLSLcc.cpp)
   add_executable(ub-shader-convert tools/shader_convert/main.cpp engine/shader_gles3.cpp engine/shader_xlat.cpp
                  engine/unity_file.cpp engine/unity_typetree.cpp engine/shader_import.cpp engine/unity_textures.cpp
                  engine/unity_bundle.cpp)
-  target_link_libraries(ub-shader-convert PRIVATE hlslcc)
+  target_link_libraries(ub-shader-convert PRIVATE hlslcc etcpak)
   target_include_directories(ub-shader-convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(ub-shader-convert PRIVATE -Wall -Wextra)
   set_target_properties(ub-shader-convert PROPERTIES CXX_STANDARD 17)
 
   add_executable(unity-assets-test tests/host/unity_assets_test.cpp engine/shader_gles3.cpp engine/shader_xlat.cpp
                  engine/unity_file.cpp engine/unity_typetree.cpp engine/unity_textures.cpp engine/unity_bundle.cpp)
-  target_link_libraries(unity-assets-test PRIVATE hlslcc)
+  target_link_libraries(unity-assets-test PRIVATE hlslcc etcpak)
   target_include_directories(unity-assets-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_options(unity-assets-test PRIVATE -Wall -Wextra)
   set_target_properties(unity-assets-test PROPERTIES CXX_STANDARD 17)

@@ -2,6 +2,8 @@
 // Texture2D objects: see unity_textures.h.
 #include "engine/unity_textures.h"
 
+#include "ProcessRGB.hpp"  // etcpak (build/etcpak, BSD-3-Clause): ETC2 encoding
+
 #include "engine/unity_typetree.h"
 
 #include <algorithm>
@@ -290,6 +292,43 @@ bool DecodeBlocks(int format, const uint8_t* src, size_t size, int width, int he
   return true;
 }
 
+namespace {
+
+constexpr int kRgba32 = 4, kEtc2Rgb = 45, kEtc2Rgba8 = 47;
+
+// What a desktop format becomes on the phone (M8): ETC2 of the same size where an ETC2 format fits,
+// RGBA32 otherwise. DXT1 (4 bpp) -> ETC2_RGB (4 bpp), DXT5 (8 bpp) -> ETC2_RGBA8 (8 bpp); BC7 keeps its
+// quality as RGBA32 (games have few BC7 textures, and ETC2 would lose much of what BC7 keeps).
+int MobileFormat(int format) {
+  switch (format) {
+  case 10: return kEtc2Rgb;
+  case 12: return kEtc2Rgba8;
+  default: return kRgba32;
+  }
+}
+
+// ETC2 blocks for one mip level from its RGBA pixels: the level padded to whole 4x4 blocks by repeating
+// its last row and column, as Unity lays out ETC2 levels.
+std::vector<uint8_t> EncodeEtc2(const uint8_t* rgba, int w, int h, bool alpha) {
+  const int bw = (w + 3) / 4, bh = (h + 3) / 4, pw = bw * 4, ph = bh * 4;
+  std::vector<uint32_t> padded(size_t(pw) * size_t(ph));
+  for (int y = 0; y < ph; ++y)
+    for (int x = 0; x < pw; ++x) {
+      const uint8_t* p = rgba + (size_t(std::min(y, h - 1)) * size_t(w) + size_t(std::min(x, w - 1))) * 4;
+      // etcpak reads each pixel as the bytes B, G, R, A (its Bitmap layout).
+      padded[size_t(y) * size_t(pw) + size_t(x)] =
+          uint32_t(p[2]) | uint32_t(p[1]) << 8 | uint32_t(p[0]) << 16 | uint32_t(p[3]) << 24;
+    }
+  const size_t blocks = size_t(bw) * size_t(bh);
+  std::vector<uint64_t> out(blocks * (alpha ? 2 : 1));
+  if (alpha) CompressEtc2Rgba(padded.data(), out.data(), uint32_t(blocks), size_t(pw), true);
+  else CompressEtc2Rgb(padded.data(), out.data(), uint32_t(blocks), size_t(pw), true);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(out.data());
+  return std::vector<uint8_t>(bytes, bytes + out.size() * 8);
+}
+
+} // namespace
+
 bool ToRgba32(TypeTree::Value& tex, TextureIO& io, std::string* error) {
   TypeTree::Value* format = tex.Field("m_TextureFormat");
   if (!format || BlockBytes(int(format->Int())) == 0) return false;
@@ -308,11 +347,11 @@ bool ToRgba32(TypeTree::Value& tex, TextureIO& io, std::string* error) {
   if (!name || !width || !height || !mips || !images || !complete || !data || !stream) return fail("fields missing");
   const int f = int(format->Int()), w = int(width->Int()), h = int(height->Int()), m = int(mips->Int());
   if (w <= 0 || h <= 0 || m <= 0 || m > 16 || images->Int() != 1) return fail(name->bytes + ": not a plain 2D texture");
-  size_t blockTotal = 0, rgbaTotal = 0;
+  const int target = io.targetRgba32Only ? kRgba32 : MobileFormat(f);
+  size_t blockTotal = 0;
   for (int level = 0; level < m; ++level) {
     const int lw = std::max(1, w >> level), lh = std::max(1, h >> level);
     blockTotal += BlockSize(f, lw, lh);
-    rgbaTotal += size_t(lw) * size_t(lh) * 4;
   }
   // The compressed pixels: in the object, or streamed from a resource file.
   std::vector<uint8_t> blocks;
@@ -330,30 +369,38 @@ bool ToRgba32(TypeTree::Value& tex, TextureIO& io, std::string* error) {
   }
   if (blocks.size() < blockTotal) return fail(name->bytes + ": " + std::to_string(blocks.size()) + " bytes, " +
                                               std::to_string(blockTotal) + " expected");
-  std::vector<uint8_t> rgba(rgbaTotal);
-  size_t in = 0, out = 0;
+  // Each level decoded to RGBA, then kept as it is (RGBA32) or encoded to ETC2.
+  std::vector<uint8_t> pixels;
+  size_t in = 0;
   for (int level = 0; level < m; ++level) {
     const int lw = std::max(1, w >> level), lh = std::max(1, h >> level);
-    if (!DecodeBlocks(f, blocks.data() + in, blocks.size() - in, lw, lh, rgba.data() + out))
+    std::vector<uint8_t> rgba(size_t(lw) * size_t(lh) * 4);
+    if (!DecodeBlocks(f, blocks.data() + in, blocks.size() - in, lw, lh, rgba.data()))
       return fail(name->bytes + ": mip " + std::to_string(level) + " does not decode");
     in += BlockSize(f, lw, lh);
-    out += size_t(lw) * size_t(lh) * 4;
+    if (target == kRgba32) {
+      pixels.insert(pixels.end(), rgba.begin(), rgba.end());
+    } else {
+      const auto etc = EncodeEtc2(rgba.data(), lw, lh, target == kEtc2Rgba8);
+      pixels.insert(pixels.end(), etc.begin(), etc.end());
+    }
   }
   if (streamed) {
     static const uint8_t zeros[16] = {};
     const size_t pad = size_t((16 - io.written % 16) % 16);  // Unity aligns resource data to 16
     if (!io.write || (pad && !io.write(zeros, pad))) return fail(name->bytes + ": cannot write " + io.path);
     io.written += pad;
-    if (!io.write(rgba.data(), rgba.size())) return fail(name->bytes + ": cannot write " + io.path);
+    if (!io.write(pixels.data(), pixels.size())) return fail(name->bytes + ": cannot write " + io.path);
     offset->SetInt(int64_t(io.written));
-    size->SetInt(int64_t(rgba.size()));
+    size->SetInt(int64_t(pixels.size()));
     path->bytes = io.path;
-    io.written += rgba.size();
+    io.written += pixels.size();
   } else {
-    data->bytes.assign(reinterpret_cast<const char*>(rgba.data()), rgba.size());
+    data->bytes.assign(reinterpret_cast<const char*>(pixels.data()), pixels.size());
   }
-  format->SetInt(4);  // RGBA32
-  complete->SetInt(int64_t(rgbaTotal));
+  format->SetInt(target);
+  complete->SetInt(int64_t(pixels.size()));
+  if (io.converted) io.converted(f, target);
   return true;
 }
 

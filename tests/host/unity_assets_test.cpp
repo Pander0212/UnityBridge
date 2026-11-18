@@ -178,6 +178,41 @@ int main() {
     CHECK(rgba[0] == 255 && rgba[3] == 0 && rgba[63] == 0);
   }
 
+  // M8: a DXT1 texture becomes ETC2_RGB (45) of the same size, a DXT5 one ETC2_RGBA8 (47); with
+  // targetRgba32Only both become RGBA32 (4) as before. 8x8, two mip levels (8x8 and 4x4).
+  {
+    const uint8_t red[8] = {0x00, 0xf8, 0x00, 0xf8, 0, 0, 0, 0};  // DXT1, all red
+    for (const int fmt : {10, 12}) {
+      for (const bool rgbaOnly : {false, true}) {
+        auto tex = TypeTree::Zero(TypeTree::Texture2D2021_3());
+        tex.Field("m_Name")->bytes = "t";
+        tex.Field("m_Width")->SetInt(8);
+        tex.Field("m_Height")->SetInt(8);
+        tex.Field("m_MipCount")->SetInt(2);
+        tex.Field("m_ImageCount")->SetInt(1);
+        tex.Field("m_TextureFormat")->SetInt(fmt);
+        std::string pixels;
+        const size_t blockBytes = fmt == 10 ? 8 : 16, blocks = 4 + 1;
+        for (size_t b = 0; b < blocks; ++b) {
+          if (fmt == 12) pixels.append("\xff\xff\0\0\0\0\0\0", 8);  // DXT5 alpha: opaque
+          pixels.append(reinterpret_cast<const char*>(red), 8);
+        }
+        CHECK(pixels.size() == blocks * blockBytes);
+        tex.Field("image data")->bytes = pixels;
+        UnityTextures::TextureIO io;
+        io.targetRgba32Only = rgbaOnly;
+        std::string why;
+        CHECK(UnityTextures::ToRgba32(tex, io, &why));
+        const int64_t want = rgbaOnly ? 4 : fmt == 10 ? 45 : 47;
+        const size_t wantSize = rgbaOnly ? (64 + 16) * 4 : blocks * (fmt == 10 ? 8 : 16);
+        CHECK(tex.Field("m_TextureFormat")->Int() == want);
+        CHECK(tex.Field("image data")->bytes.size() == wantSize);
+        CHECK(tex.Field("m_CompleteImageSize")->Int() == int64_t(wantSize));
+        if (!why.empty()) std::fprintf(stderr, "  ToRgba32: %s\n", why.c_str());
+      }
+    }
+  }
+
   // BC7: one block of each mode (random bits, the mode set), against texture2ddecoder (UnityPy's
   // decoder); a run of 100,000 random blocks matched it in all modes when the decoder was written.
   {

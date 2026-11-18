@@ -39,11 +39,15 @@ struct TextureIO {
   std::function<bool(const uint8_t* data, size_t size)> write;
   std::string path;
   uint64_t written = 0;  // bytes in the new file so far
+  bool targetRgba32Only = false;  // decode everything to RGBA32 (no ETC2), for tests and comparisons
+  std::function<void(int from, int to)> converted;  // told each conversion, for the census
 };
 
 // A DXT1/DXT5/BC7 Texture2D (a Value of the version's Texture2D tree) to RGBA32, every mip level: the format, the
 // image size and the pixels (in the object, or in the new resource file) change. False if it is not
 // one of those formats or a 2D texture; `error` says why when it is one but could not be converted.
+// M8: DXT1 and DXT5 become ETC2 (ETC2_RGB 45, ETC2_RGBA8 47: same size, and the iPhone's GPU samples
+// them), BC7 RGBA32; `io.targetRgba32Only` keeps the old RGBA32-for-all behaviour.
 bool ToRgba32(TypeTree::Value& texture, TextureIO& io, std::string* error);
 
 } // namespace UnityBridge::UnityTextures

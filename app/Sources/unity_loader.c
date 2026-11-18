@@ -298,7 +298,7 @@ static void convert_shaders(const char *unity_dir, int first)
         }
     }
     for (int k = 0; k < nres; k++)
-        if (add_entry(res_names[k], res_paths[k])) line("  textures: %s added (decoded RGBA32 data)", res_names[k]);
+        if (add_entry(res_names[k], res_paths[k])) line("  textures: %s added (converted texture data)", res_names[k]);
     line("  shaders: %d files converted now, %d from the cache", converted, cached);
 }
 

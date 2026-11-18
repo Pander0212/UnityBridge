@@ -144,7 +144,7 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   }
   const std::string census_ = (textures.empty() ? "" : "; " + textures) +
                               (stats.textures || stats.textureErrors
-                                   ? "; " + std::to_string(stats.textures) + " decoded to RGBA32" +
+                                   ? "; " + std::to_string(stats.textures) + " converted for the GPU (DXT1/DXT5 -> ETC2, BC7 -> RGBA32)" +
                                          (stats.textureErrors ? ", " + std::to_string(stats.textureErrors) + " not" : "")
                                    : "");
   if (!out) {
@@ -194,7 +194,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 13; }
+extern "C" int ub_shader_import_version(void) { return 14; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

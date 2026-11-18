@@ -1620,3 +1620,10 @@ that its host checks are done).
     dates from when the app's address space was a few GB (M3f). The logs now show about 63 GB with 50+ GB
     free, and a reservation costs no memory. If a full window does not fit, Husk's own mmap reserves the
     whole request, as before.
+- **ETC2 instead of RGBA32** (`engine/unity_textures.cpp`, etcpak fetched by `scripts/fetch-etcpak.sh`,
+  BSD-3-Clause, `third_party/etcpak/PROVENANCE.md`): DXT1 -> ETC2_RGB (45), DXT5 -> ETC2_RGBA8 (47),
+  each mip decoded to RGBA and re-encoded (padded to whole 4x4 blocks). BC7 stays RGBA32.
+  `TextureIO::targetRgba32Only` keeps the old path. On Snapshot!'s resources.assets, decoded
+  independently with UnityPy against the DXT originals: median 39.2 dB PSNR, worst 32.8 dB (33 textures),
+  so the channel order is right. A synthetic DXT1/DXT5 texture (two mips) in unity-assets-test checks
+  formats and sizes. Import version 14: everything is converted once more, Milf Idle Life included.

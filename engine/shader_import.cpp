@@ -145,7 +145,8 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   const auto census = UnityTextures::Census(*file, in.data, in.size);
   const std::string textures = UnityTextures::CensusLine(census);
   if (note && !textures.empty()) note(textures.c_str());
-  const bool dxt = census.count(10) || census.count(12) || census.count(25);  // DXT1, DXT5, BC7
+  // DXT1, DXT5, BC7, DXT1Crunched, DXT5Crunched
+  const bool dxt = census.count(10) || census.count(12) || census.count(25) || census.count(28) || census.count(29);
   if (!has(48) && !has(141) && !dxt) {  // Shader, BuildSettings, DXT1/DXT5 textures
     Put(log, logcap, textures.empty() ? "no shaders" : "no shaders; " + textures);
     return 0;
@@ -193,7 +194,7 @@ int Import(const char* src, const char* dst, char* log, size_t logcap, void (*no
   }
   const std::string census_ = (textures.empty() ? "" : "; " + textures) +
                               (stats.textures || stats.textureErrors
-                                   ? "; " + std::to_string(stats.textures) + " converted for the GPU (DXT1/DXT5 -> ETC2, BC7 -> RGBA32)" +
+                                   ? "; " + std::to_string(stats.textures) + " converted for the GPU (DXT1/DXT5, crunched too, -> ETC2, BC7 -> RGBA32)" +
                                          (stats.textureErrors ? ", " + std::to_string(stats.textureErrors) + " not" : "")
                                    : "");
   if (!out) {
@@ -243,7 +244,7 @@ void* Run(void* p) {
 
 } // namespace
 
-extern "C" int ub_shader_import_version(void) { return 15; }
+extern "C" int ub_shader_import_version(void) { return 16; }
 
 extern "C" int ub_shader_import(const char* src, const char* dst, char* log, size_t logcap,
                                 void (*note)(const char*)) {

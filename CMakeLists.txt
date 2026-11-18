@@ -74,10 +74,14 @@ if(EXISTS ${ETCPAK_DIR}/ProcessRGB.cpp)
   target_compile_options(etcpak PRIVATE -w)
 endif()
 
+# M8: Unity's crunch (scripts/fetch-crunch.sh into build/crunch, ZLIB): its header-only decoder, for
+# DXT1Crunched/DXT5Crunched textures.
+set(CRUNCH_INC ${CMAKE_CURRENT_SOURCE_DIR}/build/crunch/inc)
+
 # M4: HLSLcc (fetched by scripts/fetch-hlslcc.sh into build/hlslcc, MIT) and the D3D11 -> GLSL ES 3.0
 # translation around it; ub-shader-xlat runs it on a case exported from Unity's own shaders.
 set(HLSLCC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/build/hlslcc)
-if(EXISTS ${HLSLCC_DIR}/src/HLSLcc.cpp)
+if(EXISTS ${HLSLCC_DIR}/src/HLSLcc.cpp AND EXISTS ${CRUNCH_INC}/crn_decomp.h)
   file(GLOB HLSLCC_SOURCES ${HLSLCC_DIR}/src/*.cpp ${HLSLCC_DIR}/src/cbstring/*.c)
   add_library(hlslcc STATIC ${HLSLCC_SOURCES})
   target_include_directories(hlslcc SYSTEM PUBLIC ${HLSLCC_DIR} ${HLSLCC_DIR}/include
@@ -94,16 +98,18 @@ if(EXISTS ${HLSLCC_DIR}/src/HLSLcc.cpp)
   # M4c: the whole conversion of a serialized file, as the device runs it.
   add_executable(ub-shader-convert tools/shader_convert/main.cpp engine/shader_gles3.cpp engine/shader_xlat.cpp
                  engine/unity_file.cpp engine/unity_typetree.cpp engine/shader_import.cpp engine/unity_textures.cpp
-                 engine/unity_bundle.cpp)
+                 engine/unity_bundle.cpp engine/unity_crunch.cpp)
   target_link_libraries(ub-shader-convert PRIVATE hlslcc etcpak)
   target_include_directories(ub-shader-convert PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(ub-shader-convert SYSTEM PRIVATE ${CRUNCH_INC} ${CMAKE_CURRENT_SOURCE_DIR}/compat/crunch)
   target_compile_options(ub-shader-convert PRIVATE -Wall -Wextra)
   set_target_properties(ub-shader-convert PROPERTIES CXX_STANDARD 17)
 
   add_executable(unity-assets-test tests/host/unity_assets_test.cpp engine/shader_gles3.cpp engine/shader_xlat.cpp
-                 engine/unity_file.cpp engine/unity_typetree.cpp engine/unity_textures.cpp engine/unity_bundle.cpp)
+                 engine/unity_file.cpp engine/unity_typetree.cpp engine/unity_textures.cpp engine/unity_bundle.cpp engine/unity_crunch.cpp)
   target_link_libraries(unity-assets-test PRIVATE hlslcc etcpak)
   target_include_directories(unity-assets-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(unity-assets-test SYSTEM PRIVATE ${CRUNCH_INC} ${CMAKE_CURRENT_SOURCE_DIR}/compat/crunch)
   target_compile_options(unity-assets-test PRIVATE -Wall -Wextra)
   set_target_properties(unity-assets-test PROPERTIES CXX_STANDARD 17)
   add_test(NAME unity-assets-test COMMAND unity-assets-test)

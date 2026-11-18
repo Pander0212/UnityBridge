@@ -1627,7 +1627,7 @@ that its host checks are done).
   independently with UnityPy against the DXT originals: median 39.2 dB PSNR, worst 32.8 dB (33 textures),
   so the channel order is right. A synthetic DXT1/DXT5 texture (two mips) in unity-assets-test checks
   formats and sizes. Import version 14: everything is converted once more, Milf Idle Life included.
-- **Texturen in Bundles (M8c)**: `UnityBundle::Transform` packs a bundle out into its files
+- **Textures in bundles (M8c)**: `UnityBundle::Transform` packs a bundle out into its files
   (path, flags, bytes), lets an edit step change them or add new ones, and packs it back uncompressed
   (1 MiB blocks). The blocks' CRC-32 stays the original one: four bytes after the last file. Retarget is
   now just one such step. The import (version 15) retargets every serialized file in a bundle and runs
@@ -1639,4 +1639,12 @@ that its host checks are done).
     reads every converted bundle again; all 930 Texture2D decode (661 ETC2_RGB, 153 ETC2_RGBA8,
     18 RGBA32 from BC7, 97 DXT1Crunched untouched, 1 RGB24), against the originals median 38.9 dB PSNR,
     worst 34.7 dB.
-  - Still open: crunched textures, instancing cbuffers, video.
+  - Still open: instancing cbuffers, video.
+- **Crunched textures (M8d)**: DXT1Crunched (28) and DXT5Crunched (29) are unpacked to DXT1/DXT5 with the
+  header-only decoder of Unity's crunch fork (`engine/unity_crunch.cpp`; `scripts/fetch-crunch.sh`, branch
+  `unity`, rev 8708900e, ZLIB, `third_party/crunch/PROVENANCE.md`). Then they go to ETC2 like every DXT
+  texture. Apple has no `<malloc.h>`: `compat/crunch/malloc.h` maps `malloc_usable_size` to `malloc_size`.
+  Import version 16. Snapshot!'s 113 bundles: **927 textures converted, none failed** (all 97 crunched
+  ones among them). UnityPy: all 930 decode (758 ETC2_RGB, 153 ETC2_RGBA8, 18 RGBA32, 1 RGB24), median
+  38.6 dB, worst 31.9 dB.
+- **IPA run 98** (9e61e8f: ETC2 plus bundle conversion) built successfully.

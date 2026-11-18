@@ -4,6 +4,7 @@
 
 #include "ProcessRGB.hpp"  // etcpak (build/etcpak, BSD-3-Clause): ETC2 encoding
 
+#include "engine/unity_crunch.h"
 #include "engine/unity_typetree.h"
 
 #include <algorithm>
@@ -331,7 +332,10 @@ std::vector<uint8_t> EncodeEtc2(const uint8_t* rgba, int w, int h, bool alpha) {
 
 bool ToRgba32(TypeTree::Value& tex, TextureIO& io, std::string* error) {
   TypeTree::Value* format = tex.Field("m_TextureFormat");
-  if (!format || BlockBytes(int(format->Int())) == 0) return false;
+  // M8: crunched DXT (28, 29) is unpacked to DXT1/DXT5 first, then goes the same way.
+  const int original = format ? int(format->Int()) : 0;
+  const bool crunched = original == 28 || original == 29;
+  if (!format || (BlockBytes(original) == 0 && !crunched)) return false;
   const auto fail = [&](const std::string& why) {
     if (error) *error = why;
     return false;
@@ -345,7 +349,8 @@ bool ToRgba32(TypeTree::Value& tex, TextureIO& io, std::string* error) {
   TypeTree::Value* data = tex.Field("image data");
   TypeTree::Value* stream = tex.Field("m_StreamData");
   if (!name || !width || !height || !mips || !images || !complete || !data || !stream) return fail("fields missing");
-  const int f = int(format->Int()), w = int(width->Int()), h = int(height->Int()), m = int(mips->Int());
+  const int f = crunched ? (original == 28 ? 10 : 12) : original;
+  const int w = int(width->Int()), h = int(height->Int()), m = int(mips->Int());
   if (w <= 0 || h <= 0 || m <= 0 || m > 16 || images->Int() != 1) return fail(name->bytes + ": not a plain 2D texture");
   const int target = io.targetRgba32Only ? kRgba32 : MobileFormat(f);
   size_t blockTotal = 0;
@@ -366,6 +371,12 @@ bool ToRgba32(TypeTree::Value& tex, TextureIO& io, std::string* error) {
     blocks = std::move(*read);
   } else {
     blocks.assign(data->bytes.begin(), data->bytes.end());
+  }
+  if (crunched) {
+    std::string why;
+    auto dxt = UnityCrunch::Unpack(blocks.data(), blocks.size(), w, h, m, f == 12, &why);
+    if (!dxt) return fail(name->bytes + ": " + why);
+    blocks = std::move(*dxt);
   }
   if (blocks.size() < blockTotal) return fail(name->bytes + ": " + std::to_string(blocks.size()) + " bytes, " +
                                               std::to_string(blockTotal) + " expected");
@@ -400,7 +411,7 @@ bool ToRgba32(TypeTree::Value& tex, TextureIO& io, std::string* error) {
   }
   format->SetInt(target);
   complete->SetInt(int64_t(pixels.size()));
-  if (io.converted) io.converted(f, target);
+  if (io.converted) io.converted(original, target);
   return true;
 }
 

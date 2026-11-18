@@ -20,6 +20,7 @@
 // (initJni/nativeRender), which would initialise il2cpp a second time.
 #define _GNU_SOURCE  // Dl_info/dladdr on glibc (the host syntax check); Darwin has them anyway
 #include "husk-tl-bionic.h"
+#include "husk-tl-dexindex.h"
 #include "husk-tl-egl.h"
 #include "husk-tl-jni.h"
 #include "husk-tl-jni-internal.h"  // tl_jclass's natives, for the Unity 6 initJni diagnosis
@@ -906,7 +907,31 @@ static void ub_register_caller(const char *what)
 }
 static void ub_executeMainThreadJobs(tl_jcall *c) { (void)c; ub_register_caller("executeMainThreadJobs"); }
 static void ub_shouldSetGameState(tl_jcall *c) { ub_register_caller("shouldSetGameState"); c->ret.z = 0; }
+// Class.forName(String, boolean, ClassLoader): Unity 6's initJni and the engine's class lookups go
+// through the player's class loader (run 78: "UNIMPLEMENTED ... Class.forName(...ClassLoader)",
+// then getPackageCodePath() gave null and strlen(NULL) faulted on UnityMain). Husk answers only
+// forName(String). This applies its rule: the class is there if the framework or the APK has it,
+// otherwise ClassNotFoundException.
+static void ub_Class_forName3(tl_jcall *c)
+{
+    const char *given = c->args[0].l ? tl_jni_string(c->args[0].l) : NULL;
+    char name[300];
+    snprintf(name, sizeof(name), "%s", given ? given : "");
+    for (char *p = name; *p; p++) if (*p == '.') *p = '/';
+    const bool framework = !strncmp(name, "android/", 8) || !strncmp(name, "java/", 5) || !strncmp(name, "javax/", 6) ||
+                           !strncmp(name, "dalvik/", 7) || !strncmp(name, "libcore/", 8) || !strncmp(name, "sun/", 4) ||
+                           !strncmp(name, "org/json/", 9);
+    if (name[0] && (name[0] == '[' || framework || tl_dexidx_has_class(name))) {
+        c->ret.l = tl_jni_class_object(name);
+        fprintf(stderr, "UB_UNITY Class.forName(%s, loader) -> found\n", name);
+        return;
+    }
+    fprintf(stderr, "UB_UNITY Class.forName(%s, loader) -> ClassNotFoundException\n", name);
+    tl_jni_throw("java/lang/ClassNotFoundException", name);
+    c->ret.l = NULL;
+}
 static const tl_jhle g_dialog_hle[] = {
+    {"java/lang/Class", "forName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;", ub_Class_forName3},
     {"com/unity3d/player/UnityPlayer", "executeMainThreadJobs", "()V", ub_executeMainThreadJobs},
     {"com/unity3d/player/UnityPlayerForActivityOrService", "executeMainThreadJobs", "()V", ub_executeMainThreadJobs},
     {"com/unity3d/player/UnityPlayer", "shouldSetGameState", "()Z", ub_shouldSetGameState},
@@ -1175,6 +1200,8 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     snprintf(frames, sizeof(frames), "%s/../Frames", unity_dir);
     if (!start(apk, app_data, frames)) { ub_unity_thread_leave(); line("UNITY: did not get through NativeLoader.load"); return 1; }
     ub_memory_dump("UB_MEM after NativeLoader.load:");
+    // M6: JNI lookups (FindClass, Get*MethodID, unanswered Java methods) for the first 10 s of Unity 6's start.
+    tl_jni_set_trace(1);
     unity6_init_jni();
     line("tl_unity_run: initJni, then the UnityMain thread (surface, resume, nativeRender) ...");
     const bool running = tl_unity_run();
@@ -1183,6 +1210,7 @@ int ub_unity_engine_run(const char *unity_dir, const char *game_data, const char
     char report[2048];
     for (int s = 1; running && s <= 60; s++) {
         sleep(1);
+        if (s == 10) tl_jni_set_trace(0);
         if (s == 1 || s == 5 || s == 10 || s == 30 || s == 60) {
             ub_il2cpp_engine_report(report, sizeof(report));
             line("after %d s: %lu frames (%lu presented); libil2cpp.so %d dlopen, %d dlsym (%d not exported); %d regions "

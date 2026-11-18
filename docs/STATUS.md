@@ -1359,3 +1359,18 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
   - **il2cpp probe with Unity 6's GameAssembly**: BRIDGE, ICALL and INTERCEPT checks all pass, and
     `il2cpp_init` succeeds (metadata v39). Only two WinRT imports are unimplemented
     (RoSetErrorReportingFlags, WindowsCreateStringReference). M6b, the il2cpp side, works.
+- **Run 78**: UnityMain is registered (`thread 'UnityMain' registered for fault reports (first call:
+  executeMainThreadJobs)`), and the silent end now has a report: `EXC_BAD_ACCESS` at 0 in
+  `_platform_strlen`, called from libunity +0xabf27c. That is UnityMain's start-up after
+  `prctl(PR_SET_NAME, "UnityMain")`: `strlen(GetStringUTFChars(context.getPackageCodePath()))`, and the
+  call returned null. initJni keeps the context (a global ref of its argument), gets the player's
+  ClassLoader and loads classes with `Class.forName(String, boolean, ClassLoader)`. Husk answers only
+  `forName(String)`, so this one returned 0 ("UNIMPLEMENTED"). Without the class there is no method and
+  the call yields null.
+  - Fix: an HLE for the 3-argument `Class.forName` with Husk's own rule (framework or APK class:
+    found; otherwise ClassNotFoundException), with one log line per class.
+  - JNI lookup trace (`tl_jni_set_trace(1)`) for the first 10 s of the start, so the next missing
+    piece shows by name.
+  - Cache: the two Resources/ files were converted once more (expected, since their stamps moved to
+    `shaders/Resources/`), and the APK was rewritten for that reason. From the next start on, both should
+    come from the cache.

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import Metal
 import SwiftUI
 import UIKit
 
@@ -10,7 +11,10 @@ import UIKit
 @main
 struct ProbeApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    init() { ProbeLog.redirectStderr() }
+    init() {
+        ProbeLog.redirectStderr()
+        ProbeLog.gpuFeatures()
+    }
 
     var body: some Scene {
         WindowGroup { ProbeView() }
@@ -43,6 +47,17 @@ enum ProbeLog {
             .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown build"
         FileHandle.standardError.write(Data("\n==== UB Probe launch \(Date()) (\(build)) ====\n".utf8))
+    }
+
+    /// M8: which compressed texture formats this GPU samples. Desktop builds ship BC (DXT1/DXT5/BC7)
+    /// textures; decoding them all to RGBA32 multiplies their size by 4-8, too much for a game like
+    /// Snapshot!, so the converter keeps BC where the GPU can sample it.
+    static func gpuFeatures() {
+        guard let device = MTLCreateSystemDefaultDevice() else { write("GPU: no Metal device"); return }
+        var bc = false
+        if #available(iOS 16.4, *) { bc = device.supportsBCTextureCompression }
+        let families = [MTLGPUFamily.apple7, .apple8, .apple9].filter { device.supportsFamily($0) }.map { "\($0.rawValue)" }
+        write("GPU: \(device.name), BC textures \(bc ? "yes" : "no"), Apple families \(families.joined(separator: ","))")
     }
 
     static func write(_ line: String) {

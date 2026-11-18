@@ -41,7 +41,14 @@ static int RoundTrip(const char* path) {
                    v ? "writes back different bytes" : error.c_str());
     }
   }
-  const bool same = UnityFile::Rebuild(*file, data.data(), data.size(), {}) == data;
+  const auto rebuilt = UnityFile::Rebuild(*file, data.data(), data.size(), {});
+  const bool same = rebuilt == data;
+  if (!same) {  // where it differs first, to debug the parser
+    size_t at = 0;
+    while (at < rebuilt.size() && at < data.size() && rebuilt[at] == data[at]) ++at;
+    std::fprintf(stderr, "first difference at %#zx (sizes %zu / %zu, data at %#llx)\n", at, data.size(), rebuilt.size(),
+                 static_cast<unsigned long long>(file->dataOffset));
+  }
   std::printf("%s: Unity %s, %zu objects, %d shaders, %d not round-tripped, file %s\n", path,
               file->unityVersion.c_str(), file->objects.size(), shaders, bad, same ? "identical" : "DIFFERENT");
   return bad || !same;

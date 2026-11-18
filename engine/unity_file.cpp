@@ -119,8 +119,14 @@ std::vector<uint8_t> Rebuild(const File& file, const uint8_t* data, size_t size,
   // ones after it by its change, rounded to 8 (Unity aligns object data to 8).
   std::vector<size_t> order(file.objects.size());
   std::iota(order.begin(), order.end(), size_t {0});
-  std::sort(order.begin(), order.end(),
-            [&](size_t a, size_t b) { return file.objects[a].byteStart < file.objects[b].byteStart; });
+  // Stable, and an empty object before the one that starts where it does: 2022.3's globalgamemanagers
+  // has zero-size objects at the same offset as the next one (M8), which an unstable sort put after it,
+  // moving the empty object's start.
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    const Object &x = file.objects[a], &y = file.objects[b];
+    if (x.byteStart != y.byteStart) return x.byteStart < y.byteStart;
+    return (x.byteSize != 0) < (y.byteSize != 0);
+  });
   std::vector<uint64_t> newStart(file.objects.size());
   std::vector<uint8_t> body;
   uint64_t copied = 0;  // original data bytes handled so far

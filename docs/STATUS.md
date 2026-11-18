@@ -1583,3 +1583,28 @@ The run 73 IPA had expired, so run 74 rebuilt the same commit. On the iPhone:
     munmap, mprotect, madvise, pthread_create; 2021.3 also sched_getaffinity; libmain imports dlopen and
     dlsym. None imports mmap64 or android_dlopen_ext, so those two are dropped. That leaves exactly 8,
     and the loader logs a warning if it ever asks for more than Husk keeps.
+
+## M8: Snapshot! (Unity 2022.3.62f3) (2026-11-18, in progress)
+
+The user's next game. **il2cpp, not Mono** (GameAssembly.dll 25 MB, global-metadata.dat), Unity
+**2022.3.62f3**, 2.0 GB unpacked. Game files stay in the scratchpad (Milf Idle Life's were deleted now
+that its host checks are done).
+
+- **Android player 2022.3.62f3**: from Unity's own download (the macOS Android Support package, release
+  API: changeset 96770f904ca7). `libunity.so`, `libmain.so`, `unity default resources`, and `classes.dex`
+  made from `classes.jar` with D8 (`--min-api 23`). Handed to the user privately, not in the repository.
+- **Type trees 2022.3** (`engine/typetree_{shader,texture2d,buildsettings}_2022_3.inc`, `TreesFor("2022.3.")`):
+  every Shader in the game round-trips byte for byte (12 + 13 + 58 + 29 + 42 in unity_builtin_extra).
+- **Rebuild fix**: 2022.3's globalgamemanagers has zero-size objects at the same offset as the next
+  one. `std::sort` placed one after its neighbour and moved its start. A stable sort now puts empty
+  objects first, and the file is identical again.
+- **Import on the host**: graphics APIs `-> OpenGLES3`; more than 11,000 GLES3 programs. Open points:
+  - about 4,500 variants fail with "struct parameters in cbuffer UnityInstancing_PerDraw0", the
+    **GPU-instancing** variants of Standard and terrain shaders (the RDEF builder has no struct types);
+  - **crunched** textures (DXT1Crunched/DXT5Crunched, 73 in the data files, 97 in bundles) are not
+    decoded;
+  - **bundles**: 113 (312 MiB): 930 Texture2D (661 DXT1, 153 DXT5, 97 DXT1Crunched, 16 BC7), 833 Sprites,
+    **93 VideoClips** (mp4 overlays, 1664x896, part of the game). Only retargeting happens there so far.
+- **Size**: decoding every BC texture to RGBA32 multiplies it by 4 to 8, several GB for this game. The
+  app now logs at start whether the GPU samples BC textures (`MTLDevice.supportsBCTextureCompression`).
+  If it does, the converter can keep BC instead of decoding it.

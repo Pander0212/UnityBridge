@@ -40,9 +40,9 @@ const Node& BuildSettings2021_3();
 // Class 28 (Texture2D), Unity 2021.3.
 const Node& Texture2D2021_3();
 
-// The built-in trees of one Unity version (M6: 2021.3 and 6000.3).
+// The built-in trees of one Unity version (M6: 2021.3 and 6000.3; M8: 2022.3).
 struct Trees {
-  const char* version;  // "2021.3", "6000.3"
+  const char* version;  // "2021.3", "2022.3", "6000.3"
   const Node& shader;
   const Node& texture2d;
   const Node& buildSettings;

@@ -4,7 +4,7 @@
 # builds strip type trees, so the layout has to be built in. Structural data only.
 # Usage: python3 -I gen_typetree.py <class id> <class name> [version, default 2021.3.18]
 #          > engine/typetree_<name>_<major>_<minor>.inc
-#   48 Shader, 28 Texture2D, 141 BuildSettings; versions 2021.3.18, 6000.3.15
+#   48 Shader, 28 Texture2D, 141 BuildSettings; versions 2021.3.18, 2022.3.62, 6000.3.15
 import sys
 import UnityPy.helpers.Tpk as Tpk
 

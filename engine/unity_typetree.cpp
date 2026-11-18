@@ -236,7 +236,20 @@ const Trees* TreesFor(const std::string& unityVersion) {
   static std::unique_ptr<Node> s6, t6, b6;
   static const Trees v6000_3 {"6000.3", Table(shader6, std::size(shader6), s6), Table(texture6, std::size(texture6), t6),
                               Table(build6, std::size(build6), b6)};
+  static const Row shader22[] = {
+#include "engine/typetree_shader_2022_3.inc"
+  };
+  static const Row texture22[] = {
+#include "engine/typetree_texture2d_2022_3.inc"
+  };
+  static const Row build22[] = {
+#include "engine/typetree_buildsettings_2022_3.inc"
+  };
+  static std::unique_ptr<Node> s22, t22, b22;
+  static const Trees v2022_3 {"2022.3", Table(shader22, std::size(shader22), s22),
+                              Table(texture22, std::size(texture22), t22), Table(build22, std::size(build22), b22)};
   if (unityVersion.rfind("2021.3.", 0) == 0) return &v2021_3;
+  if (unityVersion.rfind("2022.3.", 0) == 0) return &v2022_3;  // M8: Snapshot! (2022.3.62f3)
   if (unityVersion.rfind("6000.3.", 0) == 0) return &v6000_3;
   return nullptr;
 }

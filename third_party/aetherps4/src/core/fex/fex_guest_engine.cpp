@@ -452,6 +452,15 @@ public:
       FEXCore::Config::Load();
       FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
       FEXCore::Config::Set(FEXCore::Config::CONFIG_DISABLETELEMETRY, "1");
+      // UnityBridge (M6): x86's memory order for vector moves and REP MOVS/STOS too. FEX's defaults
+      // keep only scalar loads and stores ordered; MSVC initialises and copies objects with SSE moves
+      // and rep stos, so another core could see a freshly published object with fields still null
+      // (Unity 6, runs 83-84: Stack<T>._array null in URP's RenderGraph, at random). BACHATA_FEX_WEAK_VECTOR_TSO
+      // turns this off again, for comparison.
+      if (std::getenv("BACHATA_FEX_WEAK_VECTOR_TSO") == nullptr) {
+        FEXCore::Config::Set(FEXCore::Config::CONFIG_VECTORTSOENABLED, "1");
+        FEXCore::Config::Set(FEXCore::Config::CONFIG_MEMCPYSETTSOENABLED, "1");
+      }
       const bool traceEnabled = std::getenv("BACHATA_FEX_TRACE") != nullptr;
       FEXCore::Config::Set(FEXCore::Config::CONFIG_X86DISASSEMBLE,
                            traceEnabled ? "1" : "0");
@@ -2472,6 +2481,8 @@ EngineResult<Core::GuestExecutionState> GuestEngine::CallWin64(Thread* idle, con
     native = idle->Native;
   }
   if (ImplState->Syscalls->QueryGuestExecutableRange(native, call.Rip).Size == 0) {
+    std::fprintf(stderr, "UB_FEX CallWin64(%#llx): not in guest code (%s)\n",
+                 static_cast<unsigned long long>(call.Rip), nested ? "nested" : "outermost");
     return Failure(EngineStage::Mapping, EFAULT);
   }
 
@@ -2481,11 +2492,20 @@ EngineResult<Core::GuestExecutionState> GuestEngine::CallWin64(Thread* idle, con
   // arguments follow at entry + 8 and entry + 0x28.
   const std::uint64_t below = nested ? frame.gregs[FEXCore::X86State::REG_RSP] : idle->Request.Rsp;
   const std::uint64_t needed = 0x18 + 8 * call.Stack.size() + 0x80;
-  if (below < needed) return Failure(EngineStage::Mapping, EFAULT);
+  if (below < needed) {
+    std::fprintf(stderr, "UB_FEX CallWin64(%#llx): guest stack at %#llx too low (%s)\n",
+                 static_cast<unsigned long long>(call.Rip), static_cast<unsigned long long>(below),
+                 nested ? "nested" : "outermost");
+    return Failure(EngineStage::Mapping, EFAULT);
+  }
   const std::uint64_t rsp = ((below - needed) & ~std::uint64_t {15}) + 8;
   const std::uint64_t args = rsp - 16 + 0x28;
   if (!call.Stack.empty()) {
     if (!ImplState->Syscalls->IsWritableRange(native, args, 8 * call.Stack.size())) {
+      // UnityBridge: say which check failed (run 70: three bridge calls failed here before a crash).
+      std::fprintf(stderr, "UB_FEX CallWin64(%#llx): stack arguments at %#llx not writable (%s, rsp %#llx)\n",
+                   static_cast<unsigned long long>(call.Rip), static_cast<unsigned long long>(args),
+                   nested ? "nested" : "outermost", static_cast<unsigned long long>(below));
       return Failure(EngineStage::Mapping, EFAULT);
     }
     std::memcpy(reinterpret_cast<void*>(args), call.Stack.data(), 8 * call.Stack.size());

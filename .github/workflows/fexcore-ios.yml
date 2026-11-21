@@ -3,6 +3,11 @@ name: Probe IPA
 # and the UnityBridgeProbe test app around them. Contains no game code and no Unity files.
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "macOS runner label (macos-latest, macos-26, macos-15, ...)"
+        required: false
+        default: macos-latest
   push:
     paths:
       - .github/workflows/fexcore-ios.yml
@@ -22,13 +27,22 @@ concurrency:
   cancel-in-progress: true
 jobs:
   build:
-    runs-on: macos-26
-    timeout-minutes: 75
+    # macos-26 stopped getting runners (run 88: queued 15 min twice, then cancelled). The label is
+    # chosen at dispatch; pushes use macos-latest. The ANGLE and ccache caches do not depend on it.
+    runs-on: ${{ inputs.runner || 'macos-latest' }}
+    timeout-minutes: 180  # the first ANGLE build is long; later runs restore it from the cache
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Pick Xcode
+        # The newest Xcode 26 the image has (the build needs the iOS 26 SDK), else the newest Xcode.
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$xcode" ] || xcode=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Using $xcode on $(sw_vers -productVersion)"
+          ls -d /Applications/Xcode_*.app
       - name: Reuse compiled objects
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
@@ -69,6 +83,28 @@ jobs:
           mkdir -p app/Generated
           cp build/testdll/ubtest.dll app/Generated/ubtest.dll
           ls -la app/Generated/ubtest.dll
+      - name: Fetch Husk's Android runtime
+        run: bash scripts/fetch-husk.sh
+      # ANGLE (EGL + GLES over Metal) for the Unity engine under Husk (M3f), built from WebKit's tree
+      # at the commit pinned in the script; cached by the script's contents.
+      - name: Reuse ANGLE
+        id: angle-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/angle
+          key: angle-ios-v1-${{ hashFiles('scripts/build-angle-ios.sh') }}
+      - name: Build ANGLE
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          bash scripts/build-angle-ios.sh 2>&1 | tee logs/build-angle.log
+      - name: Keep ANGLE
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/angle
+          key: angle-ios-v1-${{ hashFiles('scripts/build-angle-ios.sh') }}
       - name: Build the app
         run: |
           set -euo pipefail
@@ -79,6 +115,7 @@ jobs:
             printf '\n'
           } > app/Generated/Libraries.xcconfig
           cat app/Generated/Libraries.xcconfig
+          echo "commit ${GITHUB_SHA::7}, Probe IPA run ${GITHUB_RUN_NUMBER}" > app/Generated/build-info.txt
           (cd app && xcodegen generate)
           set -o pipefail
           xcodebuild build -project app/UnityBridgeProbe.xcodeproj -scheme UnityBridgeProbe -configuration Release \
@@ -93,6 +130,8 @@ jobs:
           test -f "$app/ubtest.dll" || { echo "ubtest.dll missing from the app bundle"; exit 1; }
           mkdir -p "$app/Frameworks"
           cp -R build/BreakpointJIT.framework "$app/Frameworks/"
+          cp build/angle/libANGLE-shared.dylib "$app/Frameworks/"
+          codesign --force --sign - --timestamp=none "$app/Frameworks/libANGLE-shared.dylib"
           # Ad-hoc placeholder signatures; the sideloading tool re-signs with the user's certificate.
           codesign --force --sign - --timestamp=none "$app/Frameworks/BreakpointJIT.framework"
           codesign --force --sign - --timestamp=none --entitlements app/UnityBridgeProbe.entitlements "$app"

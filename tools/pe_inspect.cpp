@@ -42,6 +42,7 @@ int main(int argc, char** argv) {
     for (const auto& f : Win32::Functions()) {
       if (f.dll == dll && f.name == imp.Symbol() && f.handler) { found = true; break; }
     }
+    if (!found && Win32::DataExport(dll, imp.Symbol())) found = true;  // a variable, not a function
     if (found) ++implemented;
     else missing.push_back(dll + "!" + imp.Symbol());
   }

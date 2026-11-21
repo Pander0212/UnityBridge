@@ -13,9 +13,17 @@ targets:
     platform: iOS
     sources:
       - Sources
+      # Husk's Android runtime (scripts/fetch-husk.sh, GPL-2.0-or-later), compiled in unmodified, as
+      # Husk's own app does it. Not in the repository: fetched at build time.
+      - path: ../build/husk/src/translation-layer
+      - path: ../build/husk/src/translation-layer-next
+        excludes:
+          - "husk-tl-unity-app.h"
       - path: ../third_party/madeira/madeira-jit.js
         buildPhase: resources
       - path: Generated/ubtest.dll
+        buildPhase: resources
+      - path: Generated/build-info.txt
         buildPhase: resources
     configFiles:
       Release: Generated/Libraries.xcconfig
@@ -29,3 +37,29 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: NO
         DEAD_CODE_STRIPPING: NO
+        # Husk's sources: ObjC with ARC, C as gnu11 (Husk's own project settings).
+        CLANG_ENABLE_OBJC_ARC: YES
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/../build/husk/src/translation-layer-next"
+          - "$(SRCROOT)/../build/husk/src/translation-layer"
+        # What Husk's runtime links against (its project.yml), all part of the iOS SDK.
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lz"
+          - "-lresolv"
+          - "-lsqlite3"
+          - "-framework AudioToolbox"
+          - "-framework CoreText"
+          - "-framework CoreGraphics"
+          - "-framework ImageIO"
+          - "-framework WebKit"
+          - "-framework VideoToolbox"
+          - "-framework CoreMedia"
+          - "-framework CoreVideo"
+          - "-framework Accelerate"
+          - "-framework Security"
+          - "-framework Metal"
+          - "-framework QuartzCore"
+          - "-framework CoreMotion"

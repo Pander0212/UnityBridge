@@ -12,11 +12,15 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <thread>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <pthread.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
 #else
@@ -133,11 +137,17 @@ uint64_t VirtualAlloc(CallContext& c) {
   if (size == 0) return SetError(ERROR_INVALID_PARAMETER, 0);
   std::scoped_lock lock {g_vmMutex};
   if (address && !(type & MEM_RESERVE)) {
-    // Commit inside an existing reservation.
+    // Commit inside an existing reservation. The guest works in 4 KiB pages, the host in 16 KiB ones:
+    // every host page the range touches is made accessible (committing a little more is harmless),
+    // and the answer is the 4 KiB page, as Windows gives it. Rounding only the start down, with the
+    // length taken from the original address, left the end of the range inaccessible: Boehm GC's heap
+    // growth (GC_remap) zeroed a block whose last pages were still PROT_NONE (run 92).
     if (FindReservation(address) == g_reservations.end()) return SetError(ERROR_INVALID_PARAMETER, 0);
     const uintptr_t start = address & ~(pageSize - 1);
-    if (mprotect(reinterpret_cast<void*>(start), size, HostProtection(protect)) != 0) return SetError(ERROR_NOT_ENOUGH_MEMORY, 0);
-    return start;
+    const uintptr_t end = (address + c.Arg(1) + pageSize - 1) & ~(pageSize - 1);
+    if (mprotect(reinterpret_cast<void*>(start), end - start, HostProtection(protect)) != 0)
+      return SetError(ERROR_NOT_ENOUGH_MEMORY, 0);
+    return address & ~uintptr_t {0xfff};
   }
   const int prot = (type & MEM_COMMIT) ? HostProtection(protect) : PROT_NONE;
   void* hint = reinterpret_cast<void*>(address);
@@ -148,6 +158,9 @@ uint64_t VirtualAlloc(CallContext& c) {
     return SetError(ERROR_INVALID_PARAMETER, 0);  // Windows fails when the requested range is taken
   }
   g_reservations[reinterpret_cast<uintptr_t>(p)] = {size, protect};
+  if (size >= (64u << 20))  // the big ones, to see who holds the address space
+    std::fprintf(stderr, "UB_WIN32 VirtualAlloc(%s) %zu MiB at %p\n", (type & MEM_COMMIT) ? "reserve+commit" : "reserve",
+                 size >> 20, p);
   return reinterpret_cast<uint64_t>(p);
 }
 
@@ -165,8 +178,16 @@ uint64_t VirtualFree(CallContext& c) {
     return kTrue;
   }
   if (type & MEM_DECOMMIT) {
-    const size_t span = size ? size : it->second.size;
-    mmap(reinterpret_cast<void*>(address), span, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    // Only host pages wholly inside the range are released (fresh, zero, inaccessible). One the guest
+    // decommits only part of (its 4 KiB pages within the host's 16 KiB) stays committed, since the
+    // rest of it may be live: Windows' own result for those pages, zero and inaccessible, is not
+    // something the guest may rely on.
+    const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    const uintptr_t from = size ? address : it->first;
+    const uintptr_t to = size ? address + size : it->first + it->second.size;
+    const uintptr_t start = (from + pageSize - 1) & ~(pageSize - 1), end = to & ~(pageSize - 1);
+    if (end > start)
+      mmap(reinterpret_cast<void*>(start), end - start, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
     return kTrue;
   }
   return SetError(ERROR_INVALID_PARAMETER, kFalse);
@@ -189,20 +210,114 @@ uint64_t VirtualProtect(CallContext& c) {
   return kTrue;
 }
 
+// The host mapping at or after `address`: [start, end) and its protection; nullopt if nothing is
+// mapped at or above it. Used by VirtualQuery for memory the guest did not VirtualAlloc: thread
+// stacks above all.
+struct HostRegionInfo {
+  uintptr_t start = 0, end = 0;
+  int prot = 0;
+};
+std::optional<HostRegionInfo> HostRegionAtOrAfter(uintptr_t address) {
+#if defined(__APPLE__)
+  vm_address_t start = static_cast<vm_address_t>(address);
+  vm_size_t size = 0;
+  vm_region_basic_info_data_64_t info {};
+  mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object = MACH_PORT_NULL;
+  if (vm_region_64(mach_task_self(), &start, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info),
+                   &count, &object) != KERN_SUCCESS)
+    return std::nullopt;
+  if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+  int prot = 0;
+  if (info.protection & VM_PROT_READ) prot |= PROT_READ;
+  if (info.protection & VM_PROT_WRITE) prot |= PROT_WRITE;
+  if (info.protection & VM_PROT_EXECUTE) prot |= PROT_EXEC;
+  return HostRegionInfo {start, start + size, prot};
+#else
+  FILE* maps = std::fopen("/proc/self/maps", "r");
+  if (!maps) return std::nullopt;
+  std::optional<HostRegionInfo> found;
+  char line[512];
+  while (std::fgets(line, sizeof(line), maps)) {
+    unsigned long long a = 0, b = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%llx-%llx %7s", &a, &b, perms) != 3 || b <= address) continue;
+    int prot = 0;
+    if (perms[0] == 'r') prot |= PROT_READ;
+    if (perms[1] == 'w') prot |= PROT_WRITE;
+    if (perms[2] == 'x') prot |= PROT_EXEC;
+    found = HostRegionInfo {static_cast<uintptr_t>(a), static_cast<uintptr_t>(b), prot};
+    break;
+  }
+  std::fclose(maps);
+  return found;
+#endif
+}
+
 uint64_t VirtualQuery(CallContext& c) {
   // MEMORY_BASIC_INFORMATION (48 bytes): BaseAddress, AllocationBase, AllocationProtect(4),
   // PartitionId(2)+pad, RegionSize, State(4), Protect(4), Type(4).
   const auto address = static_cast<uintptr_t>(c.Arg(0));
   auto* info = c.Ptr<uint8_t>(1);
   if (c.Arg(2) < 48 || info == nullptr) return SetError(ERROR_INSUFFICIENT_BUFFER, 0);
-  const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
   std::memset(info, 0, 48);
+  // A loaded image (M6): what Windows reports for it, MEM_IMAGE and committed, protections from the
+  // section flags. il2cpp's Boehm GC finds its roots this way: GC_register_root_section walks the
+  // module that holds the GC with VirtualQuery and adds every writable committed run as a root.
+  // These addresses used to come back MEM_FREE, so GameAssembly's .data and .bss (il2cpp's globals,
+  // static fields, metadata caches) were never scanned and live objects were collected: managed
+  // fields that were just set read back null (Unity 6, runs 83-85).
+  if (const auto region = ImageRegionAt(address)) {
+    constexpr uint32_t kExecute = 0x20000000, kRead = 0x40000000, kWrite = 0x80000000;
+    constexpr DWORD MEM_IMAGE = 0x1000000, PAGE_EXECUTE_WRITECOPY = 0x80;
+    const uint32_t ch = region->characteristics;
+    DWORD protect = PAGE_READONLY;  // headers and gaps
+    if (ch & kExecute) protect = (ch & kWrite) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+    else if (ch & kWrite) protect = PAGE_READWRITE;
+    else if (!(ch & kRead) && ch != 0) protect = PAGE_NOACCESS;
+    const uintptr_t page = address & ~uintptr_t {0xfff};
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 8), region->allocationBase);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 16), PAGE_EXECUTE_WRITECOPY);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), region->end - page);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_COMMIT);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), protect);
+    Store<DWORD>(reinterpret_cast<uint64_t>(info + 40), MEM_IMAGE);
+    return 48;
+  }
   std::scoped_lock lock {g_vmMutex};
   const auto it = FindReservation(address);
-  const uintptr_t page = address & ~(pageSize - 1);
+  // In the guest's pages, 4 KiB (GetSystemInfo's dwPageSize), not the host's 16 KiB: callers add
+  // RegionSize to their own 4 KiB-truncated address. Boehm's GC_get_stack_base does exactly that for a
+  // thread's stack top, and with a 16 KiB BaseAddress the sum overshot the stack by up to 12 KiB into
+  // the guard page above it (runs 90-91: a fault at stack top + 0x210 as soon as the GC scanned).
+  const uintptr_t page = address & ~uintptr_t {0xfff};
   if (it == g_reservations.end()) {
+    // A guest thread's stack: committed and writable, from its limit to its base. Boehm GC takes a
+    // thread's stack top from this, GC_get_stack_base: VirtualQuery(sp), BaseAddress + RegionSize when
+    // the page is committed and writable. Answering MEM_FREE for stacks (as this did) made every stack
+    // 0 bytes, so the GC never scanned one and freed objects only a stack referred to: URP's
+    // RenderGraphCompilationCache lost its fields right after construction (Stack<T>._array null,
+    // runs 83-89). Only noted guest stacks, and only while the host still has them mapped writable:
+    // reporting all host memory as committed (run 90) let the GC take the host's own regions as roots
+    // (GC_register_dynamic_libraries) and fault on one that became inaccessible.
+    if (const auto stack = GuestStackContaining(page)) {
+      const auto host = HostRegionAtOrAfter(page);
+      if (host && host->start <= page && (host->prot & PROT_WRITE)) {
+        Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
+        Store<uint64_t>(reinterpret_cast<uint64_t>(info + 8), stack->first);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 16), PAGE_READWRITE);
+        Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), stack->second - page);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_COMMIT);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), PAGE_READWRITE);
+        Store<DWORD>(reinterpret_cast<uint64_t>(info + 40), MEM_PRIVATE);
+        return 48;
+      }
+    }
+    // Anything else not VirtualAlloc'd (the host's own memory): one free page, as Windows would show
+    // memory outside the process's view.
     Store<uint64_t>(reinterpret_cast<uint64_t>(info), page);
-    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), pageSize);
+    Store<uint64_t>(reinterpret_cast<uint64_t>(info + 24), 0x1000);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 32), MEM_FREE);
     Store<DWORD>(reinterpret_cast<uint64_t>(info + 36), PAGE_NOACCESS);
     return 48;
@@ -285,6 +400,13 @@ uint64_t FlsSetValue(CallContext& c) {
   t_fls[i] = c.Arg(1);
   return kTrue;
 }
+// The UCRT's newer raw variant: same slot value, without touching the last-error code.
+uint64_t FlsGetValue2(CallContext& c) {
+  const auto i = static_cast<DWORD>(c.Arg(0));
+  return i < kTlsSlots ? t_fls[i] : 0;
+}
+// Our ANSI code page is UTF-8 (GetACP), so the *A file APIs behave as ANSI; report that.
+uint64_t AreFileApisANSI(CallContext&) { return kTrue; }
 
 // ---- synchronisation ---------------------------------------------------------------------
 // The guest's CRITICAL_SECTION / SRWLOCK / CONDITION_VARIABLE memory is only used as a key;
@@ -350,6 +472,21 @@ uint64_t SleepConditionVariableSRW(CallContext& c) {
   }
   return signalled ? kTrue : SetError(ERROR_TIMEOUT, kFalse);
 }
+// (cv, CRITICAL_SECTION*, ms): the section is held once by the caller (a recursive hold would stay
+// held while waiting, which Windows does not do either for a single level).
+uint64_t SleepConditionVariableCS(CallContext& c) {
+  constexpr DWORD INFINITE = 0xffffffffu, ERROR_TIMEOUT = 1460;
+  auto& cv = g_conditions.Get(c.Arg(0));
+  auto& section = g_criticalSections.Get(c.Arg(1));
+  const auto ms = static_cast<DWORD>(c.Arg(2));
+  std::unique_lock guard {section, std::adopt_lock};
+  bool signalled = true;
+  if (ms == INFINITE) cv.wait(guard);
+  else signalled = cv.wait_for(guard, std::chrono::milliseconds(ms)) == std::cv_status::no_timeout;
+  guard.release();
+  return signalled ? kTrue : SetError(ERROR_TIMEOUT, kFalse);
+}
+uint64_t InitializeConditionVariable(CallContext& c) { Store<uint64_t>(c.Arg(0), 0); g_conditions.Get(c.Arg(0)); return 0; }
 uint64_t WakeAllConditionVariable(CallContext& c) { g_conditions.Get(c.Arg(0)).notify_all(); return 0; }
 uint64_t WakeConditionVariable(CallContext& c) { g_conditions.Get(c.Arg(0)).notify_one(); return 0; }
 
@@ -478,7 +615,10 @@ uint64_t WideCharToMultiByte(CallContext& c) {
 std::mutex g_builtinMutex;
 uintptr_t g_nextBuiltin = 0x0000'7ffd'0000'0000ull;
 
-// HMODULE for a built-in DLL, registering it on first use. GetProcAddress on it hands out stubs.
+// HMODULE for a built-in DLL, registering it on first use. GetProcAddress on it hands out stubs for
+// the functions we implement and NULL for the rest, as Windows does for a name a DLL does not export:
+// callers probe (il2cpp tries BCryptGenRandomW before BCryptGenRandom), and a stub that only returns 0
+// read as success there (no random bytes: all-zero GUIDs, M4d).
 uintptr_t BuiltinHandle(std::string_view name) {
   std::scoped_lock lock {g_builtinMutex};
   if (const auto* m = FindModuleByName(name)) return m->base;
@@ -491,7 +631,11 @@ uintptr_t BuiltinHandle(std::string_view name) {
   m.lookup = [dll](std::string_view symbol) -> std::optional<uintptr_t> {
     auto* runtime = Runtime::Current();
     if (runtime == nullptr) return std::nullopt;
-    return runtime->Resolve(dll.find('.') == std::string::npos ? dll + ".dll" : dll, symbol);
+    const std::string file = dll.find('.') == std::string::npos ? dll + ".dll" : dll;
+    if (const auto data = DataExport(file, symbol)) return data;
+    const Function* f = runtime->Lookup(file, symbol);
+    if (f == nullptr || f->handler == nullptr) return std::nullopt;
+    return runtime->Resolve(file, symbol);
   };
   const auto base = m.base;
   RegisterModule(std::move(m));
@@ -544,6 +688,7 @@ uint64_t GetProcAddress(CallContext& c) {
   if (c.Arg(1) < 0x10000) return SetError(ERROR_PROC_NOT_FOUND, 0);  // by ordinal: not supported
   const std::string name(c.Ptr<const char>(1));
   const auto address = module->lookup ? module->lookup(name) : std::nullopt;
+  if (!address) std::fprintf(stderr, "UB_WIN32 GetProcAddress: no %s in %s\n", name.c_str(), module->name.c_str());
   return address ? *address : SetError(ERROR_PROC_NOT_FOUND, 0);
 }
 
@@ -618,6 +763,8 @@ uint64_t GetConsoleOutputCP(CallContext&) { return CP_UTF8; }
 
 } // namespace
 
+uint64_t ModuleHandle(const std::string& name) { return ModuleHandleFor(name); }
+
 void SetLastErrorValue(uint32_t error) { t_lastError = error; }
 uint32_t LastErrorValue() { return t_lastError; }
 
@@ -630,6 +777,9 @@ void RegisterKernel32(std::vector<Function>& out) {
   UB_FN(VirtualAlloc); UB_FN(VirtualFree); UB_FN(VirtualProtect); UB_FN(VirtualQuery);
   UB_FN(TlsAlloc); UB_FN(TlsFree); UB_FN(TlsGetValue); UB_FN(TlsSetValue);
   UB_FN(FlsAlloc); UB_FN(FlsFree); UB_FN(FlsGetValue); UB_FN(FlsSetValue);
+  out.push_back({"kernelbase.dll", "FlsGetValue2", &FlsGetValue2});  // the UCRT imports it from here
+  out.push_back({k, "FlsGetValue2", &FlsGetValue2});
+  UB_FN(AreFileApisANSI);
   UB_FN(InitializeCriticalSection); UB_FN(DeleteCriticalSection); UB_FN(EnterCriticalSection);
   UB_FN(LeaveCriticalSection); UB_FN(TryEnterCriticalSection);
   out.push_back({k, "InitializeCriticalSectionEx", &InitializeCriticalSection});
@@ -637,6 +787,7 @@ void RegisterKernel32(std::vector<Function>& out) {
   UB_FN(InitializeSRWLock); UB_FN(AcquireSRWLockExclusive); UB_FN(ReleaseSRWLockExclusive);
   UB_FN(AcquireSRWLockShared); UB_FN(ReleaseSRWLockShared);
   UB_FN(SleepConditionVariableSRW); UB_FN(WakeAllConditionVariable); UB_FN(WakeConditionVariable);
+  UB_FN(SleepConditionVariableCS); UB_FN(InitializeConditionVariable);
   UB_FN(InitializeSListHead);
   UB_FN(GetCurrentProcess); UB_FN(GetCurrentThread); UB_FN(GetCurrentProcessId); UB_FN(GetCurrentThreadId);
   UB_FN(IsDebuggerPresent);

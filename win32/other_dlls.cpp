@@ -167,31 +167,94 @@ uint64_t SafeArrayGetVartype(CallContext& c) {
 thread_local int t_comInits = 0;
 uint64_t CoInitializeEx(CallContext&) { return t_comInits++ == 0 ? S_OK : S_FALSE; }
 uint64_t CoUninitialize(CallContext&) { if (t_comInits > 0) --t_comInits; return 0; }
+// ETW (Event Tracing for Windows) and user info, for Unity 6's il2cpp (M6): tracing is off.
+uint64_t EventRegister(CallContext& c) {  // (provider GUID*, callback, context, REGHANDLE*)
+  if (c.Arg(3)) Store<uint64_t>(c.Arg(3), 1);
+  return 0;
+}
+uint64_t EventSuccess(CallContext&) { return 0; }
+uint64_t EnumerateTraceGuidsEx(CallContext&) { return 50; }        // ERROR_NOT_SUPPORTED
+uint64_t GetDynamicTimeZoneInformationEffectiveYears(CallContext&) { return 2; }  // ERROR_FILE_NOT_FOUND
+uint64_t EnumDynamicTimeZoneInformation(CallContext&) { return 259; }  // ERROR_NO_MORE_ITEMS
+uint64_t GetUserNameW(CallContext& c) {  // (buffer, DWORD* size including the terminator)
+  static const std::u16string name = u"Player";
+  auto* size = c.Ptr<DWORD>(1);
+  if (!size) return SetError(87, kFalse);
+  if (*size < name.size() + 1) {
+    *size = static_cast<DWORD>(name.size() + 1);
+    return SetError(122, kFalse);  // ERROR_INSUFFICIENT_BUFFER
+  }
+  std::memcpy(c.Ptr<char16_t>(0), name.c_str(), (name.size() + 1) * sizeof(char16_t));
+  *size = static_cast<DWORD>(name.size() + 1);
+  return kTrue;
+}
+
 uint64_t CoTaskMemAlloc(CallContext& c) { return reinterpret_cast<uint64_t>(std::malloc(c.Arg(0) ? c.Arg(0) : 1)); }
 uint64_t CoTaskMemFree(CallContext& c) { std::free(c.Ptr<void>(0)); return 0; }
 uint64_t CoGetContextToken(CallContext&) { return E_NOTIMPL; }
 uint64_t CoCreateFreeThreadedMarshaler(CallContext&) { return E_NOTIMPL; }
+// CoGetApartmentType(pAptType, pAptQualifier): report a multithreaded apartment, no qualifier.
+uint64_t CoGetApartmentType(CallContext& c) {
+  Store<DWORD>(c.Arg(0), 1);  // APTTYPE_MTA
+  Store<DWORD>(c.Arg(1), 0);  // APTTYPEQUALIFIER_NONE
+  return S_OK;
+}
 
 // ---- ADVAPI32: random numbers ------------------------------------------------------------
 
 constexpr uint64_t kCryptProvider = 0x7ffb'0000'0001ull;
 uint64_t CryptAcquireContextW(CallContext& c) { Store<uint64_t>(c.Arg(0), kCryptProvider); return kTrue; }
 uint64_t CryptReleaseContext(CallContext&) { return kTrue; }
-uint64_t CryptGenRandom(CallContext& c) {
-  auto* out = c.Ptr<uint8_t>(2);
-  size_t length = static_cast<DWORD>(c.Arg(1));
-  if (out == nullptr && length) return SetError(ERROR_INVALID_PARAMETER, kFalse);
+// Fills `out` from the system's generator.
+bool FillRandom(uint8_t* out, size_t length) {
 #if defined(__APPLE__)
   arc4random_buf(out, length);
 #else
   while (length) {
     const auto n = getrandom(out, length, 0);
-    if (n <= 0) return SetError(ERROR_NOT_SUPPORTED, kFalse);
+    if (n <= 0) return false;
     out += n;
     length -= static_cast<size_t>(n);
   }
 #endif
+  return true;
+}
+
+uint64_t CryptGenRandom(CallContext& c) {
+  auto* out = c.Ptr<uint8_t>(2);
+  const size_t length = static_cast<DWORD>(c.Arg(1));
+  if (out == nullptr && length) return SetError(ERROR_INVALID_PARAMETER, kFalse);
+  if (!FillRandom(out, length)) return SetError(ERROR_NOT_SUPPORTED, kFalse);
   return kTrue;
+}
+
+// ---- BCRYPT: random numbers (.NET's RandomNumberGenerator and Guid.NewGuid P/Invoke these) -------
+// NTSTATUS results. Only the RNG algorithm is provided; its handle is a constant.
+
+constexpr uint64_t kStatusSuccess = 0, kStatusInvalidParameter = 0xc000000d, kStatusNotFound = 0xc0000225;
+constexpr uint64_t kRngAlgorithm = 0x7ffb'0000'0002ull;
+constexpr uint32_t kUseSystemPreferredRng = 0x2;  // BCRYPT_USE_SYSTEM_PREFERRED_RNG
+
+uint64_t BCryptOpenAlgorithmProvider(CallContext& c) {  // (phAlgorithm, pszAlgId, pszImplementation, dwFlags)
+  const auto id = c.Arg(1) ? ToUtf8(ReadWide(c.Ptr<const char16_t>(1))) : std::string();
+  if (c.Arg(0) == 0) return kStatusInvalidParameter;
+  if (id != "RNG") {
+    std::fprintf(stderr, "UB_WIN32 BCryptOpenAlgorithmProvider(%s): only RNG is provided\n", id.c_str());
+    return kStatusNotFound;
+  }
+  Store<uint64_t>(c.Arg(0), kRngAlgorithm);
+  return kStatusSuccess;
+}
+
+uint64_t BCryptCloseAlgorithmProvider(CallContext&) { return kStatusSuccess; }
+
+uint64_t BCryptGenRandom(CallContext& c) {  // (hAlgorithm, pbBuffer, cbBuffer, dwFlags)
+  auto* out = c.Ptr<uint8_t>(1);
+  const size_t length = static_cast<uint32_t>(c.Arg(2));
+  const auto flags = static_cast<uint32_t>(c.Arg(3));
+  if (out == nullptr && length) return kStatusInvalidParameter;
+  if (!(flags & kUseSystemPreferredRng) && c.Arg(0) != kRngAlgorithm) return kStatusInvalidParameter;
+  return FillRandom(out, length) ? kStatusSuccess : kStatusInvalidParameter;
 }
 
 // ---- SHELL32: folder paths ---------------------------------------------------------------
@@ -297,11 +360,25 @@ void RegisterOtherDlls(std::vector<Function>& out) {
   out.push_back({o32, "CoTaskMemFree", &CoTaskMemFree});
   out.push_back({o32, "CoGetContextToken", &CoGetContextToken});
   out.push_back({o32, "CoCreateFreeThreadedMarshaler", &CoCreateFreeThreadedMarshaler});
+  out.push_back({o32, "CoGetApartmentType", &CoGetApartmentType});
 
   const std::string adv = "advapi32.dll";
   out.push_back({adv, "CryptAcquireContextW", &CryptAcquireContextW});
   out.push_back({adv, "CryptReleaseContext", &CryptReleaseContext});
   out.push_back({adv, "CryptGenRandom", &CryptGenRandom});
+  out.push_back({adv, "EventRegister", &EventRegister});
+  for (const char* name : {"EventUnregister", "EventSetInformation", "EventWrite", "EventWriteTransfer", "EventWriteEx",
+                           "EventWriteString", "EventActivityIdControl"})
+    out.push_back({adv, name, &EventSuccess});
+  out.push_back({adv, "EnumerateTraceGuidsEx", &EnumerateTraceGuidsEx});
+  out.push_back({adv, "GetDynamicTimeZoneInformationEffectiveYears", &GetDynamicTimeZoneInformationEffectiveYears});
+  out.push_back({adv, "EnumDynamicTimeZoneInformation", &EnumDynamicTimeZoneInformation});
+  out.push_back({adv, "GetUserNameW", &GetUserNameW});
+
+  const std::string bc = "bcrypt.dll";
+  out.push_back({bc, "BCryptOpenAlgorithmProvider", &BCryptOpenAlgorithmProvider});
+  out.push_back({bc, "BCryptCloseAlgorithmProvider", &BCryptCloseAlgorithmProvider});
+  out.push_back({bc, "BCryptGenRandom", &BCryptGenRandom});
 
   out.push_back({"shell32.dll", "SHGetFolderPathW", &SHGetFolderPathW});
   out.push_back({"shell32.dll", "SHGetKnownFolderPath", &SHGetKnownFolderPath});

@@ -12,7 +12,7 @@ LLD_LINK="${LLD_LINK:-lld-link}"
 "$CLANG" --target=x86_64-pc-windows-msvc -O2 -fno-stack-protector -mno-stack-arg-probe -ffreestanding \
     -c "$HERE/ubtest.c" -o "$OUT/ubtest.obj"
 libs=()
-for def in kernel32 oleaut32 other shell32 baselib; do
+for def in kernel32 oleaut32 other shell32 baselib ntdll; do
     "$DLLTOOL" -m i386:x86-64 -d "$HERE/$def.def" -l "$OUT/$def.lib"
     libs+=("$OUT/$def.lib")
 done

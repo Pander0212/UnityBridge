@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 
 namespace UnityBridge::Win32 {
@@ -20,7 +21,14 @@ static_assert(offsetof(CallContext, rsp) == 104);
 static_assert(offsetof(CallContext, ret) == 112);
 static_assert(offsetof(CallContext, xmmRet) == 120);
 static_assert(offsetof(CallContext, returnsFloat) == 136);
-static_assert(sizeof(CallContext) <= 144);
+static_assert(offsetof(CallContext, x86) == 144);
+static_assert(offsetof(CallContext, xmmFull) == 272);
+static_assert(offsetof(CallContext, resumeGpr) == 528);
+static_assert(offsetof(CallContext, resumeXmm) == 656);
+static_assert(offsetof(CallContext, rip) == 912);
+static_assert(offsetof(CallContext, resumeRip) == 920);
+static_assert(offsetof(CallContext, haveState) == 928);
+static_assert(offsetof(CallContext, resume) == 929);
 std::mutex g_mutex;
 Runtime* g_current = nullptr;
 
@@ -66,6 +74,7 @@ std::span<const Function> Functions() {
     RegisterKernel32Sync(out);
     RegisterKernel32Files(out);
     RegisterKernel32Misc(out);
+    RegisterNtdllSeh(out);
     return out;
   }();
   return table;
@@ -91,10 +100,40 @@ uint64_t CallGuest(uintptr_t function, std::initializer_list<uint64_t> arguments
 }
 void Runtime::SetCurrent(Runtime* runtime) { g_current = runtime; }
 
+const Function* Runtime::FunctionForStub(uintptr_t address) const {
+  const auto base = reinterpret_cast<uintptr_t>(stubs_.data());
+  if (address < base || address >= base + stubs_.size()) return nullptr;
+  const size_t id = (address - base) / kStubSize;
+  std::scoped_lock lock {g_mutex};
+  return id < bound_.size() ? bound_[id].function : nullptr;
+}
+
+std::pair<std::string_view, std::string_view> Runtime::StubName(uint32_t id) const {
+  std::scoped_lock lock {g_mutex};
+  if (id < bound_.size()) return {bound_[id].dll, bound_[id].name};
+  return {};
+}
+
+std::optional<uintptr_t> Runtime::BindCallback(Handler handler, std::string name) {
+  std::scoped_lock lock {g_mutex};
+  const auto id = static_cast<uint32_t>(bound_.size());
+  if ((size_t {id} + 1) * kStubSize > stubs_.size()) return std::nullopt;
+  Function& fn = callbacks_.emplace_back(Function {"callback", name, handler});
+  bound_.push_back({id, &fn, "callback", std::move(name)});
+  return EmitStub(id);
+}
+
 const Function* Runtime::Lookup(std::string_view dll, std::string_view name) const {
   const auto lowerDll = Lower(dll);
   for (const auto& f : Functions()) {
     if (f.dll == lowerDll && f.name == name) return &f;
+  }
+  return nullptr;
+}
+
+const Function* Runtime::LookupAnyDll(std::string_view name) const {
+  for (const auto& f : Functions()) {
+    if (f.name == name && f.handler) return &f;
   }
   return nullptr;
 }
@@ -120,7 +159,26 @@ uintptr_t Runtime::EmitStub(uint32_t id) {
   return reinterpret_cast<uintptr_t>(p);
 }
 
+namespace {
+std::mutex g_dataMutex;
+std::map<std::string, uintptr_t> g_dataExports;  // "dll!name" (dll lower case)
+} // namespace
+
+void RegisterDataExport(std::string_view dll, std::string_view name, uintptr_t address) {
+  std::scoped_lock lock {g_dataMutex};
+  g_dataExports[Lower(dll) + "!" + std::string(name)] = address;
+}
+
+std::optional<uintptr_t> DataExport(std::string_view dll, std::string_view name) {
+  (void)Functions();  // the Register* functions add their data exports when the table is built
+  std::scoped_lock lock {g_dataMutex};
+  const auto it = g_dataExports.find(Lower(dll) + "!" + std::string(name));
+  if (it == g_dataExports.end()) return std::nullopt;
+  return it->second;
+}
+
 std::optional<uintptr_t> Runtime::Resolve(std::string_view dll, std::string_view name) {
+  if (const auto data = DataExport(dll, name)) return data;
   std::scoped_lock lock {g_mutex};
   const auto lowerDll = Lower(dll);
   for (const auto& stub : bound_) {
